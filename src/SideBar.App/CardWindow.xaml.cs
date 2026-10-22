@@ -30,6 +30,9 @@ public sealed partial class CardWindow : Window
     {
         InitializeComponent();
         Title = Strings.AppName;
+        // ActualTheme известен только после загрузки дерева и меняется вместе с темой системы
+        Root.Loaded += (_, _) => ApplyStrokes();
+        Root.ActualThemeChanged += (_, _) => ApplyStrokes();
     }
 
     static double Now => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
@@ -77,11 +80,13 @@ public sealed partial class CardWindow : Window
         }
 #endif
 
-        // Рамку можно снять только после первого Show; показываем за краем экрана и сразу прячем.
+        // Рамку можно снять только после первого Show; показываем за краем экрана и прячем,
+        // если к этому моменту SetState не успел показать окно по-настоящему.
         DispatcherQueue.TryEnqueue(() =>
         {
             AppWindow.Show(false);
             WindowFrame.Strip(_hwnd);
+            if (_shown) return;
             AppWindow.Hide();
             WorkingSet.Trim();
         });
@@ -89,15 +94,26 @@ public sealed partial class CardWindow : Window
 
     public void Relayout(CardLayout layout, EdgeMode mode)
     {
+        if (_ticking)
+        {
+            CompositionTarget.Rendering -= OnTick;
+            _ticking = false;
+        }
         _layout = layout;
         _mode = mode;
+        _state = PanelState.Hidden;   // как EdgeStateMachine.Relayout
         ApplyStrokes();
-        int left = LeftNow(_state);
-        _pos.Reset(left);
-        double op = mode == EdgeMode.InPlace && EffectiveOpen(_state) ? 1 : 0;
-        _fade.Reset(op * FadeScale);
-        Root.Opacity = mode == EdgeMode.InPlace ? op : 1;
-        PlaceAt(left);
+        int hidden = layout.LeftFor(PanelState.Hidden);
+        _pos.Reset(hidden);
+        _fade.Reset(0);
+        Root.Opacity = mode == EdgeMode.InPlace ? 0 : 1;
+        PlaceAt(hidden);
+        if (_shown)
+        {
+            AppWindow.Hide();
+            _shown = false;
+            WorkingSet.Trim();
+        }
     }
 
     public void SetState(PanelState s)
@@ -128,10 +144,6 @@ public sealed partial class CardWindow : Window
 
     static bool EffectiveOpen(PanelState s) => s == PanelState.Open;
 
-    int LeftNow(PanelState s) => _mode == EdgeMode.Slide
-        ? _layout.LeftFor(s)
-        : _layout.LeftFor(EffectiveOpen(s) ? PanelState.Open : PanelState.Hidden);
-
     void Show()
     {
         AppWindow.Show(false);
@@ -156,6 +168,7 @@ public sealed partial class CardWindow : Window
         bool settled = spring.IsSettled;
         double value = settled ? spring.Target : spring.Position;
         if (slide) WindowFrame.MoveTo(_hwnd, (int)Math.Round(value), _layout.Top);
+        // Фейдится только содержимое: DesktopAcrylicBackdrop появляется сразу (слоистая альфа окна ломает акрил, S10).
         else Root.Opacity = Math.Clamp(value / FadeScale, 0, 1);
         if (!settled) return;
 
@@ -173,6 +186,7 @@ public sealed partial class CardWindow : Window
     // Все линии — 1 физ. пиксель (в epx = 1/scale); пунктир втянут на полпикселя, т.к. штрих центрируется на геометрии.
     void ApplyStrokes()
     {
+        if (_hwnd == 0) return;
         double scale = Math.Max(WindowFrame.GetDpi(_hwnd), 96) / 96.0;
         bool dark = Root.ActualTheme != ElementTheme.Light;
         var brush = new SolidColorBrush(dark ? Windows.UI.Color.FromArgb(0x70, 0x8C, 0x8C, 0x8C) : Windows.UI.Color.FromArgb(0x50, 0x40, 0x40, 0x40));
