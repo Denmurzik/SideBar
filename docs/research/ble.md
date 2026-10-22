@@ -69,11 +69,7 @@ Fast Initiation (`fast_init_ble_beacon.h`, V1): AD Service Data (0x16), UUID `FE
 
 Критерий успеха: телефон, который сам ничего не рекламирует (экран «Получить» НЕ открыт), после нашего beacon начинает отвечать по mDNS, и `nearby discover` его находит; либо появляется уведомление «устройство рядом делится».
 Команды (два окна PowerShell, из `C:\D\den4ik\SideBar\spikes`):
-1. Контроль без beacon: `nearby\SideBar.Nearby.Cliin\Debug
-et10.0-windows10.0.26100.0
-earby.exe discover --timeout 15` — телефон (экран включён, разблокирован, Quick Share видимость «Все») обычно не найден.
-2. Окно A: `dotnet blein\Debug
-et10.0-windows10.0.26100.0\Ble.dll publish 60 --static`. Окно B (через 3-5 с): `...
-earby.exe discover --timeout 30`. Смотреть: появился ли Pixel 9; реакция телефона (уведомление).
+1. Контроль без beacon: `nearby\SideBar.Nearby.Cli\bin\Debug\net10.0-windows10.0.26100.0\nearby.exe discover --timeout 15` — телефон (экран включён, разблокирован, Quick Share видимость «Все») обычно не найден.
+2. Окно A: `dotnet ble\bin\Debug\net10.0-windows10.0.26100.0\Ble.dll publish 60 --static`. Окно B (через 3-5 с): `nearby\SideBar.Nearby.Cli\bin\Debug\net10.0-windows10.0.26100.0\nearby.exe discover --timeout 30`. Смотреть: появился ли Pixel 9; реакция телефона (уведомление).
 3. Если нет: варианты (по 60 с, discover параллельно): `publish 60 --ext` (extended как у Android), `publish 60 --type silent --ext`, `publish 60 --ext --hash selfshare` (для «Ваших устройств»: `nearby discover --self`), `publish 60 --legacy --cert 0`.
 4. Для сверки: `Ble watch 60` при открытом на телефоне «Поделиться -> Quick Share» печатает тела `FE2C` телефона целиком (`body=...`): наши варианты можно сравнить побайтно (`salt`/`hash` эфемерные).

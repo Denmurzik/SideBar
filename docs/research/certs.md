@@ -1,5 +1,9 @@
 # S3 — формат сертификатов официального Quick Share
 
+> Актуальные решения — `docs/PLAN.md`; требования к продукту по итогам ревью — `docs/research/review-2026-10-22.md`.
+> Часть утверждений ниже (статусы «не проверено», размеры/вариант A в ui.md) устарела — источник истины PLAN.
+
+
 Дата: 2026-10-22. Код: `spikes/certs/` (C#, `net10.0`, без NuGet-зависимостей). Парсер печатает только сводку (счётчики, длины, номера полей, булевы проверки).
 Источник протокола — `google/nearby` (`sharing/certificates/*`, `sharing/proto/rpc_resources.proto`, `encrypted_metadata.proto`, `enums.proto`), Apache-2.0.
 

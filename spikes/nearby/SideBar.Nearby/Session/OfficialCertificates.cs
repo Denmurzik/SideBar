@@ -91,7 +91,7 @@ public sealed class OfficialCertIdentity : IShareIdentity
         var inner = new CertificateIdentity(
             new PrivateCertificateData(self.SecretKey, self.MetadataEncryptionKey, self.KeyPairPkcs8, salts),
             peers.Values.Select(c => new PublicCertificateData(c.SecretId, c.SecretKey, c.PublicKey, c.KeyTag)).ToList());
-        return new OfficialCertIdentity(inner, peers, summary, self.PublicKeySpki());
+        return new OfficialCertIdentity(inner, peers, summary, self.PublicKeySpki()) { _selfSecret = self.SecretKey };
     }
 
     public bool HasSelfCertificate => Summary.SelfShareCertSelected;
@@ -168,6 +168,14 @@ public sealed class OfficialCertIdentity : IShareIdentity
     }
 
     private readonly byte[]? _selfSpki;
+    private byte[]? _selfSecret;
+
+    /// <summary>
+    /// Experimental: HKDF-SHA256(ikm = input, salt = SELF_SHARE secret_key) truncated to <paramref name="length"/> bytes,
+    /// a hypothesis for the Fast Initiation secret_id_hash. The key never leaves the process.
+    /// </summary>
+    public byte[]? DeriveFastInitHash(ReadOnlySpan<byte> input, int length) =>
+        _selfSecret is null ? null : HKDF.DeriveKey(HashAlgorithmName.SHA256, input.ToArray(), length, _selfSecret, []);
 
     /// <summary>Offline self-check of the own certificate: sign a random token and verify it with the own public key.</summary>
     public bool SelfTestSignature()

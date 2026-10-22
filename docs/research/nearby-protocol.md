@@ -1,5 +1,9 @@
 # Quick Share по Wi-Fi LAN: что реализовано в спайке S1/S2
 
+> Актуальные решения — `docs/PLAN.md`; требования к продукту по итогам ревью — `docs/research/review-2026-10-22.md`.
+> Часть утверждений ниже (статусы «не проверено», размеры/вариант A в ui.md) устарела — источник истины PLAN.
+
+
 Код: `spikes/nearby/` (`SideBar.Nearby` — библиотека, `SideBar.Nearby.Cli` — консоль `nearby.exe`, `SideBar.Nearby.Tests`).
 Режим только «Все» (EVERYONE), медиум только Wi-Fi LAN. Сертификаты («Свои устройства») не делались — точка расширения `IShareIdentity`.
 
