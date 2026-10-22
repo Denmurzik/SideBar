@@ -23,6 +23,7 @@ public partial class App : Application
     EdgeMode _mode;
     PxRect _primary;
     int _generation;
+    Timer? _startupTrim;
 
     public App() => InitializeComponent();
 
@@ -39,6 +40,8 @@ public partial class App : Application
         _machine = new EdgeStateMachine(layout, mode);
         _trimmer.OnHidden();
         _hook = new MouseHook(OnMouse);
+        // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
+        _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) _trimmer.OnHidden(); }), null, 2000, Timeout.Infinite);
     }
 
     /// <summary>Пересчёт по WM_DISPLAYCHANGE / WM_DPICHANGED / WM_SETTINGCHANGE. Только из UI-потока.</summary>
