@@ -24,6 +24,7 @@ public sealed partial class CardWindow : Window
     EdgeMode _mode;
     PanelState _state = PanelState.Hidden;
     bool _shown, _ticking;
+    AlwaysActiveAcrylicBackdrop? _backdrop;
 
     public event Action<PanelState>? Settled;
 
@@ -32,8 +33,8 @@ public sealed partial class CardWindow : Window
         InitializeComponent();
         Title = Strings.AppName;
         // ActualTheme известен только после загрузки дерева и меняется вместе с темой системы
-        Root.Loaded += (_, _) => ApplyStrokes();
-        Root.ActualThemeChanged += (_, _) => ApplyStrokes();
+        Root.Loaded += (_, _) => { ApplyStrokes(); _backdrop?.SetTheme(Root.ActualTheme); };
+        Root.ActualThemeChanged += (_, _) => { ApplyStrokes(); _backdrop?.SetTheme(Root.ActualTheme); };
     }
 
     static double Now => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
@@ -56,7 +57,8 @@ public sealed partial class CardWindow : Window
         WindowFrame.MakeTool(_hwnd);
         Dwm.RoundCornersNoBorder(_hwnd);
 
-        SystemBackdrop = new DesktopAcrylicBackdrop();
+        _backdrop = new AlwaysActiveAcrylicBackdrop();
+        SystemBackdrop = _backdrop;
         Fill.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x40, 0x20, 0x20, 0x20));
 
         ApplyStrokes();
