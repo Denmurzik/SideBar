@@ -52,7 +52,7 @@ public partial class App : Application
 
         string exe = Environment.ProcessPath!;
         var autostart = new Autostart();
-        autostart.RepairPath(exe);
+        try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
         _messages = new MessageWindow(OnDisplaysChanged);
         _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp));
 
@@ -62,10 +62,13 @@ public partial class App : Application
     // порядок важен: сначала снять хук, затем убрать иконку
     void ExitApp()
     {
-        _hook?.Dispose();
-        _tray?.Dispose();
-        _messages?.Dispose();
-        Environment.Exit(0);
+        try
+        {
+            try { _hook?.Dispose(); } catch { }
+            try { _tray?.Dispose(); } catch { }
+            try { _messages?.Dispose(); } catch { }
+        }
+        finally { Environment.Exit(0); }
     }
 
     /// <summary>Пересчёт по WM_DISPLAYCHANGE / WM_DPICHANGED / WM_SETTINGCHANGE. Только из UI-потока.</summary>

@@ -7,16 +7,14 @@ namespace SideBar.Tray;
 sealed unsafe class TrayIcon : IDisposable
 {
     const uint NIM_ADD = 0, NIM_DELETE = 2, NIM_SETVERSION = 4;
-    const uint NIF_MESSAGE = 1, NIF_ICON = 2, NIF_TIP = 4;
+    const uint NIF_MESSAGE = 1, NIF_ICON = 2, NIF_TIP = 4, NIF_SHOWTIP = 0x80;
     const uint NOTIFYICON_VERSION_4 = 4;
     const uint CallbackMessage = 0x8001;   // WM_APP + 1
-    const uint WM_CONTEXTMENU = 0x7B, WM_RBUTTONUP = 0x205, WM_NULL = 0;
+    const uint WM_CONTEXTMENU = 0x7B, WM_NULL = 0;
     const uint MF_STRING = 0, MF_CHECKED = 8;
     const uint TPM_RIGHTBUTTON = 2, TPM_BOTTOMALIGN = 0x20, TPM_RETURNCMD = 0x100;
     const int SM_CXSMICON = 49;
     const int CmdAutostart = 1, CmdExit = 2;
-
-    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
 
     [StructLayout(LayoutKind.Sequential)]
     struct NOTIFYICONDATAW
@@ -43,7 +41,6 @@ sealed unsafe class TrayIcon : IDisposable
     [DllImport("user32.dll")] static extern int TrackPopupMenu(nint menu, uint flags, int x, int y, int reserved, nint hwnd, nint rect);
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(nint hwnd);
     [DllImport("user32.dll")] static extern bool PostMessageW(nint hwnd, uint msg, nint w, nint l);
-    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT pt);
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint PrivateExtractIconsW(string file, int index, int cx, int cy, nint* icons, uint* ids, uint count, uint flags);
     [DllImport("user32.dll")] static extern bool DestroyIcon(nint icon);
@@ -80,12 +77,12 @@ sealed unsafe class TrayIcon : IDisposable
     void Add()
     {
         var d = Data();
-        d.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        d.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         d.uCallbackMessage = CallbackMessage;
         d.hIcon = _icon;
         int n = Math.Min(Strings.AppName.Length, 127);
         for (int i = 0; i < n; i++) d.szTip[i] = Strings.AppName[i];
-        _added = Shell_NotifyIconW(NIM_ADD, &d);
+        _added |= Shell_NotifyIconW(NIM_ADD, &d);   // повторный ADD после TaskbarCreated может вернуть false, если иконка уже есть
         d.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &d);
     }
@@ -96,18 +93,17 @@ sealed unsafe class TrayIcon : IDisposable
     {
         if (msg == _taskbarCreated) { Add(); return; }   // Проводник перезапущен — иконки пропали
         if (msg != CallbackMessage) return;
-        uint ev = (uint)lParam & 0xFFFF;
-        if (ev == WM_CONTEXTMENU || ev == WM_RBUTTONUP) ShowMenu();
+        // в v4 оболочка шлёт WM_CONTEXTMENU, якорь меню — в wParam (x — младшее слово, y — старшее)
+        if ((uint)lParam % 0x10000 == WM_CONTEXTMENU) ShowMenu((short)((long)wParam & 0xFFFF), (short)(((long)wParam >> 16) & 0xFFFF));
     }
 
-    void ShowMenu()
+    void ShowMenu(int x, int y)
     {
-        GetCursorPos(out var pt);
         nint menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING | (_autostart.IsEnabled ? MF_CHECKED : 0), CmdAutostart, Strings.Autostart);
         AppendMenuW(menu, MF_STRING, CmdExit, Strings.Exit);
         SetForegroundWindow(_window.Handle);   // иначе меню не закрывается кликом вне него
-        int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.X, pt.Y, 0, _window.Handle, 0);
+        int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, x, y, 0, _window.Handle, 0);
         PostMessageW(_window.Handle, WM_NULL, 0, 0);
         DestroyMenu(menu);
 
