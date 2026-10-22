@@ -442,3 +442,6 @@ spikes/**/out-*/
 spikes/**/*.log
 spikes/**/*.png
 spikes/**/*.csv
+
+# Superpowers SDD workspaces
+.superpowers/
