@@ -1,0 +1,155 @@
+// Certificate model and crypto, following google/nearby sharing/certificates (Apache-2.0):
+//   nearby_share_private_certificate.cc, nearby_share_decrypted_public_certificate.cc, common.cc.
+using System.Security.Cryptography;
+using System.Text.Json;
+
+namespace SideBar.Certs;
+
+public sealed class PrivateCertificate
+{
+    public int Visibility;
+    public DateTimeOffset NotBefore, NotAfter;
+    public byte[] KeyPairPkcs8 = [];
+    public byte[] SecretKey = [];
+    public byte[] MetadataEncryptionKey = [];
+    public byte[] Id = [];
+    public byte[] UnencryptedMetadata = [];
+    public List<byte[]> ConsumedSalts = [];
+
+    // preferences.json -> nearby_sharing.private_certificate_list[]
+    public static PrivateCertificate FromJson(JsonElement e) => new()
+    {
+        Visibility = e.GetProperty("visibility").GetInt32(),
+        NotBefore = FromUnixNanos(e.GetProperty("not_before").GetInt64()),
+        NotAfter = FromUnixNanos(e.GetProperty("not_after").GetInt64()),
+        KeyPairPkcs8 = B64Url(e.GetProperty("key_pair").GetString()!),
+        SecretKey = B64Url(e.GetProperty("secret_key").GetString()!),
+        MetadataEncryptionKey = B64Url(e.GetProperty("metadata_encryption_key").GetString()!),
+        Id = B64Url(e.GetProperty("id").GetString()!),
+        UnencryptedMetadata = B64Url(e.GetProperty("unencrypted_metadata").GetString()!),
+        ConsumedSalts = Salts(e.GetProperty("consumed_salts").GetString()!),
+    };
+
+    static DateTimeOffset FromUnixNanos(long ns) => DateTimeOffset.FromUnixTimeMilliseconds(ns / 1_000_000);
+
+    static List<byte[]> Salts(string hex)
+    {
+        var l = new List<byte[]>();
+        for (int i = 0; i + 4 <= hex.Length; i += 4) l.Add(Convert.FromHexString(hex.AsSpan(i, 4)));
+        return l;
+    }
+
+    public static byte[] B64Url(string s)
+    {
+        s = s.Replace('-', '+').Replace('_', '/');
+        s = s.PadRight((s.Length + 3) / 4 * 4, '=');
+        return Convert.FromBase64String(s);
+    }
+
+    // Picks a salt not in ConsumedSalts (used only in-memory by the spike).
+    public (byte[] Salt, byte[] EncryptedKey) EncryptMetadataKey(byte[] salt) =>
+        (salt, NearbyCrypto.Ctr(SecretKey, salt, MetadataEncryptionKey));
+
+    public byte[] Sign(byte[] payload)
+    {
+        using var ec = ECDsa.Create();
+        ec.ImportPkcs8PrivateKey(KeyPairPkcs8, out _);
+        return ec.SignData(payload, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
+    }
+
+    public byte[] PublicKeySpki()
+    {
+        using var ec = ECDsa.Create();
+        ec.ImportPkcs8PrivateKey(KeyPairPkcs8, out _);
+        return ec.ExportSubjectPublicKeyInfo();
+    }
+}
+
+public sealed class PublicCertificate
+{
+    public byte[] SecretId = [], SecretKey = [], PublicKey = [], MetadataEncryptionKey = [], EncryptedMetadata = [], KeyTag = [];
+    public long StartSeconds, EndSeconds;
+    public bool ForSelfShare;
+    public string BindingId = "";
+    public List<PbField> Raw = [];
+
+    public static PublicCertificate Parse(byte[] value)
+    {
+        var f = Proto.Parse(value);
+        var ts = (int n) => { var b = Proto.Bytes(f, n); return b is null ? 0 : Proto.Int(Proto.Parse(b), 1); };
+        return new()
+        {
+            Raw = f,
+            SecretId = Proto.Bytes(f, 1) ?? [],
+            SecretKey = Proto.Bytes(f, 2) ?? [],
+            PublicKey = Proto.Bytes(f, 3) ?? [],
+            StartSeconds = ts(4),
+            EndSeconds = ts(5),
+            MetadataEncryptionKey = Proto.Bytes(f, 7) ?? [],
+            EncryptedMetadata = Proto.Bytes(f, 8) ?? [],
+            KeyTag = Proto.Bytes(f, 9) ?? [],
+            ForSelfShare = Proto.Int(f, 10) != 0,
+            BindingId = System.Text.Encoding.UTF8.GetString(Proto.Bytes(f, 12) ?? []),
+        };
+    }
+
+    public bool IsStructurallyValid =>
+        StartSeconds < EndSeconds && PublicKey.Length > 0 && SecretKey.Length == 32 && SecretId.Length == 32 &&
+        EncryptedMetadata.Length > 0 && KeyTag.Length == 32;
+
+    // Receiver side: encrypted metadata key (salt + 14 bytes from the advertisement) -> metadata key,
+    // verified against the key tag. Returns null when this certificate is not the sender's.
+    public byte[]? TryDecryptMetadataKey(byte[] salt, byte[] encryptedKey)
+    {
+        if (!IsStructurallyValid) return null;
+        var key = NearbyCrypto.Ctr(SecretKey, salt, encryptedKey);
+        var tag = HMACSHA256.HashData(new byte[32], key);
+        return CryptographicOperations.FixedTimeEquals(tag, KeyTag) ? key : null;
+    }
+
+    public byte[]? DecryptMetadata(byte[] metadataKey)
+    {
+        var aesKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, metadataKey, 32, salt: [], info: []);
+        var nonce = HKDF.DeriveKey(HashAlgorithmName.SHA256, SecretKey, 12, salt: [], info: []);
+        if (EncryptedMetadata.Length < 16) return null;
+        var ct = EncryptedMetadata.AsSpan(0, EncryptedMetadata.Length - 16);
+        var tag = EncryptedMetadata.AsSpan(EncryptedMetadata.Length - 16);
+        var pt = new byte[ct.Length];
+        try
+        {
+            using var gcm = new AesGcm(aesKey, 16);
+            gcm.Decrypt(nonce, ct, tag, pt);
+            return pt;
+        }
+        catch (CryptographicException) { return null; }
+    }
+
+    // Verifies an ECDSA-SHA256 DER signature (PairedKeyEncryption) against the certificate public key.
+    public bool VerifySignature(byte[] payload, byte[] signature)
+    {
+        using var ec = ECDsa.Create();
+        ec.ImportSubjectPublicKeyInfo(PublicKey, out _);
+        return ec.VerifyData(payload, signature, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
+    }
+}
+
+public static class NearbyCrypto
+{
+    // AES-256-CTR, counter block = HKDF-SHA256(salt(2 bytes), no salt, no info, 16 bytes).
+    public static byte[] Ctr(byte[] secretKey, byte[] salt, byte[] data)
+    {
+        var counter = HKDF.DeriveKey(HashAlgorithmName.SHA256, salt, 16, salt: [], info: []);
+        using var aes = Aes.Create();
+        aes.Key = secretKey;
+        var outp = new byte[data.Length];
+        var ks = new byte[16];
+        for (int off = 0; off < data.Length; off += 16)
+        {
+            aes.EncryptEcb(counter, ks, PaddingMode.None);
+            int n = Math.Min(16, data.Length - off);
+            for (int i = 0; i < n; i++) outp[off + i] = (byte)(data[off + i] ^ ks[i]);
+            for (int i = 15; i >= 0 && ++counter[i] == 0; i--) { }
+        }
+        return outp;
+    }
+}
