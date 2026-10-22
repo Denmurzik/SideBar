@@ -47,7 +47,7 @@ public static class SendSession
 
             // 4. Paired key exchange, then Introduction, then wait for the user's decision.
             await connection.SendSharingAsync(SharingFrames.PairedKeyEncryption(
-                identity.CreatePairedKeyEncryption(handshake.AuthString)), ct);
+                identity.CreatePairedKeyEncryption(handshake.AuthString, PairedKeyRole.Sender)), ct);
 
             var introduced = false;
             var gotKeyEncryption = false;
@@ -60,7 +60,7 @@ public static class SendSession
                 {
                     case Share.V1Frame.Types.FrameType.PairedKeyEncryption:
                         gotKeyEncryption = true;
-                        var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString);
+                        var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Sender);
                         await connection.SendSharingAsync(SharingFrames.PairedKeyResult(status), ct);
                         break;
 

@@ -15,6 +15,14 @@
     <Protobuf Include="Protos\*.proto" ProtoRoot="Protos" GrpcServices="None" />
   </ItemGroup>
 
+  <!-- Certificate model/leveldb reader are shared with the certs spike (read-only sources). -->
+  <ItemGroup>
+    <Compile Include="..\..\certs\src\LevelDb.cs" Link="Certs\LevelDb.cs" />
+    <Compile Include="..\..\certs\src\Snappy.cs" Link="Certs\Snappy.cs" />
+    <Compile Include="..\..\certs\src\Proto.cs" Link="Certs\Proto.cs" />
+    <Compile Include="..\..\certs\src\Model.cs" Link="Certs\Model.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="SideBar.Nearby.Tests" />
   </ItemGroup>

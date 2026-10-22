@@ -46,7 +46,7 @@ public static class ReceiveSession
 
             connection.EnableEncryption(SecureChannel.ForServer(handshake.NextSecret));
             await connection.SendSharingAsync(SharingFrames.PairedKeyEncryption(
-                identity.CreatePairedKeyEncryption(handshake.AuthString)), ct);
+                identity.CreatePairedKeyEncryption(handshake.AuthString, PairedKeyRole.Receiver)), ct);
 
             // 3. Paired key, Introduction, consent, file chunks.
             var accepted = false;
@@ -90,7 +90,7 @@ public static class ReceiveSession
                     switch (v1?.Type)
                     {
                         case Share.V1Frame.Types.FrameType.PairedKeyEncryption:
-                            var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString);
+                            var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Receiver);
                             await connection.SendSharingAsync(SharingFrames.PairedKeyResult(status), ct);
                             break;
 
