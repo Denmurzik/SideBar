@@ -60,7 +60,10 @@ public class FileNamingTests
         Assert.Equal("_CON.txt", FileNaming.Sanitize("CON.txt"));
         Assert.Equal("_nul", FileNaming.Sanitize("nul"));
         Assert.Equal("_COM1.log", FileNaming.Sanitize("COM1.log"));
-        Assert.Equal("фотоgpj.exe", FileNaming.Sanitize("фото‮gpj.exe"));
+        Assert.Equal("_COM¹.txt", FileNaming.Sanitize("COM¹.txt"));
+        Assert.Equal("_LPT³", FileNaming.Sanitize("LPT³"));
+        Assert.Equal("_con.tar.gz", FileNaming.Sanitize("con.tar.gz"));
+        Assert.Equal("фотоgpj.exe", FileNaming.Sanitize("фото\u202Egpj.exe"));
         Assert.Equal("a", FileNaming.Sanitize("a. . "));
     }
 
@@ -68,7 +71,7 @@ public class FileNamingTests
     public void Sanitize_removes_invalid_chars_and_controls()
     {
         Assert.Equal("abcd.txt", FileNaming.Sanitize("a\\b/c:d*?\"<>|.txt"));
-        Assert.Equal("ab", FileNaming.Sanitize("a\u0001b‏"));
+        Assert.Equal("ab", FileNaming.Sanitize("a\u0001b\u200F"));
     }
 
     [Fact]
@@ -85,5 +88,18 @@ public class FileNamingTests
         var s = FileNaming.Sanitize(new string('a', 300) + ".png");
         Assert.Equal(200, s.Length);
         Assert.EndsWith(".png", s);
+    }
+
+    [Fact]
+    public void Sanitize_long_name_keeps_limit_and_reserved_check()
+    {
+        var r = FileNaming.Sanitize("con" + new string(' ', 250) + "x.txt");
+        Assert.True(r.Length <= 200);
+        Assert.False(r.StartsWith("con", StringComparison.OrdinalIgnoreCase) && r.Length > 3 && r[3] is '.' or ' ');
+        var e = FileNaming.Sanitize(new string(' ', 5) + "." + new string('a', 250) + ".png");
+        Assert.True(e.Length <= 200);
+        Assert.NotEmpty(Path.GetFileNameWithoutExtension(e));
+        var big = FileNaming.Sanitize("CON" + new string('.', 1) + new string('b', 300));
+        Assert.True(big.Length <= 200);
     }
 }

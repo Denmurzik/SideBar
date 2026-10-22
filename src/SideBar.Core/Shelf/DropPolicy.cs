@@ -10,27 +10,25 @@ public static class DropPolicy
 
     /// <summary>
     /// Существующие не временные пути CF_HDROP побеждают (виртуальные файлы игнорируются, временные пути копируются);
-    /// иначе виртуальные файлы, затем картинка, затем временные пути CF_HDROP. Не бросает исключений.
+    /// иначе виртуальные файлы, затем временные пути CF_HDROP, затем картинка (application/x-td-forward — отказ, только если ничего не подошло). Не бросает исключений.
     /// </summary>
     public static DropDecision Decide(DropPayload p, Func<string, bool> exists, IReadOnlyList<string> tempRoots)
     {
         try
         {
-            if (p.OnlyTdForward) return Rejected;
-
             var roots = tempRoots.Select(NormalizeRoot).OfType<string>().ToList();
             var refs = new List<string>();
             var temps = new List<string>();
             foreach (var path in p.Paths)
             {
-                if (string.IsNullOrWhiteSpace(path) || !exists(path)) continue;
+                if (string.IsNullOrWhiteSpace(path) || !Exists(path, exists)) continue;
                 (IsInside(path, roots) ? temps : refs).Add(path);
             }
 
             if (refs.Count > 0) return new DropDecision(DropAction.References, refs, temps);
             if (p.Virtual.Count > 0) return new DropDecision(DropAction.MaterializeVirtual, [], []);
-            if (p.ImageFormat != null) return new DropDecision(DropAction.MaterializeImage, [], []);
             if (temps.Count > 0) return new DropDecision(DropAction.CopyTempPaths, [], temps);
+            if (p.ImageFormat != null) return new DropDecision(DropAction.MaterializeImage, [], []);
             return Rejected;
         }
         catch
@@ -45,6 +43,12 @@ public static class DropPolicy
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Temp"),
         Environment.GetFolderPath(Environment.SpecialFolder.InternetCache),
     ];
+
+    private static bool Exists(string path, Func<string, bool> exists)
+    {
+        try { return exists(path); }
+        catch { return false; }
+    }
 
     private static string? NormalizeRoot(string root)
     {

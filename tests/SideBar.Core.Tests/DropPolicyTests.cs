@@ -90,9 +90,26 @@ public class DropPolicyTests
     {
         var d = DropPolicy.Decide(P([Doc]), _ => throw new IOException(), Roots);
         Assert.Equal(DropAction.Reject, d.Action);
+        Assert.Equal(DropAction.Reject, DropPolicy.Decide(P(), Doc.Equals, null!).Action);
     }
 
     [Fact]
     public void Default_temp_roots_include_system_temp() =>
         Assert.Contains(Path.GetTempPath(), DropPolicy.DefaultTempRoots());
+
+    [Fact]
+    public void Temp_only_hdrop_wins_over_image() =>
+        Assert.Equal(DropAction.CopyTempPaths, Decide(P([Tmp], img: "png"), Tmp).Action);
+
+    [Fact]
+    public void Existing_path_wins_over_td_forward() =>
+        Assert.Equal(DropAction.References, Decide(P([Doc], td: true), Doc).Action);
+
+    [Fact]
+    public void Throwing_exists_treats_only_that_path_as_missing()
+    {
+        var d = DropPolicy.Decide(P([@"C:ad.txt", Doc]), p => p == Doc ? true : throw new IOException(), Roots);
+        Assert.Equal(DropAction.References, d.Action);
+        Assert.Equal([Doc], d.ReferencePaths);
+    }
 }

@@ -16,6 +16,7 @@ public static class FileNaming
         "CON", "PRN", "AUX", "NUL",
         "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
     };
 
     public static string ForVirtual(string sourceName, string? url, int virtualCount, ReadOnlySpan<byte> head, DateTime now)
@@ -64,26 +65,41 @@ public static class FileNaming
         {
             if (c is '\\' or '/' or ':' or '*' or '?' or '"' or '<' or '>' or '|') continue;
             if (char.GetUnicodeCategory(c) is UnicodeCategory.Control or UnicodeCategory.Format) continue;
-            if (c is '‎' or '‏' or (>= '‪' and <= '‮') or (>= '⁦' and <= '⁩')) continue;
+            if (c is '\u200E' or '\u200F' or (>= '\u202A' and <= '\u202E') or (>= '\u2066' and <= '\u2069')) continue;
             sb.Append(c);
         }
 
         var s = TrimName(sb.ToString());
         if (s.Length == 0) return "file";
 
-        var dot = s.IndexOf('.');
-        if (Reserved.Contains((dot < 0 ? s : s[..dot]).TrimEnd())) s = "_" + s;
-
         if (s.Length > MaxLength)
         {
             var ext = Path.GetExtension(s);
-            if (ext.Length >= MaxLength) ext = "";
+            if (ext.Length >= MaxLength - 4) ext = "";
             var stemLen = MaxLength - ext.Length;
-            if (char.IsHighSurrogate(s[stemLen - 1])) stemLen--;
-            s = TrimName(s[..stemLen]) + ext;
-            if (s.Length == 0) return "file";
+            if (stemLen > 0 && char.IsHighSurrogate(s[stemLen - 1])) stemLen--;
+            var stem = TrimName(s[..stemLen]);
+            s = (stem.Length == 0 ? "file" : stem) + ext;
+        }
+
+        if (IsReserved(s))
+        {
+            // "_" не должен выталкивать имя за лимит: укорачиваем основу на один символ
+            if (s.Length >= MaxLength)
+            {
+                var ext = Path.GetExtension(s);
+                var stem = TrimName(s[..(MaxLength - 1 - ext.Length)]);
+                s = (stem.Length == 0 ? "file" : stem) + ext;
+            }
+            s = "_" + s;
         }
         return s;
+    }
+
+    private static bool IsReserved(string s)
+    {
+        var dot = s.IndexOf('.');
+        return Reserved.Contains((dot < 0 ? s : s[..dot]).TrimEnd());
     }
 
     private static string TrimName(string s) => s.Trim('.', ' ');
