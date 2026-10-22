@@ -18,6 +18,7 @@
             </Viewbox>
           </Border>
           <Rectangle x:Name="ShelfDash" Grid.Row="2" RadiusX="4" RadiusY="4" StrokeThickness="1" StrokeDashArray="4 3"/>
+          <FontIcon x:Name="ShelfEmptyIcon" Grid.Row="2" Glyph="&#xE8C8;" FontFamily="Segoe Fluent Icons" FontSize="40" Opacity="0.4" Foreground="{ThemeResource TextFillColorPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Grid>
       </Grid>
     </Border>
