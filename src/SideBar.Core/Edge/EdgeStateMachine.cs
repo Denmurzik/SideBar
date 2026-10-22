@@ -35,8 +35,10 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
         bool inBandY = i.Y >= band.Top && i.Y <= band.Bottom;
         bool inBand = inBandY && i.X >= band.Left && i.X < band.Right;
         bool touching = inBandY && i.X >= band.Right - 1;
-        bool overCard = i.X >= _layout.LeftFor(PanelState.Open) && i.X < band.Right
-            && i.Y >= _layout.Top && i.Y <= _layout.Top + _layout.CardHeightPx;
+        // Slide: Y — по всей полосе, как при открытии, иначе курсор у края в поле над/под карточкой гоняет Open/Hidden по кругу.
+        // InPlace от этого защищает _mustLeaveBand, там «над карточкой» — именно карточка.
+        bool inCardY = _mode == EdgeMode.Slide ? inBandY : i.Y >= _layout.Top && i.Y <= _layout.Top + _layout.CardHeightPx;
+        bool overCard = inCardY && i.X >= _layout.LeftFor(PanelState.Open) && i.X < band.Right;
 
         switch (State)
         {

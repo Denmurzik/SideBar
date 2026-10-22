@@ -64,6 +64,18 @@ public class EdgeStateMachineTests
     }
 
     [Fact]
+    public void Slide_parked_at_edge_in_margin_does_not_loop()
+    {
+        var m = Create();
+        int y = new CardLayout(Monitor, 1.0).Top - 20;
+        Assert.Equal(PanelState.Open, m.Update(At(1919, y, 0)));
+        for (long t = 50; t <= 1000; t += 50) Assert.Null(m.Update(At(1919, y, t)));
+        Assert.Equal(PanelState.Open, m.State);
+        Assert.Null(m.Update(At(1000, 540, 1100)));
+        Assert.Equal(PanelState.Hidden, m.Update(At(1000, 540, 1400)));
+    }
+
+    [Fact]
     public void Open_stays_while_left_button_held()
     {
         var m = Opened();

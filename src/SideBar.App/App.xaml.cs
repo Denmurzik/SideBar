@@ -18,12 +18,13 @@ public partial class App : Application
     EdgeStateMachine? _machine;
     readonly MemoryTrimmer _trimmer = new();
 
-    // _machine, _layout, _mode, _primary, _generation трогают рабочий поток хука и UI-поток — под _gate
+    // _machine, _layout, _mode, _primary, _scale, _generation трогают рабочий поток хука и UI-поток — под _gate
     readonly object _gate = new();
     CardLayout _layout = null!;
     EdgeMode _mode;
     PxRect _primary;
     int _generation;
+    double _scale;
     Timer? _startupTrim;
     MessageWindow? _messages;
     TrayIcon? _tray;
@@ -41,21 +42,22 @@ public partial class App : Application
         _window = new CardWindow();
         _window.Settled += s => { if (s == PanelState.Hidden) _trimmer.OnHidden(); };
 
-        var (layout, mode, scale) = Measure();
+        var (layout, mode, scale, primary) = Measure();
         _layout = layout;
         _mode = mode;
+        _scale = scale;
+        _primary = primary;
         _window.Initialize(layout, mode, scale);
         _machine = new EdgeStateMachine(layout, mode);
         _trimmer.OnHidden();
         _hook = new MouseHook(OnMouse);
-        // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
-
         string exe = Environment.ProcessPath!;
         var autostart = new Autostart();
         try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
         _messages = new MessageWindow(OnDisplaysChanged);
         _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp));
 
+        // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) _trimmer.OnHidden(); }), null, 2000, Timeout.Infinite);
     }
 
@@ -75,10 +77,14 @@ public partial class App : Application
     public void OnDisplaysChanged()
     {
         if (_window is null || _machine is null) return;
-        var (layout, mode, scale) = Measure();
+        var (layout, mode, scale, primary) = Measure();
         lock (_gate)
         {
-            _generation++;   // отбрасывает SetState, уже поставленные в очередь по старой геометрии
+            // WM_SETTINGCHANGE шлют часто (обои, тема, переменные среды): без реальных изменений карточку не трогаем
+            if (primary.Equals(_primary) && scale == _scale && mode == _mode) return;
+            _generation++;
+            _scale = scale;
+            _primary = primary;   // отбрасывает SetState, уже поставленные в очередь по старой геометрии
             _layout = layout;
             _mode = mode;
             _machine.Relayout(layout, mode);
@@ -87,15 +93,14 @@ public partial class App : Application
         _trimmer.OnHidden();   // Relayout не поднимает Settled
     }
 
-    (CardLayout layout, EdgeMode mode, double scale) Measure()
+    (CardLayout layout, EdgeMode mode, double scale, PxRect primary) Measure()
     {
         var primary = Displays.Primary();
         double scale = Displays.PrimaryScale();
         var layout = new CardLayout(primary, scale);
         var band = layout.ActivationBand;
         var mode = MonitorTopology.HasRightNeighbor(primary, Displays.All(), band.Top, band.Bottom) ? EdgeMode.InPlace : EdgeMode.Slide;
-        lock (_gate) _primary = primary;
-        return (layout, mode, scale);
+        return (layout, mode, scale, primary);
     }
 
     // рабочий поток хука; WinUI-объекты не трогает
@@ -109,7 +114,15 @@ public partial class App : Application
         PxRect primary;
         bool hidden;
         lock (_gate) { primary = _primary; hidden = machine.State == PanelState.Hidden; }
-        bool busy = hidden && FullscreenProbe.IsBusy(primary);   // дорогая проверка — только из Hidden
+        // дорогая проверка — только из Hidden и только внутри полосы активации
+        bool busy = false;
+        if (hidden)
+        {
+            CardLayout layout;
+            lock (_gate) layout = _layout;
+            var b = layout.ActivationBand;
+            if (y >= b.Top && y <= b.Bottom && x >= b.Left && x < b.Right) busy = FullscreenProbe.IsBusy(primary);
+        }
 
         PanelState? changed;
         int gen;

@@ -59,6 +59,8 @@ public sealed partial class CardWindow : Window
         WindowFrame.MakeTool(_hwnd);
         ZOrder.Watch(_hwnd);
         Closed += (_, _) => ZOrder.Unwatch();
+        // клик активирует карточку, Alt+F4 не должен её закрывать; выход — только из трея
+        AppWindow.Closing += (_, e) => e.Cancel = true;
         Dwm.RoundCornersNoBorder(_hwnd);
 
         _backdrop = new AlwaysActiveAcrylicBackdrop();
@@ -67,7 +69,7 @@ public sealed partial class CardWindow : Window
 
         ApplyStrokes();
         Root.Opacity = mode == EdgeMode.InPlace ? 0 : 1;
-        int hidden = layout.LeftFor(PanelState.Hidden);
+        int hidden = ParkLeft(layout, mode);
         PlaceAt(hidden);
         _pos.Reset(hidden);
         _fade.Reset(0);
@@ -112,7 +114,7 @@ public sealed partial class CardWindow : Window
         _scale = scale;
         _state = PanelState.Hidden;   // как EdgeStateMachine.Relayout
         ApplyStrokes();
-        int hidden = layout.LeftFor(PanelState.Hidden);
+        int hidden = ParkLeft(layout, mode);
         _pos.Reset(hidden);
         _fade.Reset(0);
         Root.Opacity = mode == EdgeMode.InPlace ? 0 : 1;
@@ -151,6 +153,10 @@ public sealed partial class CardWindow : Window
         if (IsShown) ZOrder.RaiseToTop(_hwnd);
         StartTicking();
     }
+
+    // InPlace: скрытое окно стоит на месте открытой карточки (opacity 0), а не за краем — там соседний монитор
+    static int ParkLeft(CardLayout layout, EdgeMode mode) =>
+        layout.LeftFor(mode == EdgeMode.InPlace ? PanelState.Open : PanelState.Hidden);
 
     static bool EffectiveOpen(PanelState s) => s == PanelState.Open;
 
