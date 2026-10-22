@@ -14,6 +14,7 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
     EdgeMode _mode = mode;
     long _leftCardAt = None;
     long _enteredBandAt = None;
+    bool _mustLeaveBand;
 
     public PanelState State { get; private set; } = PanelState.Hidden;
 
@@ -24,6 +25,7 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
         State = PanelState.Hidden;
         _leftCardAt = None;
         _enteredBandAt = None;
+        _mustLeaveBand = false;
     }
 
     /// <summary>Возвращает новое состояние, если оно изменилось, иначе null.</summary>
@@ -33,7 +35,7 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
         bool inBandY = i.Y >= band.Top && i.Y <= band.Bottom;
         bool inBand = inBandY && i.X >= band.Left && i.X < band.Right;
         bool touching = inBandY && i.X >= band.Right - 1;
-        bool overCard = i.X >= _layout.LeftFor(PanelState.Open)
+        bool overCard = i.X >= _layout.LeftFor(PanelState.Open) && i.X < band.Right
             && i.Y >= _layout.Top && i.Y <= _layout.Top + _layout.CardHeightPx;
 
         switch (State)
@@ -58,7 +60,8 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
 
     PanelState? HiddenInPlace(EdgeInput i, bool inBand)
     {
-        if (!inBand) { _enteredBandAt = None; return null; }
+        if (!inBand) { _enteredBandAt = None; _mustLeaveBand = false; return null; }
+        if (_mustLeaveBand) return null;
         if (_enteredBandAt == None) _enteredBandAt = i.NowMs;
         if (i.NowMs - _enteredBandAt < InPlaceDwellMs) return null;
         return Go(PanelState.Open, i);
@@ -71,6 +74,7 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
             _enteredBandAt = None;
             return null;
         }
+        _mustLeaveBand = _mode == EdgeMode.InPlace && next == PanelState.Hidden;
         State = next;
         _leftCardAt = None;
         _enteredBandAt = None;

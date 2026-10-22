@@ -164,4 +164,35 @@ public class EdgeStateMachineTests
         Assert.Null(m.Update(At(1000, 540, 1200)));
         Assert.Null(m.Update(At(1000, 540, 1499)));
     }
+
+    static EdgeStateMachine OpenedInPlace()
+    {
+        var m = Create(EdgeMode.InPlace);
+        m.Update(At(1890, 540, 0));
+        Assert.Equal(PanelState.Open, m.Update(At(1890, 540, 150)));
+        return m;
+    }
+
+    [Fact]
+    public void InPlace_cursor_on_right_neighbor_does_not_keep_card_open()
+    {
+        var m = OpenedInPlace();
+        Assert.Null(m.Update(At(2500, 540, 1000)));
+        Assert.Equal(PanelState.Hidden, m.Update(At(2500, 540, 1300)));
+    }
+
+    [Fact]
+    public void InPlace_parked_in_band_outside_card_does_not_loop()
+    {
+        var m = OpenedInPlace();
+        Assert.Null(m.Update(At(1900, 285, 1000)));
+        Assert.Equal(PanelState.Hidden, m.Update(At(1900, 285, 1300)));
+        for (long t = 1400; t <= 2400; t += 100) Assert.Null(m.Update(At(1900, 285, t)));
+        Assert.Equal(PanelState.Hidden, m.State);
+
+        Assert.Null(m.Update(At(1000, 540, 2500)));
+        Assert.Null(m.Update(At(1900, 285, 2600)));
+        Assert.Null(m.Update(At(1900, 285, 2749)));
+        Assert.Equal(PanelState.Open, m.Update(At(1900, 285, 2750)));
+    }
 }
