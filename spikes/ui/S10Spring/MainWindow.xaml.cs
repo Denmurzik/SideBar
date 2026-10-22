@@ -143,6 +143,7 @@ public sealed partial class MainWindow : Window
         // all strokes are 1 physical pixel; dash lengths are in stroke-thickness units, i.e. physical px (4 on / 3 off)
         QsTile.BorderThickness = new Thickness(1.0 / _dpi);
         ShelfDash.StrokeThickness = 1.0 / _dpi;
+        ShelfDash.Margin = new Thickness(0.5 / _dpi);   // stroke is centred on the geometry: inset half a physical pixel so none is clipped
         ShelfDash.Stroke = Panel.BorderBrush;
         QsTile.BorderBrush = Panel.BorderBrush;
         _panelVisual = ElementCompositionPreview.GetElementVisual(Panel);

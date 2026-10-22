@@ -6,7 +6,7 @@
     <Border x:Name="Panel" Width="216" Height="469" HorizontalAlignment="Right" VerticalAlignment="Center"
             Margin="0,0,8,0" CornerRadius="8" BorderThickness="1" BorderBrush="#66909090">
       <Grid x:Name="Fill" CornerRadius="8" Background="#B0202020">
-        <Grid Margin="12" RowDefinitions="216,12,216">
+        <Grid Margin="12" RowDefinitions="*,12,*">
           <Border x:Name="QsTile" Grid.Row="0" CornerRadius="4" Background="#14FFFFFF" BorderThickness="1" BorderBrush="#70909090">
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="10">
               <Border Width="72" Height="72" CornerRadius="4" Background="#22FFFFFF" HorizontalAlignment="Center">
