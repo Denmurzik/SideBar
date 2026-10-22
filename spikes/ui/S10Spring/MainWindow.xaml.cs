@@ -15,8 +15,8 @@ public sealed partial class MainWindow : Window
 {
     enum PanelState { Hidden, Peek, Open }
 
-    const double PanelWidth = 340;   // DIP
-    const double PeekWidth = 12;     // DIP
+    const double CardW = 216, CardH = 469, EdgeGap = 8, PeekVis = 10;   // epx
+    const double Reserve = 200, PadV = 40;                              // transparent room left of the card (fan, spring overshoot) / above+below
     const int GWL_EXSTYLE = -20;
     const nint WS_EX_LAYERED = 0x80000, WS_EX_TRANSPARENT = 0x20, WS_EX_TOOLWINDOW = 0x80;
     const uint SWP_NOSIZE = 1, SWP_NOZORDER = 4, SWP_NOACTIVATE = 0x10;
@@ -53,7 +53,8 @@ public sealed partial class MainWindow : Window
     long _lastTick;
     bool _ticking;
     int _screenRight, _winTop, _winHeight, _winWidth;
-    int _clicks;
+    int _clicks, _centerY, _cardW, _cardH;
+    [DllImport("gdi32.dll")] static extern nint CreateRoundRectRgn(int l, int t, int r, int b, int w, int h);
 
     string Opt(string name, string def)
     {
@@ -71,7 +72,7 @@ public sealed partial class MainWindow : Window
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         _modeB = Opt("--mode", "A").Equals("B", StringComparison.OrdinalIgnoreCase);
-        _clickThrough = Opt("--ct", "ex");
+        _clickThrough = Opt("--ct", Opt("--mode", "A") == "B" ? "ex" : "rgn");
         var sp = Opt("--spring", "0.8,60").Split(',');
         _zeta = double.Parse(sp[0], inv);
         _periodMs = double.Parse(sp[1], inv);
@@ -87,8 +88,8 @@ public sealed partial class MainWindow : Window
         AppWindow.SetPresenter(presenter);
         AppWindow.IsShownInSwitchers = false;
 
-        int noRound = 1, noBorder = unchecked((int)0xFFFFFFFE);
-        DwmSetWindowAttribute(_hwnd, 33, ref noRound, 4);
+        int noRound = Opt("--mode", "A") == "B" && !Flag("--bregion") ? 2 : 1, noBorder = unchecked((int)0xFFFFFFFE);
+        DwmSetWindowAttribute(_hwnd, 33, ref noRound, 4);   // DWMWA_WINDOW_CORNER_PREFERENCE: B = ROUND (smooth system 8 px), A = DONOTROUND
         DwmSetWindowAttribute(_hwnd, 34, ref noBorder, 4);
 
         if (Flag("--solid")) Fill.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 0, 255));
@@ -97,7 +98,7 @@ public sealed partial class MainWindow : Window
         {
             case "win-acrylic":
                 SystemBackdrop = new DesktopAcrylicBackdrop();
-                Fill.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x20, 0x20, 0x20, 0x20));
+                Fill.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x40, 0x20, 0x20, 0x20));
                 break;
             case "transparent":
                 TransparentBackdrop.Log = Log; SystemBackdrop = new TransparentBackdrop();
@@ -109,7 +110,7 @@ public sealed partial class MainWindow : Window
             case "element":
                 TransparentBackdrop.Log = Log; SystemBackdrop = new TransparentBackdrop();
                 var be = new Microsoft.UI.Xaml.Controls.SystemBackdropElement { SystemBackdrop = new DesktopAcrylicBackdrop() };
-                Fill.Children.Add(be);
+                be.CornerRadius = new CornerRadius(8); Fill.Children.Insert(0, be);
                 Fill.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x40, 0x20, 0x20, 0x20));
                 break;
         }
@@ -126,20 +127,34 @@ public sealed partial class MainWindow : Window
 
         _dpi = GetDpiForWindow(_hwnd) / 96.0;
         var area = DisplayArea.Primary.OuterBounds;
-        var work = DisplayArea.Primary.WorkArea;
         _screenRight = area.X + area.Width;
-        _winTop = work.Y; _winHeight = work.Height; _winWidth = (int)Math.Round(PanelWidth * _dpi);
+        _centerY = area.Y + area.Height / 2;
+        _cardW = (int)Math.Round((CardW + EdgeGap) * _dpi);     // card + gap to the edge, physical px
+        _cardH = (int)Math.Round(CardH * _dpi);
+        if (_modeB) { _winWidth = (int)Math.Round(CardW * _dpi); _winHeight = _cardH; Panel.Margin = new Thickness(0); Panel.HorizontalAlignment = HorizontalAlignment.Stretch; }
+        else { _winWidth = (int)Math.Round((CardW + EdgeGap + Reserve) * _dpi); _winHeight = (int)Math.Round((CardH + 2 * PadV) * _dpi); }
+        _winTop = _centerY - _winHeight / 2;
 
+        // own 1-physical-pixel border, thickness in epx so it stays crisp at 125/150 %
+        Panel.BorderThickness = new Thickness(1.0 / _dpi);
+        bool dark = Root.ActualTheme != ElementTheme.Light;
+        Panel.BorderBrush = new SolidColorBrush(dark ? Windows.UI.Color.FromArgb(0x70, 0x8C, 0x8C, 0x8C) : Windows.UI.Color.FromArgb(0x50, 0x40, 0x40, 0x40));
+
+        // all strokes are 1 physical pixel; dash lengths are in stroke-thickness units, i.e. physical px (4 on / 3 off)
+        QsTile.BorderThickness = new Thickness(1.0 / _dpi);
+        ShelfDash.StrokeThickness = 1.0 / _dpi;
+        ShelfDash.Stroke = Panel.BorderBrush;
+        QsTile.BorderBrush = Panel.BorderBrush;
         _panelVisual = ElementCompositionPreview.GetElementVisual(Panel);
         _comp = _panelVisual.Compositor;
         ElementCompositionPreview.SetIsTranslationEnabled(Panel, true);
-        Info.Text = $"mode={(_modeB ? "B SetWindowPos" : "A Composition")}  zeta={_zeta} period={_periodMs}ms\ndpi={_dpi:F2} ct={_clickThrough}";
+        Info.Text = $"{(_modeB ? "B window move" : "A composition")}\nz={_zeta} T={_periodMs}ms dpi={_dpi:F2}";
 
-        if (_modeB) AppWindow.MoveAndResize(new(_screenRight, _winTop, _winWidth, _winHeight));
+        if (_modeB) { AppWindow.MoveAndResize(new(_screenRight, _winTop, _winWidth, _winHeight)); if (Flag("--bregion")) SetWindowRgn(_hwnd, CreateRoundRectRgn(0, 0, _winWidth + 1, _winHeight + 1, (int)(16 * _dpi), (int)(16 * _dpi)), false); }
         else AppWindow.MoveAndResize(new(_screenRight - _winWidth, _winTop, _winWidth, _winHeight));
         _bPos = _screenRight; _bTarget = _screenRight;
-        SetPanelOffset(_modeB ? 0 : PanelWidth);
-        AppWindow.Hide();
+        SetPanelOffset(_modeB ? 0 : CardW + EdgeGap);
+        HideTrim();
         ApplyClickThrough(true);
 
         foreach (var name in new[] { "open", "peek", "close", "exit" })
@@ -149,7 +164,42 @@ public sealed partial class MainWindow : Window
             new Thread(() => { while (true) { ev.WaitOne(); _dq.TryEnqueue(() => Command(cmd)); } }) { IsBackground = true }.Start();
         }
         if (Flag("--cursor")) StartCursorDriver();
+        _dq.TryEnqueue(async () => { await Task.Delay(500); { AppWindow.Show(false); StripFrame(); } await Task.Delay(500); LogRects("shown"); HideTrim(); });
         Log("ready " + Info.Text.Replace("\n", " "));
+    }
+
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+    [DllImport("user32.dll")] static extern bool GetWindowRect(nint h, out RECT r);
+    [DllImport("user32.dll")] static extern bool GetClientRect(nint h, out RECT r);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(nint h, ref POINT p);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(nint h, int a, out RECT r, int size);
+    // The borderless presenter still has a 3 px WS_DLGFRAME non-client border (painted light under acrylic, and it
+    // insets the XAML content). WM_NCCALCSIZE -> 0 makes the whole window rect the client area.
+    [DllImport("comctl32.dll")] static extern bool SetWindowSubclass(nint h, nint proc, nuint id, nuint data);
+    [DllImport("comctl32.dll")] static extern nint DefSubclassProc(nint h, uint msg, nint w, nint l);
+
+    [UnmanagedCallersOnly]
+    static nint NcProc(nint h, uint msg, nint w, nint l, nuint id, nuint data)
+    {
+        if (msg == 0x83 && w != 0) return 0;
+        return DefSubclassProc(h, msg, w, l);
+    }
+
+    unsafe void StripFrame()
+    {
+        if (Flag("--keepframe") || _stripped) return;
+        _stripped = true;
+        SetWindowSubclass(_hwnd, (nint)(delegate* unmanaged<nint, uint, nint, nint, nuint, nuint, nint>)&NcProc, 1, 0);
+        SetWindowPos(_hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | 0x20 | 2);   // FRAMECHANGED | NOMOVE
+    }
+    bool _stripped;
+
+    void LogRects(string tag)
+    {
+        GetWindowRect(_hwnd, out var w); GetClientRect(_hwnd, out var c);
+        var p = new POINT(); ClientToScreen(_hwnd, ref p);
+        DwmGetWindowAttribute(_hwnd, 9, out var e, 16);
+        Log($"{tag} window=({w.L},{w.T},{w.R},{w.B}) client@({p.X},{p.Y}) size {c.R}x{c.B} dwmFrame=({e.L},{e.T},{e.R},{e.B}) style=0x{GetWindowLongPtr(_hwnd, -16):X}");
     }
 
     void OnClick(object sender, RoutedEventArgs e)
@@ -169,7 +219,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    // Demo-only cursor driver; the real one is the WH_MOUSE_LL hook (S8).
+    // Demo-only cursor driver; the real one is the WH_MOUSE_LL hook (S8). Zone: card height +- 1 cm.
     long _leftPanelAt;
     void StartCursorDriver()
     {
@@ -179,24 +229,26 @@ public sealed partial class MainWindow : Window
         {
             GetCursorPos(out var p);
             double fromRight = _screenRight - p.X;
-            double peekZone = 96 * _dpi / 2.54;  // ~1 cm
-            if (fromRight <= 1) { _leftPanelAt = 0; if (_state != PanelState.Open) SetState(PanelState.Open); }
+            double cm = 96 * _dpi / 2.54;
+            bool inBand = Math.Abs(p.Y - _centerY) <= _cardH / 2.0 + cm;
+            bool overCard = fromRight <= _cardW && Math.Abs(p.Y - _centerY) <= _cardH / 2.0;
+            if (inBand && fromRight <= 1) { _leftPanelAt = 0; if (_state != PanelState.Open) SetState(PanelState.Open); }
             else if (_state == PanelState.Open)
             {
-                if (fromRight > _winWidth)
+                if (!overCard)
                 {
                     if (_leftPanelAt == 0) _leftPanelAt = Stopwatch.GetTimestamp();
                     else if (Stopwatch.GetElapsedTime(_leftPanelAt).TotalMilliseconds > 300) { _leftPanelAt = 0; SetState(PanelState.Hidden); }
                 }
                 else _leftPanelAt = 0;
             }
-            else if (fromRight <= peekZone) { if (_state != PanelState.Peek) SetState(PanelState.Peek); }
+            else if (inBand && fromRight <= cm) { if (_state != PanelState.Peek) SetState(PanelState.Peek); }
             else if (_state == PanelState.Peek) SetState(PanelState.Hidden);
         };
         timer.Start();
     }
 
-    double VisibleDip(PanelState s) => s switch { PanelState.Open => PanelWidth, PanelState.Peek => PeekWidth, _ => 0 };
+    double VisibleDip(PanelState s) => s switch { PanelState.Open => CardW + EdgeGap, PanelState.Peek => PeekVis, _ => 0 };
 
     void SetState(PanelState s)
     {
@@ -209,14 +261,21 @@ public sealed partial class MainWindow : Window
 
         if (prev == PanelState.Hidden && vis > 0)
         {
-            if (!_modeB) SetPanelOffset(PanelWidth);
+            if (!_modeB) SetPanelOffset(CardW + EdgeGap);
             ApplyClickThrough(s != PanelState.Open);
-            AppWindow.Show(false);
+            { AppWindow.Show(false); StripFrame(); }
         }
         ApplyClickThrough(s != PanelState.Open);
 
         if (_modeB) StartB(_screenRight - vis * _dpi);
-        else StartA(PanelWidth - vis, gen);
+        else { ApplyRegion(false); StartA(CardW + EdgeGap - vis, gen); }
+    }
+
+    [DllImport("psapi.dll")] static extern bool EmptyWorkingSet(nint h);
+    void HideTrim()
+    {
+        AppWindow.Hide();
+        if (Flag("--trim")) EmptyWorkingSet(Process.GetCurrentProcess().Handle);
     }
 
     void SetPanelOffset(double x) => _panelVisual.Properties.InsertVector3("Translation", new Vector3((float)x, 0, 0));
@@ -236,7 +295,7 @@ public sealed partial class MainWindow : Window
         {
             if (gen != _gen) return;
             Log($"A settled after {Stopwatch.GetElapsedTime(t0).TotalMilliseconds:F0} ms (state {_state})");
-            if (_state == PanelState.Hidden) AppWindow.Hide();
+            if (_state == PanelState.Hidden) HideTrim(); else ApplyRegion(true);
         });
         StartFrameProbe();
     }
@@ -276,7 +335,7 @@ public sealed partial class MainWindow : Window
             CompositionTarget.Rendering -= OnTick; _ticking = false;
             SetWindowPos(_hwnd, 0, (int)Math.Round(_bTarget), _winTop, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             LogFrames("B");
-            if (_state == PanelState.Hidden) AppWindow.Hide();
+            if (_state == PanelState.Hidden) HideTrim();
         }
     }
 
@@ -336,12 +395,21 @@ public sealed partial class MainWindow : Window
             SetWindowLongPtr(_hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TOOLWINDOW);
             SetLayeredWindowAttributes(_hwnd, 0x000000, 0, 1);
         }
-        else if (_clickThrough == "rgn")
-        {
-            int w = _winWidth, h = _winHeight;
-            if (through) SetWindowRgn(_hwnd, CreateRectRgn(w - (int)(PeekWidth * _dpi), 0, w, h), true);
-            else SetWindowRgn(_hwnd, 0, true);
-        }
+        else if (_clickThrough == "rgn" && !_modeB) ApplyRegion(false);
+    }
+
+    // Mode A: while the spring runs the region is the whole window (content must not be clipped); when settled it is
+    // only the visible part of the card (Open) or the peeking strip (Peek) - the rest of the window is click-through.
+    void ApplyRegion(bool settled)
+    {
+        if (_clickThrough != "rgn" || _modeB) return;
+        if (!settled || _state == PanelState.Hidden) { SetWindowRgn(_hwnd, 0, true); return; }
+        int top = (_winHeight - _cardH) / 2;
+        int gap = (int)Math.Round(EdgeGap * _dpi), r = (int)(16 * _dpi);
+        nint rgn = _state == PanelState.Open
+            ? CreateRectRgn(_winWidth - _cardW, top, _winWidth - gap, top + _cardH)
+            : CreateRectRgn(_winWidth - (int)(PeekVis * _dpi), top, _winWidth, top + _cardH);
+        SetWindowRgn(_hwnd, rgn, true);
     }
 
     void Log(string s) => File.AppendAllText(_logPath, $"{DateTime.Now:HH:mm:ss.fff} {s}\n");
