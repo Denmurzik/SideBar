@@ -433,3 +433,6 @@ FodyWeavers.xsd
 
 # Throwaway research output
 spikes/**/out/
+
+# Cross-agent build lock (one heavy build at a time)
+.buildlock/
