@@ -4,7 +4,9 @@ using SideBar.Core;
 using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Edge;
+using SideBar.Shelf;
 using SideBar.Tray;
+using WinRT.Interop;
 
 namespace SideBar;
 
@@ -28,6 +30,8 @@ public partial class App : Application
     Timer? _startupTrim;
     MessageWindow? _messages;
     TrayIcon? _tray;
+    ShelfService? _shelf;
+    IDisposable? _dropTarget;
 
     public App()
     {
@@ -39,6 +43,8 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _ui = DispatcherQueue.GetForCurrentThread();
+        _shelf = new ShelfService();
+        _shelf.Load();
         _window = new CardWindow();
         _window.Settled += s => { if (s == PanelState.Hidden) _trimmer.OnHidden(); };
 
@@ -50,6 +56,12 @@ public partial class App : Application
         _window.Initialize(layout, mode, scale);
         _machine = new EdgeStateMachine(layout, mode);
         _trimmer.OnHidden();
+        // после первого Show (его ставит в очередь Initialize): к этому времени у окна есть дочерние HWND WinUI
+        _ui.TryEnqueue(() =>
+        {
+            _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => false, OnForeignDrag);   // свой вынос — Task 4
+            Log.Write("ready");
+        });
         _hook = new MouseHook(OnMouse);
         string exe = Environment.ProcessPath!;
         var autostart = new Autostart();
@@ -67,10 +79,33 @@ public partial class App : Application
         try
         {
             try { _hook?.Dispose(); } catch { }
+            try { _dropTarget?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
             try { _messages?.Dispose(); } catch { }
         }
         finally { Environment.Exit(0); }
+    }
+
+    /// <summary>
+    /// Чужой drag над карточкой (UI-поток). Пока кнопка зажата, автомат держит Open сам; из Peek (виден край в 10 epx) —
+    /// имитируем касание края, иначе первый же шаг мыши за полосу вернул бы Hidden.
+    /// </summary>
+    void OnForeignDrag(bool active)
+    {
+        var machine = _machine;
+        if (!active || machine is null) return;
+        PanelState? changed;
+        lock (_gate)
+        {
+            if (machine.State != PanelState.Peek) return;
+            changed = machine.Update(new EdgeInput(_layout.ActivationBand.Right - 1, _layout.CenterY, true, false, Environment.TickCount64));
+        }
+        if (changed is { } s)
+        {
+            Log.Write($"edge {s} (drag)");
+            _trimmer.OnShown();
+            _window?.SetState(s);
+        }
     }
 
     /// <summary>Пересчёт по WM_DISPLAYCHANGE / WM_DPICHANGED / WM_SETTINGCHANGE. Только из UI-потока.</summary>
@@ -143,6 +178,7 @@ public partial class App : Application
             _ui?.TryEnqueue(() =>
             {
                 lock (_gate) { if (gen != _generation) return; }
+                Log.Write($"edge {s}");
                 if (s != PanelState.Hidden) _trimmer.OnShown();
                 _window?.SetState(s);
             });
