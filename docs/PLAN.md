@@ -32,7 +32,7 @@
 | Монитор | Только основной монитор, правый край |
 | Fullscreen | (дефолт) В полноэкранных приложениях не выезжает, кроме активного drag файла |
 | Quick Share | Своя реализация протокола (по `google/nearby`, NearDrop и т. п.), отправка **и** приём |
-| Медиумы v1 | Wi-Fi LAN (mDNS + TCP) + BLE Fast Initiation (`0xFEF3`) для «пробуждения». Wi-Fi Direct/hotspot — не в v1 |
+| Медиумы v1 | Wi-Fi LAN (mDNS + TCP) + BLE Fast Initiation (`0xFE2C`, тело `FC 12 8E …`; `0xFEF3` — реклама Nearby Connections, см. `docs/research/ble.md`) для «пробуждения». Wi-Fi Direct/hotspot — не в v1 |
 | Видимость | «Свои устройства», «Все» (временно, ~10 мин), «Скрыто». «Контакты» — не в v1 |
 | «Свои устройства» | Читаем сертификаты официального приложения: `preferences.json` (свои приватные) и leveldb `NearbySharePublicCertificateDatabase` (публичные устройств аккаунта) |
 | Обновление сертификатов | Раз в сутки: если прошло ≥20 ч — при простое пользователя ≥5 мин запускаем `nearby_share.exe` свёрнутым, ждём `PublishDevice succeeded` в логе, аккуратно закрываем. Если прошло >48 ч — сразу |
