@@ -23,7 +23,9 @@ public sealed partial class CardWindow : Window
     double _scale = 1;
     EdgeMode _mode;
     PanelState _state = PanelState.Hidden;
-    bool _shown, _ticking;
+    bool _ticking, _raiseOnTick;
+    bool IsShown { get => _shown; set { _shown = value; ZOrder.Visible = value; } }
+    bool _shown;
     AlwaysActiveAcrylicBackdrop? _backdrop;
 
     public event Action<PanelState>? Settled;
@@ -55,6 +57,8 @@ public sealed partial class CardWindow : Window
         AppWindow.SetPresenter(presenter);
         AppWindow.IsShownInSwitchers = false;
         WindowFrame.MakeTool(_hwnd);
+        ZOrder.Watch(_hwnd);
+        Closed += (_, _) => ZOrder.Unwatch();
         Dwm.RoundCornersNoBorder(_hwnd);
 
         _backdrop = new AlwaysActiveAcrylicBackdrop();
@@ -90,7 +94,7 @@ public sealed partial class CardWindow : Window
         {
             AppWindow.Show(false);
             WindowFrame.Strip(_hwnd);
-            if (_shown) return;
+            if (IsShown) return;
             AppWindow.Hide();
             WorkingSet.Trim();
         });
@@ -113,10 +117,10 @@ public sealed partial class CardWindow : Window
         _fade.Reset(0);
         Root.Opacity = mode == EdgeMode.InPlace ? 0 : 1;
         PlaceAt(hidden);
-        if (_shown)
+        if (IsShown)
         {
             AppWindow.Hide();
-            _shown = false;
+            IsShown = false;
             WorkingSet.Trim();
         }
     }
@@ -130,21 +134,21 @@ public sealed partial class CardWindow : Window
 
         if (_mode == EdgeMode.Slide)
         {
-            if (!_shown && s != PanelState.Hidden) Show();
+            if (!IsShown && s != PanelState.Hidden) Show();
             _pos.Retarget(_layout.LeftFor(s), now);
         }
         else
         {
             bool open = EffectiveOpen(s);
             if (open == EffectiveOpen(prev)) return;
-            if (open && !_shown)
+            if (open && !IsShown)
             {
                 PlaceAt(_layout.LeftFor(PanelState.Open));
                 Show();
             }
             _fade.Retarget(open ? FadeScale : 0, now);
         }
-        if (_shown) ZOrder.RaiseToTop(_hwnd);
+        if (IsShown) ZOrder.RaiseToTop(_hwnd);
         StartTicking();
     }
 
@@ -153,7 +157,7 @@ public sealed partial class CardWindow : Window
     void Show()
     {
         AppWindow.Show(false);
-        _shown = true;
+        IsShown = true;
         ZOrder.RaiseToTop(_hwnd);
     }
 
@@ -164,6 +168,7 @@ public sealed partial class CardWindow : Window
     {
         if (_ticking) return;
         _ticking = true;
+        _raiseOnTick = true;
         CompositionTarget.Rendering += OnTick;
     }
 
@@ -177,7 +182,10 @@ public sealed partial class CardWindow : Window
         if (slide) WindowFrame.MoveTo(_hwnd, (int)Math.Round(value), _layout.Top);
         // Фейдится только содержимое: DesktopAcrylicBackdrop появляется сразу (слоистая альфа окна ломает акрил, S10).
         else Root.Opacity = Math.Clamp(value / FadeScale, 0, 1);
-        if (_shown) ZOrder.RaiseToTop(_hwnd);
+        // Show() сразу после себя не всегда удерживает TOPMOST: поднимаем на первом тике и при успокоении;
+        // остальное (позже активированные окна) закрывает foreground-хук в ZOrder.
+        if (IsShown && (_raiseOnTick || settled)) ZOrder.RaiseToTop(_hwnd);
+        _raiseOnTick = false;
         if (!settled) return;
 
         CompositionTarget.Rendering -= OnTick;
@@ -185,7 +193,7 @@ public sealed partial class CardWindow : Window
         if (slide ? _state == PanelState.Hidden : !EffectiveOpen(_state))
         {
             AppWindow.Hide();
-            _shown = false;
+            IsShown = false;
             WorkingSet.Trim();
         }
         Settled?.Invoke(_state);
