@@ -29,6 +29,8 @@ public static class ReceiveSession
             if (request.V1?.Type != Conn.V1Frame.Types.FrameType.ConnectionRequest)
                 throw new InvalidDataException("Expected ConnectionRequest.");
             var senderName = DescribeSender(request.V1.ConnectionRequest);
+            var remoteInfo = request.V1.ConnectionRequest.EndpointInfo.IsEmpty ? null
+                : EndpointInfo.TryDecode(request.V1.ConnectionRequest.EndpointInfo.Span, out var decoded) ? decoded : null;
 
             using var ukey = new Ukey2Server();
             var serverInit = ukey.ProcessClientInit(await connection.ReadPlainAsync(ct));
@@ -46,7 +48,7 @@ public static class ReceiveSession
 
             connection.EnableEncryption(SecureChannel.ForServer(handshake.NextSecret));
             await connection.SendSharingAsync(SharingFrames.PairedKeyEncryption(
-                identity.CreatePairedKeyEncryption(handshake.AuthString, PairedKeyRole.Receiver)), ct);
+                identity.CreatePairedKeyEncryption(handshake.AuthString, PairedKeyRole.Receiver, remoteInfo)), ct);
 
             // 3. Paired key, Introduction, consent, file chunks.
             var accepted = false;
@@ -92,7 +94,7 @@ public static class ReceiveSession
                     switch (v1?.Type)
                     {
                         case Share.V1Frame.Types.FrameType.PairedKeyEncryption:
-                            var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Receiver);
+                            var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Receiver, remoteInfo);
                             await connection.SendSharingAsync(SharingFrames.PairedKeyResult(status), ct);
                             break;
 

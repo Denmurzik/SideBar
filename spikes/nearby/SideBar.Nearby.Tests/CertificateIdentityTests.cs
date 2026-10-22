@@ -39,43 +39,82 @@ public class CertificateIdentityTests
         Assert.Null(a.Identify(decoded!));
     }
 
+    private static EndpointInfo Advert(CertificateIdentity who) => who.CreateEndpointInfo("x", DeviceKind.Phone);
+
     [Fact]
     public void PairedKeyRoundTripSucceeds()
     {
         var (a, b) = Pair();
         var token = RandomNumberGenerator.GetBytes(32);
 
-        var fromSender = a.CreatePairedKeyEncryption(token, PairedKeyRole.Sender);
-        var fromReceiver = b.CreatePairedKeyEncryption(token, PairedKeyRole.Receiver);
+        var fromSender = a.CreatePairedKeyEncryption(token, PairedKeyRole.Sender, Advert(b));
+        var fromReceiver = b.CreatePairedKeyEncryption(token, PairedKeyRole.Receiver, Advert(a));
 
-        Assert.Equal(PairedKeyResultFrame.Types.Status.Success, b.VerifyPairedKey(fromSender, token, PairedKeyRole.Receiver));
-        Assert.Equal(PairedKeyResultFrame.Types.Status.Success, a.VerifyPairedKey(fromReceiver, token, PairedKeyRole.Sender));
+        Assert.Equal(PairedKeyResultFrame.Types.Status.Success,
+            b.VerifyPairedKey(fromSender, token, PairedKeyRole.Receiver, Advert(a)));
+        Assert.Equal(PairedKeyResultFrame.Types.Status.Success,
+            a.VerifyPairedKey(fromReceiver, token, PairedKeyRole.Sender, Advert(b)));
         Assert.Equal(6, fromSender.SecretIdHash.Length);
     }
 
     [Fact]
-    public void WrongRolePrefixOrTokenIsNotAccepted()
+    public void SecretIdHashIsComputedWithThePeersCertificateSecret()
+    {
+        // google/nearby: the hash uses the peer's public certificate secret, so the peer can check it against
+        // its own private certificate.
+        var (privA, pubA) = NewCert();
+        var (privB, pubB) = NewCert();
+        var a = new CertificateIdentity(privA, [pubB]);
+        var token = RandomNumberGenerator.GetBytes(32);
+
+        var frame = a.CreatePairedKeyEncryption(token, PairedKeyRole.Sender,
+            new CertificateIdentity(privB, [pubA]).CreateEndpointInfo("b", DeviceKind.Phone));
+
+        Assert.Equal(HKDF.DeriveKey(HashAlgorithmName.SHA256, token, 6, privB.SecretKey, []), frame.SecretIdHash.ToByteArray());
+    }
+
+    [Fact]
+    public void WrongRolePrefixIsRejectedAsFail()
     {
         var (a, b) = Pair();
         var token = RandomNumberGenerator.GetBytes(32);
-        var frame = a.CreatePairedKeyEncryption(token, PairedKeyRole.Sender);
+        var frame = a.CreatePairedKeyEncryption(token, PairedKeyRole.Sender, Advert(b));
 
-        // Receiver verifying a frame that claims the receiver role: prefix mismatch.
+        // Verified as if it came from a receiver: prefix 0x02 expected, 0x01 was signed.
         Assert.Equal(PairedKeyResultFrame.Types.Status.Fail,
-            b.VerifyPairedKey(frame, token, PairedKeyRole.Sender));
-        // Different token: the hash no longer matches any certificate.
-        Assert.Equal(PairedKeyResultFrame.Types.Status.Unable,
-            b.VerifyPairedKey(frame, RandomNumberGenerator.GetBytes(32), PairedKeyRole.Receiver));
+            b.VerifyPairedKey(frame, token, PairedKeyRole.Sender, Advert(a)));
+        Assert.Equal(PairedKeyResultFrame.Types.Status.Fail,
+            b.VerifyPairedKey(frame, RandomNumberGenerator.GetBytes(32), PairedKeyRole.Receiver, Advert(a)));
+    }
+
+    [Fact]
+    public void OptionalSignedDataIsAcceptedWhenTheMainSignatureDoesNotVerify()
+    {
+        var (a, b) = Pair();
+        var token = RandomNumberGenerator.GetBytes(32);
+        var good = a.CreatePairedKeyEncryption(token, PairedKeyRole.Sender, Advert(b));
+        var frame = new PairedKeyEncryptionFrame
+        {
+            SignedData = Google.Protobuf.ByteString.CopyFrom(RandomNumberGenerator.GetBytes(72)),
+            OptionalSignedData = good.SignedData,
+            SecretIdHash = good.SecretIdHash,
+        };
+        Assert.Equal(PairedKeyResultFrame.Types.Status.Success,
+            b.VerifyPairedKey(frame, token, PairedKeyRole.Receiver, Advert(a)));
     }
 
     [Fact]
     public void UnknownPeerGivesUnable()
     {
-        var (a, _) = Pair();
+        var (a, b) = Pair();
         var (_, stranger) = Pair();
         var token = RandomNumberGenerator.GetBytes(32);
+        var frame = a.CreatePairedKeyEncryption(token, PairedKeyRole.Sender, Advert(b));
+        // The stranger cannot identify a's advertisement, nor can it be handed none.
         Assert.Equal(PairedKeyResultFrame.Types.Status.Unable,
-            stranger.VerifyPairedKey(a.CreatePairedKeyEncryption(token, PairedKeyRole.Sender), token, PairedKeyRole.Receiver));
+            stranger.VerifyPairedKey(frame, token, PairedKeyRole.Receiver, Advert(a)));
+        Assert.Equal(PairedKeyResultFrame.Types.Status.Unable,
+            b.VerifyPairedKey(frame, token, PairedKeyRole.Receiver, null));
     }
 
     [Fact]
@@ -99,7 +138,7 @@ public class CertificateIdentityTests
             });
             using var client = new TcpClient();
             await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port, cts.Token);
-            var send = await SendSession.SendFilesAsync(client.GetStream(), new SessionOptions("S", Identity: a), [file], null, cts.Token);
+            var send = await SendSession.SendFilesAsync(client.GetStream(), new SessionOptions("S", Identity: a) { RemoteEndpointInfo = Advert(b) }, [file], null, cts.Token);
 
             Assert.Equal(TransferStatus.Completed, send.Status);
             Assert.Equal(TransferStatus.Completed, (await receive).Status);

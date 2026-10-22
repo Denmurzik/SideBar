@@ -9,6 +9,7 @@ const string Usage = """
     nearby send <file>... [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--self]
     nearby receive [--out DIR] [--yes] [--name DEVICE_NAME] [--reannounce SEC] [--self]
     nearby identity-check
+    (--diag: with --self, print paired-key verification diagnostics, booleans and counts only)
     (--trace: print frame types and sizes in both directions, no payload content)
     (--self: own-devices mode with the official app's certificates; default is the anonymous Everyone mode)
     """;
@@ -32,6 +33,7 @@ if (options.Flag("--self"))
     if (!self.HasSelfCertificate) return Fail("No valid SELF_SHARE certificate; run identity-check, or drop --self to use Everyone mode.");
     Console.WriteLine("Own-devices mode (SELF_SHARE certificate).");
 }
+if (self is not null && options.Flag("--diag")) self.Diag = line => Console.WriteLine("[diag] " + line);
 var session = new SessionOptions(deviceName, Identity: self,
     Trace: options.Flag("--trace") ? line => Console.WriteLine("[trace] " + line) : null);
 
@@ -132,7 +134,7 @@ static async Task<int> Send(CliOptions options, SessionOptions session, Official
     using var client = new TcpClient { NoDelay = true };
     await client.ConnectAsync(target.Address, target.Port, ct);
 
-    var result = await SendSession.SendFilesAsync(client.GetStream(), session, files, new ConsoleObserver(), ct);
+    var result = await SendSession.SendFilesAsync(client.GetStream(), session with { RemoteEndpointInfo = target.Info }, files, new ConsoleObserver(), ct);
     Console.WriteLine();
     Console.WriteLine($"Result: {result.Status}{(result.Detail is null ? "" : " - " + result.Detail)}");
     return result.Status == TransferStatus.Completed ? 0 : 1;
@@ -226,7 +228,7 @@ internal sealed class ConsoleObserver : ITransferObserver
 
 internal sealed class CliOptions
 {
-    private static readonly HashSet<string> Flags = ["--yes", "--self", "--trace", "--include-local"];
+    private static readonly HashSet<string> Flags = ["--yes", "--self", "--trace", "--include-local", "--diag"];
     private readonly Dictionary<string, string> _values = new();
     private readonly HashSet<string> _flags = [];
     public List<string> Positional { get; } = [];

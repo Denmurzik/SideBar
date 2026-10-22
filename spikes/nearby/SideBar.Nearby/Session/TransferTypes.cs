@@ -31,6 +31,9 @@ public sealed record SessionOptions(
     Action<string>? Trace = null)
 {
     /// <summary>How long the sender waits for the receiver to finish and close before it disconnects itself.</summary>
+    /// <summary>Endpoint info of the peer (from mDNS when sending), used to find its public certificate.</summary>
+    public EndpointInfo? RemoteEndpointInfo { get; init; }
+
     public TimeSpan FinishTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
     public IShareIdentity ResolvedIdentity => Identity ?? new AnonymousIdentity();

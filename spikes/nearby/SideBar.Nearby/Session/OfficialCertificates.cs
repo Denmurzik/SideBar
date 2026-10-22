@@ -99,12 +99,20 @@ public sealed class OfficialCertIdentity : IShareIdentity
     public EndpointInfo CreateEndpointInfo(string deviceName, DeviceKind kind) =>
         _inner.CreateEndpointInfo(deviceName, kind);
 
-    public PairedKeyEncryptionFrame CreatePairedKeyEncryption(ReadOnlySpan<byte> authString, PairedKeyRole role) =>
-        _inner.CreatePairedKeyEncryption(authString, role);
+    public PairedKeyEncryptionFrame CreatePairedKeyEncryption(
+        ReadOnlySpan<byte> authString, PairedKeyRole role, EndpointInfo? remote) =>
+        _inner.CreatePairedKeyEncryption(authString, role, remote);
+
+    /// <summary>Diagnostics sink (categories and booleans only) for paired key verification.</summary>
+    public Action<string>? Diag
+    {
+        get => _inner.Diag;
+        set => _inner.Diag = value;
+    }
 
     public PairedKeyResultFrame.Types.Status VerifyPairedKey(
-        PairedKeyEncryptionFrame remote, ReadOnlySpan<byte> authString, PairedKeyRole role) =>
-        _inner.VerifyPairedKey(remote, authString, role);
+        PairedKeyEncryptionFrame frame, ReadOnlySpan<byte> authString, PairedKeyRole role, EndpointInfo? remote) =>
+        _inner.VerifyPairedKey(frame, authString, role, remote);
 
     /// <summary>Device name of a peer advertising with one of our known certificates, or null when unknown.</summary>
     public string? TryGetPeerName(EndpointInfo info)
@@ -166,7 +174,7 @@ public sealed class OfficialCertIdentity : IShareIdentity
     {
         if (_selfSpki is null) return false;
         var token = RandomNumberGenerator.GetBytes(32);
-        return VerifyWithSpki(_selfSpki, token, _inner.CreatePairedKeyEncryption(token, PairedKeyRole.Sender));
+        return VerifyWithSpki(_selfSpki, token, _inner.CreatePairedKeyEncryption(token, PairedKeyRole.Sender, null));
     }
 
     private static bool VerifyWithSpki(byte[] spki, byte[] token, PairedKeyEncryptionFrame frame)

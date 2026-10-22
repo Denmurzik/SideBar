@@ -33,38 +33,78 @@ public sealed class CertificateIdentity(
         return new EndpointInfo { Kind = kind, Name = deviceName, Metadata = [.. salt, .. encrypted] };
     }
 
-    public PairedKeyEncryptionFrame CreatePairedKeyEncryption(ReadOnlySpan<byte> authString, PairedKeyRole role)
+    /// <summary>Diagnostics sink: counts and booleans only, never key material.</summary>
+    public Action<string>? Diag { get; set; }
+
+    // google/nearby paired_key_verification_runner.cc: signed_data is made with OUR private certificate, while
+    // secret_id_hash = HKDF(token, salt = PEER public certificate secret_key), the peer certificate being the one
+    // that decrypts the peer's advertisement.
+    public PairedKeyEncryptionFrame CreatePairedKeyEncryption(
+        ReadOnlySpan<byte> authString, PairedKeyRole role, EndpointInfo? remote)
     {
         using var ec = ECDsa.Create();
         ec.ImportPkcs8PrivateKey(own.KeyPairPkcs8, out _);
         var signature = ec.SignData(Padded(role, authString), HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
+        var peer = remote is null ? null : Identify(remote);
+        Diag?.Invoke($"diag: create role={role} peerCertificateKnown={peer is not null}");
         return new PairedKeyEncryptionFrame
         {
             SignedData = ByteString.CopyFrom(signature),
-            SecretIdHash = ByteString.CopyFrom(HashToken(authString, own.SecretKey)),
+            SecretIdHash = ByteString.CopyFrom(peer is null
+                ? RandomNumberGenerator.GetBytes(6)
+                : HashToken(authString, peer.SecretKey)),
         };
     }
 
     public PairedKeyResultFrame.Types.Status VerifyPairedKey(
-        PairedKeyEncryptionFrame remote, ReadOnlySpan<byte> authString, PairedKeyRole role)
+        PairedKeyEncryptionFrame frame, ReadOnlySpan<byte> authString, PairedKeyRole role, EndpointInfo? remote)
     {
         var theirRole = role == PairedKeyRole.Sender ? PairedKeyRole.Receiver : PairedKeyRole.Sender;
-        foreach (var cert in peers)
+        var peer = remote is null ? null : Identify(remote);
+        if (Diag is not null) Diagnose(frame, authString, theirRole, peer);
+        if (peer is null) return PairedKeyResultFrame.Types.Status.Unable;
+
+        var padded = Padded(theirRole, authString);
+        if (VerifyWith(peer, padded, frame.SignedData.Span)
+            || (frame.HasOptionalSignedData && VerifyWith(peer, padded, frame.OptionalSignedData.Span)))
+            return PairedKeyResultFrame.Types.Status.Success;
+        return PairedKeyResultFrame.Types.Status.Fail;
+    }
+
+    private static bool VerifyWith(PublicCertificateData cert, byte[] padded, ReadOnlySpan<byte> signature)
+    {
+        try
         {
-            if (!CryptographicOperations.FixedTimeEquals(HashToken(authString, cert.SecretKey), remote.SecretIdHash.Span))
-                continue;
-            try
-            {
-                using var ec = ECDsa.Create();
-                ec.ImportSubjectPublicKeyInfo(cert.PublicKeySpki, out _);
-                return ec.VerifyData(Padded(theirRole, authString), remote.SignedData.Span, HashAlgorithmName.SHA256,
-                    DSASignatureFormat.Rfc3279DerSequence)
-                    ? PairedKeyResultFrame.Types.Status.Success
-                    : PairedKeyResultFrame.Types.Status.Fail;
-            }
-            catch (CryptographicException) { return PairedKeyResultFrame.Types.Status.Fail; }
+            using var ec = ECDsa.Create();
+            ec.ImportSubjectPublicKeyInfo(cert.PublicKeySpki, out _);
+            return ec.VerifyData(padded, signature, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
         }
-        return PairedKeyResultFrame.Types.Status.Unable;
+        catch (CryptographicException) { return false; }
+    }
+
+    private void Diagnose(
+        PairedKeyEncryptionFrame frame, ReadOnlySpan<byte> authString, PairedKeyRole theirRole, PublicCertificateData? peer)
+    {
+        var token = authString.ToArray();
+        var hashOwn = CryptographicOperations.FixedTimeEquals(HashToken(token, own.SecretKey), frame.SecretIdHash.Span);
+        var hashPeers = peers.Count(c => CryptographicOperations.FixedTimeEquals(HashToken(token, c.SecretKey), frame.SecretIdHash.Span));
+        Diag!($"diag: hash==ownPrivateCert={hashOwn} hash matches {hashPeers}/{peers.Count} public certs; " +
+              $"peerIdentifiedByAdvertisement={peer is not null}; optionalSignedData={frame.HasOptionalSignedData}");
+
+        byte[] Raw() => token;
+        foreach (var (label, padded) in new (string, byte[])[]
+                 {
+                     ("prefix 0x01", Padded(PairedKeyRole.Sender, token)),
+                     ("prefix 0x02", Padded(PairedKeyRole.Receiver, token)),
+                     ("raw token", Raw()),
+                 })
+        {
+            var signed = peers.Count(c => VerifyWith(c, padded, frame.SignedData.Span));
+            var optional = frame.HasOptionalSignedData ? peers.Count(c => VerifyWith(c, padded, frame.OptionalSignedData.Span)) : 0;
+            Diag!($"diag: {label}: signedData verifies with {signed}/{peers.Count} peer certs, optionalSignedData with {optional}" +
+                  $"{(peer is not null ? $"; with identified peer: {VerifyWith(peer, padded, frame.SignedData.Span)}" : "")}");
+        }
+        Diag!($"diag: expected prefix for the peer = 0x{(theirRole == PairedKeyRole.Sender ? 1 : 2):x2}");
     }
 
     /// <summary>Finds the public certificate whose key decrypts the advertised metadata key (null: unknown device).</summary>

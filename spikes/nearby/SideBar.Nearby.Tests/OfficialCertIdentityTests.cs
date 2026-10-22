@@ -110,9 +110,13 @@ public class OfficialCertIdentityTests
         var token = RandomNumberGenerator.GetBytes(32);
 
         Assert.Equal(PairedKeyResultFrame.Types.Status.Success,
-            phoneSide.VerifyPairedKey(pcSide.CreatePairedKeyEncryption(token, PairedKeyRole.Sender), token, PairedKeyRole.Receiver));
+            phoneSide.VerifyPairedKey(
+                pcSide.CreatePairedKeyEncryption(token, PairedKeyRole.Sender, phoneSide.CreateEndpointInfo("p", DeviceKind.Phone)),
+                token, PairedKeyRole.Receiver, pcSide.CreateEndpointInfo("c", DeviceKind.Laptop)));
         Assert.Equal(PairedKeyResultFrame.Types.Status.Success,
-            pcSide.VerifyPairedKey(phoneSide.CreatePairedKeyEncryption(token, PairedKeyRole.Receiver), token, PairedKeyRole.Sender));
+            pcSide.VerifyPairedKey(
+                phoneSide.CreatePairedKeyEncryption(token, PairedKeyRole.Receiver, pcSide.CreateEndpointInfo("c", DeviceKind.Laptop)),
+                token, PairedKeyRole.Sender, phoneSide.CreateEndpointInfo("p", DeviceKind.Phone)));
     }
 
     [Fact]
@@ -151,7 +155,7 @@ public class OfficialCertIdentityTests
             using var client = new TcpClient();
             await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port, cts.Token);
             var send = await SendSession.SendFilesAsync(client.GetStream(),
-                new SessionOptions("S", Identity: For(pc, phone)), [file], null, cts.Token);
+                new SessionOptions("S", Identity: For(pc, phone)) { RemoteEndpointInfo = For(phone, pc).CreateEndpointInfo("p", DeviceKind.Phone) }, [file], null, cts.Token);
 
             Assert.Equal(TransferStatus.Completed, send.Status);
             Assert.Equal(TransferStatus.Completed, (await receive).Status);
