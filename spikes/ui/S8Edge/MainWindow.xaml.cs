@@ -112,26 +112,49 @@ public sealed partial class MainWindow : Window
         d.Length >= 4 && d[0] == 'G' && d[1] == 'I' && d[2] == 'F' ? ".gif" :
         d.Length >= 12 && d[0] == 'R' && d[1] == 'I' && d[2] == 'F' && d[3] == 'F' && d[8] == 'W' && d[9] == 'E' ? ".webp" : null;
 
-    // Rule: virtual files win (CF_HDROP is ignored: Chrome's one points to a temp file that disappears) and are written to
-    // Shelf\<guid>\name; a CF_HDROP-only item from a temp/cache folder is copied; ordinary paths are kept by reference.
+    static readonly string[] UntitledStems = { "Без имени", "Безымянный", "Untitled", "Unnamed", "Sin título", "Sans titre", "Unbenannt", "Senza titolo" };
+
+    static bool LooksUntitled(string name)
+    {
+        var stem = Path.GetFileNameWithoutExtension(name);
+        return stem.Length == 0 || UntitledStems.Any(u => stem.StartsWith(u, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // Policy:
+    //  1. CF_HDROP with existing paths that are NOT all in temp/cache folders (Explorer, Downloads...) -> use the paths by
+    //     reference (temp ones among them are copied); virtual files are ignored (Explorer also offers FileGroupDescriptorW).
+    //  2. else virtual files (Chrome: CF_HDROP only points to a temp file that disappears) -> Shelf\<guid>\name.
+    //     Name: last segment of an http(s) URL, else "Изображение <timestamp><ext>" when the source name is "Untitled"-like.
+    //  3. else image data (Telegram) -> "Telegram <timestamp>.<ext>"; 4. else temp-only HDROP -> copy.
     async void HandleNativeDrop(NativeDrop d)
     {
         var paths = d.Paths; var virt = d.Virtual; var url = d.Url;
         try
         {
-            if (virt.Count > 0)
+            var existing = paths.Where(File.Exists).ToList();
+            bool hdropUsable = existing.Count > 0 && existing.Any(p => !IsEphemeral(p));
+            if (hdropUsable)
             {
-                Log($"drop policy: virtual files win, ignoring {paths.Count} CF_HDROP path(s)");
+                Log($"drop policy: CF_HDROP with non-temp paths wins, ignoring {virt.Count} virtual file(s)");
+                foreach (var path in existing)
+                {
+                    if (IsEphemeral(path)) AddFile(await Materialize(Path.GetFileName(path), await File.ReadAllBytesAsync(path)), "copied from temp");
+                    else AddFile(await StorageFile.GetFileFromPathAsync(path), "reference");
+                }
+            }
+            else if (virt.Count > 0)
+            {
+                Log($"drop policy: virtual files, ignoring {paths.Count} temp/missing CF_HDROP path(s)");
                 foreach (var vf in virt)
                 {
                     var name = SafeName(vf.Name);
-                    if (url != null && virt.Count == 1 && Uri.TryCreate(url, UriKind.Absolute, out var u))
-                    {
-                        var seg = Uri.UnescapeDataString(Path.GetFileName(u.AbsolutePath));
-                        if (seg.Length > 0) name = SafeName(seg);
-                    }
                     var sniff = SniffExt(vf.Data);
-                    if (sniff != null && Path.GetExtension(name).Length == 0) name += sniff;
+                    if (url != null && virt.Count == 1 && Uri.TryCreate(url, UriKind.Absolute, out var u)
+                        && Uri.UnescapeDataString(Path.GetFileName(u.AbsolutePath)) is { Length: > 0 } seg)
+                        name = SafeName(seg);
+                    else if (LooksUntitled(name))
+                        name = $"Изображение {DateTime.Now:yyyy-MM-dd HH-mm-ss}{(Path.GetExtension(name).Length > 0 ? Path.GetExtension(name) : sniff ?? "")}";
+                    if (Path.GetExtension(name).Length == 0 && sniff != null) name += sniff;
                     AddFile(await Materialize(name, vf.Data), "virtual");
                 }
             }
@@ -144,14 +167,9 @@ public sealed partial class MainWindow : Window
             }
             else
             {
-                foreach (var path in paths)
-                {
-                    if (!File.Exists(path)) { Log($"skip (not a file): {path}"); continue; }
-                    if (IsEphemeral(path))
-                        AddFile(await Materialize(Path.GetFileName(path), await File.ReadAllBytesAsync(path)), "copied from temp");
-                    else
-                        AddFile(await StorageFile.GetFileFromPathAsync(path), "reference");
-                }
+                foreach (var path in existing)
+                    AddFile(await Materialize(Path.GetFileName(path), await File.ReadAllBytesAsync(path)), "copied from temp");
+                foreach (var path in paths.Except(existing)) Log($"skip (not a file): {path}");
             }
             DropInfo.Text = $"native drop: {paths.Count} paths, {virt.Count} virtual";
         }

@@ -187,8 +187,16 @@ sealed class Driver
         both.SetData(DataFormats.FileDrop, new[] { tempFile });
         DragToPanel(both, W, H, out effect);
         var t7 = Since(m);
-        Check("T6 hdrop+virtual at once: exactly one item, taken from the virtual file, materialised in SideBar\\Shelf",
-              t7.Count(l => l.Contains("shelf += ")) == 1 && t7.Any(l => l.Contains("shelf += Untitled.jpg") && l.Contains("where=Shelf") && l.Contains("[virtual]")), t7);
+        Check("T6 hdrop+virtual at once: exactly one item from the virtual file, named Izobrazhenie-time.jpg, in SideBar\\Shelf",
+              t7.Count(l => l.Contains("shelf += ")) == 1 && t7.Any(l => l.Contains("shelf += Изображение ") && l.Contains("where=Shelf") && l.Contains("[virtual]")), t7);
+        // T8: Explorer-like source - CF_HDROP (non-temp path) AND FileGroupDescriptorW at once: one item by reference
+        m = Mark();
+        var explorerLike = MakeVirtual("explorer-virtual.txt", new byte[] { 1, 2, 3 });
+        explorerLike.SetData(DataFormats.FileDrop, new[] { refFile });
+        DragToPanel(explorerLike, W, H, out effect);
+        var t9 = Since(m);
+        Check("T8 hdrop(non-temp)+virtual at once: one item, [reference], not copied into Shelf",
+              t9.Count(l => l.Contains("shelf += ")) == 1 && t9.Any(l => l.Contains("shelf += ref-original.txt") && l.Contains("[reference]") && l.Contains("where=reference")), t9);
         MoveTo(W - 700, H, 200); Thread.Sleep(700);
     }
 
