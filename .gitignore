@@ -440,3 +440,5 @@ spikes/**/out/
 # Spike publish outputs
 spikes/**/out-*/
 spikes/**/*.log
+spikes/**/*.png
+spikes/**/*.csv
