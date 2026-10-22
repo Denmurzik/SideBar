@@ -144,6 +144,7 @@ public sealed partial class CardWindow : Window
             }
             _fade.Retarget(open ? FadeScale : 0, now);
         }
+        if (_shown) ZOrder.RaiseToTop(_hwnd);
         StartTicking();
     }
 
@@ -153,6 +154,7 @@ public sealed partial class CardWindow : Window
     {
         AppWindow.Show(false);
         _shown = true;
+        ZOrder.RaiseToTop(_hwnd);
     }
 
     void PlaceAt(int left) =>
@@ -175,6 +177,7 @@ public sealed partial class CardWindow : Window
         if (slide) WindowFrame.MoveTo(_hwnd, (int)Math.Round(value), _layout.Top);
         // Фейдится только содержимое: DesktopAcrylicBackdrop появляется сразу (слоистая альфа окна ломает акрил, S10).
         else Root.Opacity = Math.Clamp(value / FadeScale, 0, 1);
+        if (_shown) ZOrder.RaiseToTop(_hwnd);
         if (!settled) return;
 
         CompositionTarget.Rendering -= OnTick;
