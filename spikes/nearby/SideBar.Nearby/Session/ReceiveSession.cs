@@ -21,7 +21,7 @@ public static class ReceiveSession
         Directory.CreateDirectory(outputDirectory);
         var incoming = new Dictionary<long, IncomingTarget>();
 
-        await using var connection = new NearbyConnection(stream);
+        await using var connection = new NearbyConnection(stream, options.Trace);
         try
         {
             // 1. ConnectionRequest and UKEY2 ClientInit (plaintext).
@@ -83,6 +83,8 @@ public static class ReceiveSession
                     var frame = await connection.ReadSharingAsync(OnFileChunk, ct);
                     if (frame is null)
                     {
+                        try { await connection.SendOfflineAsync(OfflineFrames.Disconnection(), ct); }
+                        catch (IOException) { }
                         await WaitForPeerCloseAsync(connection, ct);
                         return new TransferResult(TransferStatus.Completed, saved);
                     }

@@ -5,10 +5,11 @@ using SideBar.Nearby.Session;
 using SideBar.Nearby.Wire;
 
 const string Usage = """
-    nearby discover [--timeout SEC] [--self]
+    nearby discover [--timeout SEC] [--self] [--include-local]
     nearby send <file>... [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--self]
     nearby receive [--out DIR] [--yes] [--name DEVICE_NAME] [--reannounce SEC] [--self]
     nearby identity-check
+    (--trace: print frame types and sizes in both directions, no payload content)
     (--self: own-devices mode with the official app's certificates; default is the anonymous Everyone mode)
     """;
 
@@ -31,7 +32,8 @@ if (options.Flag("--self"))
     if (!self.HasSelfCertificate) return Fail("No valid SELF_SHARE certificate; run identity-check, or drop --self to use Everyone mode.");
     Console.WriteLine("Own-devices mode (SELF_SHARE certificate).");
 }
-var session = new SessionOptions(deviceName, Identity: self);
+var session = new SessionOptions(deviceName, Identity: self,
+    Trace: options.Flag("--trace") ? line => Console.WriteLine("[trace] " + line) : null);
 
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
@@ -58,14 +60,21 @@ static int Fail(string message)
     return 2;
 }
 
-static async Task<List<DiscoveredEndpoint>> BrowseAsync(TimeSpan timeout, OfficialCertIdentity? self, CancellationToken ct)
+static async Task<List<DiscoveredEndpoint>> BrowseAsync(
+    TimeSpan timeout, OfficialCertIdentity? self, bool includeLocal, CancellationToken ct)
 {
     var found = new List<DiscoveredEndpoint>();
     using var browser = new QuickShareBrowser();
     var skipped = 0;
+    var ownSkipped = 0;
     browser.Found += found0 =>
     {
         var endpoint = found0;
+        if (!includeLocal && QuickShareAdvertiser.IsLocalAddress(endpoint.Address))
+        {
+            Interlocked.Increment(ref ownSkipped);
+            return;
+        }
         if (self is not null)
         {
             var peer = self.TryGetPeerName(endpoint.Info);
@@ -83,13 +92,14 @@ static async Task<List<DiscoveredEndpoint>> BrowseAsync(TimeSpan timeout, Offici
     Console.WriteLine($"Searching for Quick Share devices for {timeout.TotalSeconds:0} s (Windows DNS-SD)...");
     try { await Task.Delay(timeout, ct); }
     catch (OperationCanceledException) { }
+    if (ownSkipped > 0) Console.WriteLine($"Ignored {ownSkipped} service(s) of this machine (use --include-local to show them).");
     if (skipped > 0) Console.WriteLine($"Skipped {skipped} device(s) not known from the certificates.");
     lock (found) return [.. found];
 }
 
 static async Task<int> Discover(CliOptions options, OfficialCertIdentity? self, CancellationToken ct)
 {
-    var found = await BrowseAsync(TimeSpan.FromSeconds(options.Int("--timeout", 10)), self, ct);
+    var found = await BrowseAsync(TimeSpan.FromSeconds(options.Int("--timeout", 10)), self, options.Flag("--include-local"), ct);
     Console.WriteLine($"Found: {found.Count}");
     return found.Count > 0 ? 0 : 1;
 }
@@ -99,7 +109,7 @@ static async Task<int> Send(CliOptions options, SessionOptions session, Official
     var files = options.Positional.Select(Path.GetFullPath).ToList();
     if (files.Count == 0 || files.Any(f => !File.Exists(f))) return Fail("Specify existing files to send.");
 
-    var found = await BrowseAsync(TimeSpan.FromSeconds(options.Int("--timeout", 10)), self, ct);
+    var found = await BrowseAsync(TimeSpan.FromSeconds(options.Int("--timeout", 10)), self, options.Flag("--include-local"), ct);
     if (found.Count == 0) return Fail("No devices found.");
 
     DiscoveredEndpoint? target = null;
@@ -141,6 +151,7 @@ static async Task<int> Receive(CliOptions options, SessionOptions session, Cance
     var info = session.ResolvedIdentity.CreateEndpointInfo(session.DeviceName, session.DeviceKind);
     using var advertiser = new QuickShareAdvertiser(MdnsName.NewEndpointId(), info.Encode(), port);
     await advertiser.RegisterAsync(ct);
+    AppDomain.CurrentDomain.ProcessExit += (_, _) => advertiser.Dispose();
     Console.WriteLine($"Advertising '{session.DeviceName}' as {advertiser.InstanceName} on {advertiser.Address}:{port}");
     Console.WriteLine($"Files go to {outDir}. On the phone: Quick Share -> send a file -> pick this PC. Ctrl+C to stop.");
     if (reannounce > 0) Console.WriteLine($"The service is re-announced every {reannounce} s (Android can miss services registered before it started searching).");
@@ -215,7 +226,7 @@ internal sealed class ConsoleObserver : ITransferObserver
 
 internal sealed class CliOptions
 {
-    private static readonly HashSet<string> Flags = ["--yes", "--self"];
+    private static readonly HashSet<string> Flags = ["--yes", "--self", "--trace", "--include-local"];
     private readonly Dictionary<string, string> _values = new();
     private readonly HashSet<string> _flags = [];
     public List<string> Positional { get; } = [];

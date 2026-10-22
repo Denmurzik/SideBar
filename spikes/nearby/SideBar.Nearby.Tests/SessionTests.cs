@@ -139,6 +139,35 @@ public sealed class SessionTests : IDisposable
         Assert.Equal(expected, ReceiveSession.SanitizeFileName(input));
 
     [Fact]
+    public async Task SenderDisconnectsOnlyAfterTheReceiverHasFinished()
+    {
+        var trace = new List<string>();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var receive = Task.Run(async () =>
+        {
+            using var c = await listener.AcceptTcpClientAsync(cts.Token);
+            return await ReceiveSession.ReceiveAsync(c.GetStream(), new SessionOptions("R"), _out,
+                (_, _) => Task.FromResult(true), null, cts.Token);
+        });
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port, cts.Token);
+        var send = await SendSession.SendFilesAsync(client.GetStream(),
+            new SessionOptions("S", Trace: line => { lock (trace) trace.Add(line); }),
+            [MakeFile("t.bin", RandomNumberGenerator.GetBytes(5000))], null, cts.Token);
+        await receive;
+        listener.Stop();
+
+        Assert.Equal(TransferStatus.Completed, send.Status);
+        var last = trace.FindLastIndex(l => l.StartsWith("-> PayloadTransfer") && l.EndsWith("flags=1"));
+        var peerDisconnect = trace.FindIndex(l => l.StartsWith("<- Disconnection"));
+        var ourDisconnect = trace.FindIndex(l => l.StartsWith("-> Disconnection"));
+        Assert.True(last >= 0 && peerDisconnect > last, string.Join(" | ", trace));
+        Assert.True(ourDisconnect == -1 || ourDisconnect > peerDisconnect, string.Join(" | ", trace));
+    }
+
+    [Fact]
     public async Task SenderReportsFailureWhenTheReceiverSpeaksGarbage()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));

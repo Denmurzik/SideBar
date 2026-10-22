@@ -26,15 +26,49 @@ internal sealed class NearbyConnection : IAsyncDisposable
     // In-flight BYTES payloads (negotiation messages), keyed by payload id.
     private readonly Dictionary<long, MemoryStream> _bytesPayloads = new();
 
-    public NearbyConnection(Stream stream) => _stream = stream;
+    private readonly Action<string>? _trace;
 
-    public ValueTask<byte[]> ReadPlainAsync(CancellationToken ct) => FrameIO.ReadAsync(_stream, ct);
+    public NearbyConnection(Stream stream, Action<string>? trace = null)
+    {
+        _stream = stream;
+        _trace = trace;
+    }
+
+    private static readonly JsonFormatter TraceFormatter = new(JsonFormatter.Settings.Default.WithIndentation(""));
+    private static readonly System.Text.RegularExpressions.Regex LongBase64 = new("\"[A-Za-z0-9+/=_-]{24,}\"");
+
+    // Field names and values for diagnostics; long binary values (keys, signatures, random data) are reduced to a length.
+    private static string TraceJson(IMessage message) =>
+        LongBase64.Replace(TraceFormatter.Format(message).ReplaceLineEndings(" "), m => $"\"<{m.Length - 2} chars>\"");
+
+    private void Trace(string direction, string what) => _trace?.Invoke($"{direction} {what}");
+
+    // Frame types and sizes only, never payload bytes or keys.
+    private static string Describe(Conn.OfflineFrame frame)
+    {
+        var v1 = frame.V1;
+        if (v1 is null) return "OfflineFrame(no v1)";
+        if (v1.Type != Conn.V1Frame.Types.FrameType.PayloadTransfer || v1.PayloadTransfer is null)
+            return $"{v1.Type} {TraceJson(v1)}";
+        var t = v1.PayloadTransfer;
+        var chunk = t.PayloadChunk;
+        return $"PayloadTransfer {t.PacketType} header={(t.PayloadHeader is null ? "none" : TraceJson(t.PayloadHeader))} " +
+               (chunk is null ? $"control={t.ControlMessage?.Event}" : $"offset={chunk.Offset} len={chunk.Body.Length} flags={chunk.Flags}");
+    }
+
+    public async ValueTask<byte[]> ReadPlainAsync(CancellationToken ct)
+    {
+        var data = await FrameIO.ReadAsync(_stream, ct).ConfigureAwait(false);
+        Trace("<-", $"plain frame {data.Length} bytes");
+        return data;
+    }
 
     public async Task WritePlainAsync(ReadOnlyMemory<byte> data, CancellationToken ct)
     {
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try { await FrameIO.WriteAsync(_stream, data, ct).ConfigureAwait(false); }
         finally { _writeLock.Release(); }
+        Trace("->", $"plain frame {data.Length} bytes");
     }
 
     public Task WritePlainAsync(IMessage message, CancellationToken ct) => WritePlainAsync(message.ToByteArray(), ct);
@@ -55,18 +89,22 @@ internal sealed class NearbyConnection : IAsyncDisposable
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try { await FrameIO.WriteAsync(_stream, channel.Encrypt(frame.ToByteArray()), ct).ConfigureAwait(false); }
         finally { _writeLock.Release(); }
+        Trace("->", Describe(frame));
     }
 
     public async Task<Conn.OfflineFrame> ReadOfflineAsync(CancellationToken ct)
     {
         var channel = _channel ?? throw new InvalidOperationException("Encryption is not enabled.");
         var secure = await FrameIO.ReadAsync(_stream, ct).ConfigureAwait(false);
-        return ParseOffline(channel.Decrypt(secure));
+        var frame = ParseOffline(channel.Decrypt(secure));
+        Trace("<-", Describe(frame));
+        return frame;
     }
 
     /// <summary>Sends a Quick Share frame as a BYTES payload: the whole message, then an empty LAST_CHUNK.</summary>
     public async Task SendSharingAsync(Share.Frame frame, CancellationToken ct)
     {
+        Trace("->", $"Sharing {frame.V1?.Type} {TraceJson(frame)}");
         var data = frame.ToByteArray();
         var header = OfflineFrames.BytesHeader(NextPayloadId(), data.Length);
         await SendOfflineAsync(OfflineFrames.PayloadChunk(header, 0, data, last: false), ct).ConfigureAwait(false);
@@ -99,7 +137,12 @@ internal sealed class NearbyConnection : IAsyncDisposable
                         var complete = AppendBytesChunk(transfer);
                         if (complete is not null)
                         {
-                            try { return Share.Frame.Parser.ParseFrom(complete); }
+                            try
+                            {
+                                var sharing = Share.Frame.Parser.ParseFrom(complete);
+                                Trace("<-", $"Sharing {sharing.V1?.Type} {TraceJson(sharing)}");
+                                return sharing;
+                            }
                             catch (InvalidProtocolBufferException e)
                             {
                                 throw new InvalidDataException("Bad Quick Share frame: " + e.Message);
@@ -117,6 +160,23 @@ internal sealed class NearbyConnection : IAsyncDisposable
                 // KeepAlive, BandwidthUpgradeNegotiation and anything else: not needed on Wi-Fi LAN without upgrade.
             }
         }
+    }
+
+    /// <summary>Reads and discards frames until the peer disconnects, closes the stream or the timeout passes.</summary>
+    public async Task WaitForPeerDisconnectAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+        try
+        {
+            while (true)
+            {
+                var frame = await ReadOfflineAsync(cts.Token).ConfigureAwait(false);
+                if (frame.V1?.Type == Conn.V1Frame.Types.FrameType.Disconnection) return;
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+        catch (Exception e) when (e is IOException or InvalidDataException or SecureChannelException) { }
     }
 
     private byte[]? AppendBytesChunk(Conn.PayloadTransferFrame transfer)

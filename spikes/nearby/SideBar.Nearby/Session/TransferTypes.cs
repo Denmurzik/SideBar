@@ -27,8 +27,12 @@ public interface ITransferObserver
 public sealed record SessionOptions(
     string DeviceName,
     DeviceKind DeviceKind = DeviceKind.Laptop,
-    IShareIdentity? Identity = null)
+    IShareIdentity? Identity = null,
+    Action<string>? Trace = null)
 {
+    /// <summary>How long the sender waits for the receiver to finish and close before it disconnects itself.</summary>
+    public TimeSpan FinishTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
     public IShareIdentity ResolvedIdentity => Identity ?? new AnonymousIdentity();
 }
 

@@ -19,7 +19,7 @@ public static class SendSession
         var identity = options.ResolvedIdentity;
         var entries = files.Select(OutgoingFile.Create).ToList();
 
-        await using var connection = new NearbyConnection(stream);
+        await using var connection = new NearbyConnection(stream, options.Trace);
         try
         {
             // 1. ConnectionRequest + UKEY2 ClientInit (plaintext).
@@ -74,7 +74,7 @@ public static class SendSession
                     case Share.V1Frame.Types.FrameType.Response:
                         if (!introduced)
                             throw new InvalidDataException("Response before Introduction.");
-                        return await HandleResponseAsync(connection, v1.ConnectionResponse.Status, entries, observer, ct);
+                        return await HandleResponseAsync(connection, v1.ConnectionResponse.Status, entries, observer, options.FinishTimeout, ct);
                 }
 
                 if (!introduced && gotKeyEncryption && gotKeyResult)
@@ -104,6 +104,7 @@ public static class SendSession
         Share.ConnectionResponseFrame.Types.Status status,
         List<OutgoingFile> entries,
         ITransferObserver observer,
+        TimeSpan finishTimeout,
         CancellationToken ct)
     {
         if (status != Share.ConnectionResponseFrame.Types.Status.Accept)
@@ -131,7 +132,12 @@ public static class SendSession
             await connection.SendOfflineAsync(OfflineFrames.PayloadChunk(header, sent, [], last: true), ct);
         }
 
-        await connection.SendOfflineAsync(OfflineFrames.Disconnection(), ct);
+        // Do not slam the socket shut: closing with unread data makes TCP send a RST, which can discard what the
+        // receiver has not processed yet (seen as "failed to send" on the phone). Let the receiver finish first.
+        await connection.WaitForPeerDisconnectAsync(finishTimeout, ct);
+        try { await connection.SendOfflineAsync(OfflineFrames.Disconnection(), ct); }
+        catch (IOException) { }
+        await connection.WaitForPeerDisconnectAsync(TimeSpan.FromSeconds(2), ct);
         return new TransferResult(TransferStatus.Completed, entries.Select(e => e.Metadata.Name).ToList());
     }
 
@@ -156,8 +162,8 @@ public static class SendSession
                     Name = name,
                     Size = stream.Length,
                     MimeType = mime,
-                    PayloadId = Random.Shared.NextInt64(long.MinValue, long.MaxValue),
                     Id = Random.Shared.NextInt64(long.MinValue, long.MaxValue),
+                    PayloadId = Random.Shared.NextInt64(long.MinValue, long.MaxValue),
                     Type = MimeTypes.ToFileType(mime, name),
                 },
             };
