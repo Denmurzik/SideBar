@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build tests
+        run: dotnet build tests/SideBar.Core.Tests -c Release
+
+      - name: Run tests
+        run: tests/SideBar.Core.Tests/bin/Release/net10.0-windows10.0.26100.0/SideBar.Core.Tests.exe
+
+      - name: Publish (NativeAOT)
+        shell: bash
+        run: |
+          set -o pipefail
+          dotnet publish src/SideBar.App -c Release -p:Platform=x64 -o artifacts/app 2>&1 | tee publish.log
+
+      - name: Check IL/AOT warnings
+        shell: bash
+        run: |
+          if grep -E "warning (IL|AOT)" publish.log; then
+            echo "::error::Publish produced IL/AOT warnings"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SideBar-win-x64
+          path: artifacts/app

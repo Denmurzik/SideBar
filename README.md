@@ -9,6 +9,33 @@
 
 Неофициальный проект, не связан с Google. «Quick Share» — товарный знак Google LLC.
 
+## Сборка
+
+Требования:
+
+- .NET SDK 10.0.402 (версия закреплена в `global.json`);
+- Visual Studio Build Tools с компонентом «Разработка классических приложений на C++» — нужен для NativeAOT.
+
+Тесты (собранный exe запускается напрямую: `dotnet test` с xunit.v3 на .NET 10 даёт «Handshake failures»):
+
+```
+dotnet build tests/SideBar.Core.Tests -c Release
+tests/SideBar.Core.Tests/bin/Release/net10.0-windows10.0.26100.0/SideBar.Core.Tests.exe
+```
+
+Публикация (NativeAOT, результат — `artifacts/app`):
+
+```
+dotnet publish src/SideBar.App -c Release -p:Platform=x64 -o artifacts/app
+```
+
+## Структура
+
+- `src/SideBar.Core` — библиотека с логикой без UI;
+- `src/SideBar.App` — приложение WinUI 3 (unpackaged, NativeAOT);
+- `tests/` — тесты (`SideBar.Core.Tests`);
+- `spikes/` — исследовательский код, не часть продукта.
+
 ## Лицензия
 
 [GPL-3.0](LICENSE)
