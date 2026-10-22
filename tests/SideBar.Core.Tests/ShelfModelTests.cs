@@ -77,4 +77,29 @@ public class ShelfModelTests
         Assert.Equal("a.txt", ShelfModel.UniqueName("a.txt", []));
         Assert.Equal("a (3).txt", ShelfModel.UniqueName("a.txt", ["a.txt", "a (2).txt"]));
     }
+
+    [Fact]
+    public void Restore_keeps_newest_100_in_order()
+    {
+        var src = Enumerable.Range(0, 130)
+            .Select(i => new ShelfItem(Guid.NewGuid(), $"f{i}", $@"C:\f{i}", ShelfItemKind.Reference, DateTimeOffset.Now)).ToList();
+        var m = new ShelfModel(src);
+        Assert.Equal(src.Skip(30), m.Items);
+    }
+
+    [Fact]
+    public void Restore_deduplicates_display_names()
+    {
+        ShelfItem Mk(string n) => new(Guid.NewGuid(), n, @"C:\" + n, ShelfItemKind.Reference, DateTimeOffset.Now);
+        var m = new ShelfModel([Mk("a.txt"), Mk("A.txt")]);
+        Assert.Equal(["a.txt", "A (2).txt"], m.Items.Select(i => i.DisplayName));
+    }
+
+    [Fact]
+    public void Add_root_or_trailing_slash_gets_fallback_name()
+    {
+        var m = new ShelfModel();
+        Assert.Equal("file", m.Add(@"C:\", ShelfItemKind.Reference)!.DisplayName);
+        Assert.Equal("dir", m.Add(@"C:\x\dir\", ShelfItemKind.Reference)!.DisplayName);
+    }
 }

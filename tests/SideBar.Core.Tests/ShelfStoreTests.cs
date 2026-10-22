@@ -54,4 +54,16 @@ public sealed class ShelfStoreTests : IDisposable
         Assert.Equal(second, store.Load());
         Assert.False(File.Exists(file + ".tmp"));
     }
+
+    [Fact]
+    public void Load_sanitizes_corrupt_entries()
+    {
+        var file = Path.Combine(_dir, "shelf.json");
+        const string id = "11111111-1111-1111-1111-111111111111";
+        var valid = $$"""{"Id":"{{id}}","DisplayName":"a.txt","Path":"C:/a.txt","Kind":0,"AddedAt":"2026-10-23T12:00:00+03:00"}""";
+        var bad = valid.Replace("\"Kind\":0", "\"Kind\":7").Replace(id, "22222222-2222-2222-2222-222222222222");
+        File.WriteAllText(file, $"[null,{{}},{valid},{valid},{bad}]");
+        var items = new ShelfStore(file).Load();
+        Assert.Equal([Guid.Parse(id)], items.Select(i => i.Id));
+    }
 }

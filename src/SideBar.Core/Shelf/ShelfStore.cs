@@ -11,7 +11,7 @@ public sealed class ShelfStore(string filePath)
         {
             if (!File.Exists(filePath)) return [];
             using var stream = File.OpenRead(filePath);
-            return JsonSerializer.Deserialize(stream, ShelfJsonContext.Default.ListShelfItem) ?? [];
+            return ShelfModel.Sanitize(JsonSerializer.Deserialize(stream, ShelfJsonContext.Default.ListShelfItem) ?? []);
         }
         catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
         {
@@ -19,6 +19,7 @@ public sealed class ShelfStore(string filePath)
         }
     }
 
+    /// <summary>Бросает IOException/UnauthorizedAccessException. Не безопасен при параллельных вызовах (только UI-поток).</summary>
     public void Save(IReadOnlyList<ShelfItem> items)
     {
         var dir = Path.GetDirectoryName(filePath);

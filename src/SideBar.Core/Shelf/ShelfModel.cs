@@ -13,12 +13,12 @@ public sealed class ShelfModel
 
     public ShelfModel() { }
 
-    public ShelfModel(IEnumerable<ShelfItem> initial) => _items.AddRange(initial.Take(MaxItems));
+    public ShelfModel(IEnumerable<ShelfItem> initial) => _items.AddRange(Sanitize(initial));
 
     public ShelfItem? Add(string path, ShelfItemKind kind, string? preferredName = null)
     {
         if (_items.Count >= MaxItems) return null;
-        var name = UniqueName(string.IsNullOrWhiteSpace(preferredName) ? System.IO.Path.GetFileName(path) : preferredName,
+        var name = UniqueName(string.IsNullOrWhiteSpace(preferredName) ? FallbackName(path) : preferredName,
             _items.Select(i => i.DisplayName));
         var item = new ShelfItem(Guid.NewGuid(), name, path, kind, DateTimeOffset.Now);
         _items.Add(item);
@@ -55,5 +55,33 @@ public sealed class ShelfModel
             var candidate = $"{stem} ({n}){ext}";
             if (!set.Contains(candidate)) return candidate;
         }
+    }
+
+    /// <summary>Имя файла из пути; для корня/хвостового слэша - последний сегмент каталога, иначе "file".</summary>
+    private static string FallbackName(string path)
+    {
+        var name = System.IO.Path.GetFileName(path);
+        if (!string.IsNullOrEmpty(name)) return name;
+        name = System.IO.Path.GetFileName(path.TrimEnd('\\', '/'));
+        return string.IsNullOrEmpty(name) ? "file" : name;
+    }
+
+    /// <summary>
+    /// Чистит данные с диска: отбрасывает null, пустой Id/Path/DisplayName, неопределённый Kind и повторы Id (первый остаётся),
+    /// делает DisplayName уникальными и оставляет НОВЕЙШИЕ <see cref="MaxItems"/> с сохранением порядка.
+    /// </summary>
+    public static List<ShelfItem> Sanitize(IEnumerable<ShelfItem?> items)
+    {
+        var ids = new HashSet<Guid>();
+        var result = new List<ShelfItem>();
+        foreach (var i in items)
+        {
+            if (i is null || i.Id == Guid.Empty || string.IsNullOrEmpty(i.Path) || string.IsNullOrEmpty(i.DisplayName)
+                || !Enum.IsDefined(i.Kind) || !ids.Add(i.Id)) continue;
+            var name = UniqueName(i.DisplayName, result.Select(r => r.DisplayName));
+            result.Add(name == i.DisplayName ? i : i with { DisplayName = name });
+        }
+        if (result.Count > MaxItems) result.RemoveRange(0, result.Count - MaxItems);
+        return result;
     }
 }
