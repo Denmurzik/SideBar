@@ -10,4 +10,7 @@
   <ItemGroup>
     <Compile Include="src/**/*.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\nearby\SideBar.Nearby\SideBar.Nearby.csproj" />
+  </ItemGroup>
 </Project>

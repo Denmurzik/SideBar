@@ -34,11 +34,46 @@ Fast Initiation (`fast_init_ble_beacon.h`, V1): AD Service Data (0x16), UUID `FE
 
 ## 4. Спайк
 
-`dotnet spikes/ble/bin/Debug/net10.0-windows10.0.26100.0/Ble.dll info | watch [сек] | publish [сек] [notify|silent]`. Печатает только счётчики, типы секций и форму `FE2C`-данных (длина и первые 5 байт после UUID: model id / метаданные, не идентификаторы устройств); адреса и имена не выводятся.
-Полезная нагрузка publish — гипотеза: `2C FE FC 12 8E <meta> 00` (`meta = type<<2`).
+`dotnet spikes/ble/bin/Debug/net10.0-windows10.0.26100.0/Ble.dll info | watch [сек] | publish [сек] [опции]`. Печатает только счётчики, типы секций и форму `FE2C`-данных; адреса и имена не выводятся. Для пакетов с телом `FC128E...` в `watch` печатается тело целиком (salt и hash эфемерные, идентификаторов нет) + RSSI.
 
-## 5. Сценарий проверки с телефоном (Pixel 9) — для тимлида
+### Раскладка Fast Initiation V1 (уточнено, 24 байта после UUID `2C FE`)
 
-1. Запустить `Ble watch 60`; на телефоне открыть «Поделиться» -> Quick Share (идёт сканирование получателей). Ожидаем рост счётчика `FE2C` со строкой `head=FC128E..`; записать `meta` и длину.
-2. Запустить `Ble publish 30 notify`; смотреть, показал ли телефон уведомление/«устройство рядом делится» (на телефоне Quick Share включён, видимость «Контакты/Все»). Повторить с `silent`.
-3. Результаты (какие строки `head`, реакция телефона) -> уточним раскладку метаданных.
+Источник: `sharing/internal/api/fast_init_ble_beacon.h` (google/nearby) + `rquickshare/core_lib/src/hdl/blea.rs`, где зашит байтовый дамп настоящего Android-отправителя; совпадает с наблюдением в эфире (`len=24 head=FC128E0142`, расширенная неподключаемая реклама):
+
+| Смещение | Размер | Поле |
+|---|---|---|
+| 0 | 3 | model id `FC 12 8E` |
+| 3 | 1 | `version(3) | type(3) | uwb(1) | sender_cert(1)`: `0x01` = V1, notify, без UWB, sender_cert=1 |
+| 4 | 1 | adjusted tx power (`0x42` у Android) |
+| 5 | 1 | uwb metadata (0) |
+| 6 | 8 | uwb address (нули) |
+| 14 | 1 | salt |
+| 15 | 8 | secret_id_hash (у Android — хэш сертификата отправителя; у rquickshare — зашитые 8 байт) |
+| 23 | 1 | флаги `require_bt_advertising | self_only_advertising` (0) |
+
+Предыдущая гипотеза (`FC128E <type<<2> 00`, 7 байт) была неверной — не хватало длины и положения битов (type в битах 4..2, sender_cert в бите 0). rquickshare будит Android именно рассылкой этих 24 байт (`Broadcast`, не подключаемая) — «устройство рядом делится» -> Android включает mDNS-службу (README rquickshare: без этого телефон светится нерегулярно).
+
+### Опции publish
+
+| Опция | Смысл |
+|---|---|
+| `--static` | дословный дамп rquickshare (проверенный на практике вариант), остальное игнорируется |
+| `--type notify|silent` | тип (биты 4..2): 0 / 1 |
+| `--cert 0|1` | sender_cert_supported (бит 0), по умолчанию 1 |
+| `--tx HEX` | adjusted tx power, по умолчанию `42` |
+| `--hash random|selfshare` | secret_id_hash: случайный или **гипотеза** HKDF-SHA256(ikm=salt, salt=secret_key SELF_SHARE-серта, 8 Б) (в открытых исходниках не описано) |
+| `--ext` / (по умолчанию legacy) | расширенная или обычная реклама (наблюдаемый Android — extended) |
+| `--raw HEX` | произвольное тело после UUID |
+
+## 5. Сценарий проверки с телефоном (Pixel 9)
+
+Критерий успеха: телефон, который сам ничего не рекламирует (экран «Получить» НЕ открыт), после нашего beacon начинает отвечать по mDNS, и `nearby discover` его находит; либо появляется уведомление «устройство рядом делится».
+Команды (два окна PowerShell, из `C:\D\den4ik\SideBar\spikes`):
+1. Контроль без beacon: `nearby\SideBar.Nearby.Cliin\Debug
+et10.0-windows10.0.26100.0
+earby.exe discover --timeout 15` — телефон (экран включён, разблокирован, Quick Share видимость «Все») обычно не найден.
+2. Окно A: `dotnet blein\Debug
+et10.0-windows10.0.26100.0\Ble.dll publish 60 --static`. Окно B (через 3-5 с): `...
+earby.exe discover --timeout 30`. Смотреть: появился ли Pixel 9; реакция телефона (уведомление).
+3. Если нет: варианты (по 60 с, discover параллельно): `publish 60 --ext` (extended как у Android), `publish 60 --type silent --ext`, `publish 60 --ext --hash selfshare` (для «Ваших устройств»: `nearby discover --self`), `publish 60 --legacy --cert 0`.
+4. Для сверки: `Ble watch 60` при открытом на телефоне «Поделиться -> Quick Share» печатает тела `FE2C` телефона целиком (`body=...`): наши варианты можно сравнить побайтно (`salt`/`hash` эфемерные).
