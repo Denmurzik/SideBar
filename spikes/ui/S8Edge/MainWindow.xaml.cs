@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -16,7 +17,7 @@ public sealed partial class MainWindow : Window
     readonly Microsoft.UI.Dispatching.DispatcherQueue _dq = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
     readonly ObservableCollection<string> _names = new();
     readonly List<(string Path, StorageFile File)> _items = new();
-    readonly string _shelfDir = Path.Combine(Path.GetTempPath(), "S8Shelf");
+    readonly string _shelfDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SideBar", "Shelf");
     nint _hwnd;
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int SetWindowRgn(nint hwnd, nint rgn, bool redraw);
     [System.Runtime.InteropServices.DllImport("gdi32.dll")] static extern nint CreateRoundRectRgn(int l, int t, int r, int b, int w, int h);
@@ -67,7 +68,7 @@ public sealed partial class MainWindow : Window
         StripFrame();
         AppWindow.Show(false);
         await Task.Delay(800);
-        _proxies = OleData.InstallProxies(_hwnd, Log, (paths, virt) => _dq.TryEnqueue(() => HandleNativeDrop(paths, virt)), active => _dragActive = active);
+        _proxies = OleData.InstallProxies(_hwnd, Log, d => _dq.TryEnqueue(() => HandleNativeDrop(d)), active => _dragActive = active);
         AppWindow.Hide();
 
         _edge.StateChanged += (s, why) => _dq.TryEnqueue(() =>
@@ -89,20 +90,108 @@ public sealed partial class MainWindow : Window
         Log("ready; edge watcher running");
     }
 
-    async void HandleNativeDrop(IReadOnlyList<string> paths, IReadOnlyList<VirtualFile> virt)
+    static readonly string[] EphemeralRoots =
     {
+        Path.GetTempPath(),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Temp"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "Windows", "INetCache"),
+    };
+
+    static bool IsEphemeral(string path) =>
+        EphemeralRoots.Any(r => path.StartsWith(r.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase));
+
+    static string SafeName(string n)
+    {
+        foreach (var c in Path.GetInvalidFileNameChars()) n = n.Replace(c, '_');
+        return n.Length == 0 ? "file" : n;
+    }
+
+    static string? SniffExt(byte[] d) =>
+        d.Length >= 4 && d[0] == 0xFF && d[1] == 0xD8 ? ".jpg" :
+        d.Length >= 4 && d[0] == 0x89 && d[1] == 0x50 && d[2] == 0x4E && d[3] == 0x47 ? ".png" :
+        d.Length >= 4 && d[0] == 'G' && d[1] == 'I' && d[2] == 'F' ? ".gif" :
+        d.Length >= 12 && d[0] == 'R' && d[1] == 'I' && d[2] == 'F' && d[3] == 'F' && d[8] == 'W' && d[9] == 'E' ? ".webp" : null;
+
+    // Rule: virtual files win (CF_HDROP is ignored: Chrome's one points to a temp file that disappears) and are written to
+    // Shelf\<guid>\name; a CF_HDROP-only item from a temp/cache folder is copied; ordinary paths are kept by reference.
+    async void HandleNativeDrop(NativeDrop d)
+    {
+        var paths = d.Paths; var virt = d.Virtual; var url = d.Url;
         try
         {
-            foreach (var path in paths) if (File.Exists(path)) AddFile(await StorageFile.GetFileFromPathAsync(path));
-            foreach (var vf in virt)
+            if (virt.Count > 0)
             {
-                var path = Path.Combine(_shelfDir, vf.Name);
-                await File.WriteAllBytesAsync(path, vf.Data);
-                AddFile(await StorageFile.GetFileFromPathAsync(path));
+                Log($"drop policy: virtual files win, ignoring {paths.Count} CF_HDROP path(s)");
+                foreach (var vf in virt)
+                {
+                    var name = SafeName(vf.Name);
+                    if (url != null && virt.Count == 1 && Uri.TryCreate(url, UriKind.Absolute, out var u))
+                    {
+                        var seg = Uri.UnescapeDataString(Path.GetFileName(u.AbsolutePath));
+                        if (seg.Length > 0) name = SafeName(seg);
+                    }
+                    var sniff = SniffExt(vf.Data);
+                    if (sniff != null && Path.GetExtension(name).Length == 0) name += sniff;
+                    AddFile(await Materialize(name, vf.Data), "virtual");
+                }
             }
-            DropInfo.Text = $"native drop: {paths.Count} files, {virt.Count} virtual";
+            else if (d.Image != null)
+            {
+                var ext = d.ImageExt!;
+                var data = d.Image;
+                if (ext == ".bmp") { data = await BmpToPng(data); ext = ".png"; }
+                AddFile(await Materialize($"Telegram {DateTime.Now:yyyy-MM-dd HH-mm-ss}{ext}", data), "image data");
+            }
+            else
+            {
+                foreach (var path in paths)
+                {
+                    if (!File.Exists(path)) { Log($"skip (not a file): {path}"); continue; }
+                    if (IsEphemeral(path))
+                        AddFile(await Materialize(Path.GetFileName(path), await File.ReadAllBytesAsync(path)), "copied from temp");
+                    else
+                        AddFile(await StorageFile.GetFileFromPathAsync(path), "reference");
+                }
+            }
+            DropInfo.Text = $"native drop: {paths.Count} paths, {virt.Count} virtual";
         }
         catch (Exception ex) { Log("native drop failed: " + ex); }
+    }
+
+    static async Task<byte[]> BmpToPng(byte[] bmp)
+    {
+        using var input = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+        await input.WriteAsync(bmp.AsBuffer());
+        input.Seek(0);
+        var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(input);
+        var pixels = await decoder.GetPixelDataAsync();
+        using var output = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+        var enc = await Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId, output);
+        enc.SetPixelData(decoder.BitmapPixelFormat, decoder.BitmapAlphaMode, decoder.PixelWidth, decoder.PixelHeight, decoder.DpiX, decoder.DpiY, pixels.DetachPixelData());
+        await enc.FlushAsync();
+        output.Seek(0);
+        var buf = new byte[output.Size];
+        await output.ReadAsync(buf.AsBuffer(), (uint)buf.Length, Windows.Storage.Streams.InputStreamOptions.None);
+        return buf;
+    }
+
+    // Display names on the shelf must be unique: "name (2).ext"
+    string UniqueName(string name)
+    {
+        var stem = Path.GetFileNameWithoutExtension(name); var ext = Path.GetExtension(name);
+        var candidate = name; int n = 2;
+        while (_names.Contains(candidate)) candidate = $"{stem} ({n++}){ext}";
+        return candidate;
+    }
+
+    async Task<StorageFile> Materialize(string name, byte[] data)
+    {
+        name = UniqueName(name);
+        var dir = Path.Combine(_shelfDir, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, name);
+        await File.WriteAllBytesAsync(path, data);
+        return await StorageFile.GetFileFromPathAsync(path);
     }
 
     // ---- drop target ----
@@ -157,19 +246,20 @@ public sealed partial class MainWindow : Window
         finally { def.Complete(); }
     }
 
-    void AddFile(StorageFile f)
+    void AddFile(StorageFile f, string how = "")
     {
         if (_items.Any(i => i.Path == f.Path)) return;
         _items.Add((f.Path, f));
         _names.Add(f.Name);
-        Log($"shelf += {f.Name} ({_items.Count} items)");
+        Log($"shelf += {f.Name} ({_items.Count} items) [{how}] where={(f.Path.StartsWith(_shelfDir, StringComparison.OrdinalIgnoreCase) ? "Shelf" : "reference")}");
     }
 
     // ---- drag out ----
     void OnDragAllStarting(UIElement sender, DragStartingEventArgs e)
     {
         e.Data.SetStorageItems(_items.Select(i => (IStorageItem)i.File).ToList());
-        e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
+        e.AllowedOperations = DataPackageOperation.Copy;
+        e.Data.RequestedOperation = DataPackageOperation.Copy;   // never Move: Explorer would move the user's originals
         _dragActive = true;
         Log($"drag-out ALL starting, {_items.Count} items");
     }
@@ -182,26 +272,29 @@ public sealed partial class MainWindow : Window
         Log($"shelf count={_items.Count}");
     }
 
-    void OnItemsStarting(object sender, DragItemsStartingEventArgs e)
+    // Single items are dragged through UIElement.DragStarting (DragItemsStarting has no AllowedOperations).
+    void OnItemDragStarting(UIElement sender, DragStartingEventArgs e)
     {
-        var names = e.Items.Cast<string>().ToList();
-        var files = _items.Where(i => names.Contains(i.File.Name)).Select(i => (IStorageItem)i.File).ToList();
+        var name = (sender as FrameworkElement)?.DataContext as string;
+        var files = _items.Where(i => i.File.Name == name).Select(i => (IStorageItem)i.File).ToList();
         e.Data.SetStorageItems(files);
-        e.Data.RequestedOperation = DataPackageOperation.Copy | DataPackageOperation.Move;
+        e.AllowedOperations = DataPackageOperation.Copy;
+        e.Data.RequestedOperation = DataPackageOperation.Copy;   // never Move: Explorer would move the user's originals
         _dragActive = true;
-        Log($"drag-out items starting: {string.Join(",", names)}");
+        Log($"drag-out item starting: {name}");
     }
 
-    void OnItemsCompleted(ListViewBase sender, DragItemsCompletedEventArgs e)
+    void OnItemDropCompleted(UIElement sender, DropCompletedEventArgs e)
     {
         _dragActive = false;
-        Log($"drag-out items completed, DropResult={e.DropResult}");
-        if (e.DropResult == DataPackageOperation.None) { Log($"shelf count={_items.Count}"); return; }
-        foreach (var n in e.Items.Cast<string>().ToList())
+        var name = (sender as FrameworkElement)?.DataContext as string;
+        Log($"drag-out item completed, DropResult={e.DropResult}");
+        if (e.DropResult != DataPackageOperation.None && name != null)
         {
-            _names.Remove(n);
-            _items.RemoveAll(i => i.File.Name == n);
+            _names.Remove(name);
+            _items.RemoveAll(i => i.File.Name == name);
         }
+        Log($"shelf count={_items.Count}");
     }
 
     void Log(string s)

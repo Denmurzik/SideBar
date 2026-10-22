@@ -34,6 +34,7 @@ sealed class Driver
     string _lastEffect = "";
     readonly List<string> _accepted = new();
     int _fail;
+    string _lastAllowed = "";
 
     public Driver(string exe)
     {
@@ -62,7 +63,7 @@ sealed class Driver
             _lastEffect = eff.ToString();
         };
         _accept.AllowDrop = _reject.AllowDrop = true;
-        _accept.DragEnter += (_, e) => e.Effect = e.Data!.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+        _accept.DragEnter += (_, e) => { _lastAllowed = e.AllowedEffect.ToString(); e.Effect = e.Data!.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None; };
         _accept.DragOver += (_, e) => e.Effect = e.Data!.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
         _accept.DragDrop += (_, e) => _accepted.AddRange((string[])e.Data!.GetData(DataFormats.FileDrop)!);
         _reject.DragEnter += (_, e) => e.Effect = DragDropEffects.None;
@@ -163,6 +164,31 @@ sealed class Driver
         DragOut(W, H, _accept, out effect);
         var t6 = Since(m);
         Check("T5b items still on shelf after rejected drop (second drag-out delivers them)", _accepted.Count == 2 && t6.Any(l => l.Contains("starting, 2 items")), t6);
+        // T7: drag-out must be COPY only, a [reference] original (outside temp) must stay in place
+        var refFile = Path.Combine(AppContext.BaseDirectory, "ref-original.txt");
+        File.WriteAllText(refFile, "original must survive");
+        var refData = new DataObject();
+        refData.SetData(DataFormats.FileDrop, new[] { refFile });
+        DragToPanel(refData, W, H, out effect);
+        m = Mark();
+        _lastAllowed = "";
+        _accepted.Clear();
+        DragOut(W, H, _accept, out effect);
+        var t8 = Since(m);
+        Check("T7 drag-out is Copy-only (AllowedEffect), DropResult=Copy, [reference] original still exists",
+              _lastAllowed == "Copy" && t8.Any(l => l.Contains("completed, DropResult=Copy")) && File.Exists(refFile), t8);
+        Rep($"  target saw AllowedEffect={_lastAllowed}");
+
+        // T6: Chrome-like source - CF_HDROP (temp file) AND virtual file at once: one item, materialised into Shelf
+        m = Mark();
+        var tempFile = Path.Combine(tmp, "chrome-temp.jpg");
+        File.WriteAllBytes(tempFile, new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3 });
+        var both = MakeVirtual("Untitled.jpg", new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4, 5 });
+        both.SetData(DataFormats.FileDrop, new[] { tempFile });
+        DragToPanel(both, W, H, out effect);
+        var t7 = Since(m);
+        Check("T6 hdrop+virtual at once: exactly one item, taken from the virtual file, materialised in SideBar\\Shelf",
+              t7.Count(l => l.Contains("shelf += ")) == 1 && t7.Any(l => l.Contains("shelf += Untitled.jpg") && l.Contains("where=Shelf") && l.Contains("[virtual]")), t7);
         MoveTo(W - 700, H, 200); Thread.Sleep(700);
     }
 

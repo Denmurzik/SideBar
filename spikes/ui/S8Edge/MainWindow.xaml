@@ -15,10 +15,9 @@
                 DragStarting="OnDragAllStarting" DropCompleted="OnDragAllCompleted">
           <TextBlock x:Name="DragAllText" Foreground="White" FontSize="11" Text="Drag ALL out" HorizontalAlignment="Center"/>
         </Border>
-        <ListView x:Name="Shelf" Grid.Row="1" CanDragItems="True" SelectionMode="Single"
-                  DragItemsStarting="OnItemsStarting" DragItemsCompleted="OnItemsCompleted">
+        <ListView x:Name="Shelf" Grid.Row="1" CanDragItems="False" SelectionMode="Single">
           <ListView.ItemTemplate>
-            <DataTemplate x:DataType="x:String"><TextBlock Text="{x:Bind}" Foreground="White" FontSize="11" TextTrimming="CharacterEllipsis"/></DataTemplate>
+            <DataTemplate x:DataType="x:String"><Border CanDrag="True" DragStarting="OnItemDragStarting" DropCompleted="OnItemDropCompleted" Background="Transparent"><TextBlock Text="{x:Bind}" Foreground="White" FontSize="11" TextTrimming="CharacterEllipsis"/></Border></DataTemplate>
           </ListView.ItemTemplate>
         </ListView>
       </Grid>
