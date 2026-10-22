@@ -436,3 +436,7 @@ spikes/**/out/
 
 # Cross-agent build lock (one heavy build at a time)
 .buildlock/
+
+# Spike publish outputs
+spikes/**/out-*/
+spikes/**/*.log

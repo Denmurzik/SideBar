@@ -1,0 +1,11 @@
+<Window x:Class="S7Panel.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Grid Background="#CC202020">
+    <StackPanel Margin="16" Spacing="8">
+      <TextBlock Text="SideBar S7" FontSize="20" Foreground="White"/>
+      <TextBlock x:Name="Info" Foreground="#AAFFFFFF" TextWrapping="Wrap"/>
+      <Button Content="Button"/>
+    </StackPanel>
+  </Grid>
+</Window>

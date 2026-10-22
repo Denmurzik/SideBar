@@ -1,0 +1,8 @@
+syntax = "proto3";
+option csharp_namespace = "S7Panel.Proto";
+message Ping {
+  string name = 1;
+  int32 id = 2;
+  repeated bytes chunks = 3;
+  map<string, string> meta = 4;
+}

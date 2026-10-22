@@ -1,0 +1,15 @@
+<Window x:Class="S10Spring.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Grid x:Name="Root" Background="Transparent">
+    <Grid x:Name="Panel" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+      <Grid x:Name="Fill" Background="#B0202020"/>
+      <StackPanel Margin="20" Spacing="10">
+        <TextBlock x:Name="Title" Text="SideBar S10" FontSize="22" Foreground="White"/>
+        <TextBlock x:Name="Info" Foreground="#CCFFFFFF" TextWrapping="Wrap"/>
+        <Button Content="Click me (proves hit-test)" Click="OnClick"/>
+        <TextBlock x:Name="Clicks" Foreground="#CCFFFFFF"/>
+      </StackPanel>
+    </Grid>
+  </Grid>
+</Window>
