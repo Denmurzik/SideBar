@@ -20,6 +20,7 @@ public sealed partial class CardWindow : Window
     readonly Spring _pos = new(), _fade = new();
     nint _hwnd;
     CardLayout _layout = null!;
+    double _scale = 1;
     EdgeMode _mode;
     PanelState _state = PanelState.Hidden;
     bool _shown, _ticking;
@@ -37,10 +38,11 @@ public sealed partial class CardWindow : Window
 
     static double Now => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
 
-    public void Initialize(CardLayout layout, EdgeMode mode)
+    public void Initialize(CardLayout layout, EdgeMode mode, double scale)
     {
         _hwnd = WindowNative.GetWindowHandle(this);
         _layout = layout;
+        _scale = scale;
         _mode = mode;
 
         var presenter = OverlappedPresenter.Create();
@@ -92,7 +94,7 @@ public sealed partial class CardWindow : Window
         });
     }
 
-    public void Relayout(CardLayout layout, EdgeMode mode)
+    public void Relayout(CardLayout layout, EdgeMode mode, double scale)
     {
         if (_ticking)
         {
@@ -101,6 +103,7 @@ public sealed partial class CardWindow : Window
         }
         _layout = layout;
         _mode = mode;
+        _scale = scale;
         _state = PanelState.Hidden;   // как EdgeStateMachine.Relayout
         ApplyStrokes();
         int hidden = layout.LeftFor(PanelState.Hidden);
@@ -187,7 +190,7 @@ public sealed partial class CardWindow : Window
     void ApplyStrokes()
     {
         if (_hwnd == 0) return;
-        double scale = Math.Max(WindowFrame.GetDpi(_hwnd), 96) / 96.0;
+        double scale = _scale;   // тот же масштаб, что у CardLayout
         bool dark = Root.ActualTheme != ElementTheme.Light;
         var brush = new SolidColorBrush(dark ? Windows.UI.Color.FromArgb(0x70, 0x8C, 0x8C, 0x8C) : Windows.UI.Color.FromArgb(0x50, 0x40, 0x40, 0x40));
         Panel.BorderThickness = new Thickness(1.0 / scale);
