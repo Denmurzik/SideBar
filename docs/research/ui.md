@@ -119,3 +119,13 @@
 
 ### Плитки (S10Spring)
 Верхняя плитка Quick Share: сплошная обводка 1 физ. px (тон обводки карточки), внутри заглушка-квадрат 72 epx со скруглением 4 под логотип. Нижняя плитка (стопка): `Rectangle` RadiusX/Y=4, `StrokeThickness = 1/RasterizationScale`, `StrokeDashArray = "4 3"` (единицы — толщина штриха, т.е. физ. пиксели: штрих 4 px / пробел 3 px при любом DPI), тот же полупрозрачный серый. По зуму ×8 пунктир идёт по скруглению без рваных стыков (проверено при 100 %).
+
+## S8 — результаты прогона S8Drive (пользователь запускал сам)
+
+Проверено автотестом (SendInput, реальный OLE drag между окнами тестера и карточкой, NativeAOT-сборка S8Edge):
+- **T1/T1b:** Hidden→Peek→Open→Hidden с задержкой скрытия 300 мс; вне полосы по Y (карточка ± 1 см) касание края ничего не делает (PASS).
+- **Хук во время OLE-drag:** `WH_MOUSE_LL` получает движения во время drag (`duringLButton` растёт, переходы Peek/Open идут с `lbutton=True`), панель выезжает под drag (PASS).
+- **Drop:** `CF_HDROP` (2 файла) — PASS; виртуальный файл `FileGroupDescriptorW`+`FileContents[0]` читается из нативного `IDataObject` (31/31 байт, имя, flags 0x40) — PASS. У WinUI 3 нет `OleDropTargetInterface` на своих HWND → собственный `IDropTarget` через `RegisterDragDrop` на дочерних окнах.
+- **Drag-out:** `DragStarting`+`SetStorageItems`, `DropCompleted.DropResult`: принимающая цель → `Copy` и файлы доставлены (элемент удаляется со стопки только при результате ≠ None), отвергающая → `None` (PASS); в S8Edge добавлен лог `shelf count=N` после drag-out как прямое доказательство, что стопка сохранилась.
+- **Находка (fullscreen):** `SHQueryUserNotificationState` вернул `QUNS_BUSY (2)` на обычном рабочем столе без fullscreen-приложения — `BUSY` ненадёжен. Теперь подавляем показ при `RUNNING_D3D_FULL_SCREEN`/`PRESENTATION_MODE` или при `BUSY` только если окно переднего плана (кроме Progman/WorkerW/Shell_TrayWnd) покрывает весь основной монитор; в лог каждого перехода пишутся `quns`, признак покрытия и класс окна (без заголовков).
+- **Не проверено:** drag из Chrome/Telegram (форматы реальных приложений), большие виртуальные файлы (чтение синхронно внутри `Drop`), поведение при втором мониторе справа от основного, надёжный признак чужого OLE-drag в fullscreen (используется ЛКМ зажата).

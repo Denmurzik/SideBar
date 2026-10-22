@@ -149,11 +149,15 @@ sealed class Driver
         Rep($"  accepted files: {string.Join(", ", _accepted.Select(Path.GetFileName))}");
 
         // T5: refill, drag out to the rejecting form, shelf must keep its items
+        m = Mark();
         DragToPanel(files, W, H, out _);
+        Check("T5 refill: files dropped on shelf again", Since(m).Any(l => l.Contains("shelf += a.txt")), Since(m));
         m = Mark();
         DragOut(W, H, _reject, out effect);
         var t5 = Since(m);
-        Check("T5 drag-out to rejecting target: DropResult=None", t5.Any(l => l.Contains("completed, DropResult=None")), t5);
+        Check("T5 drag-out to rejecting target: DropResult=None and shelf kept (count=2)", t5.Any(l => l.Contains("completed, DropResult=None")) && t5.Any(l => l.Contains("shelf count=2")), t5);
+        MoveTo(W - 300, H, 300); Thread.Sleep(200);
+        MoveTo(W - 1, H, 200); Thread.Sleep(900);   // the panel went Hidden after the drag: reopen it
         m = Mark();
         _accepted.Clear();
         DragOut(W, H, _accept, out effect);
@@ -174,7 +178,7 @@ sealed class Driver
         MoveTo(W - 30, H, 300); Thread.Sleep(300);   // peek zone
         int m = Mark();
         MoveTo(W - 1, H, 200); Thread.Sleep(1000);   // touch the edge -> open
-        if (!Since(m).Any(l => l.Contains("EDGE -> Open")) && !Read().Contains("EDGE -> Open"))
+        if (!Since(m).Any(l => l.Contains("EDGE -> Open")) && !LastEdgeIsOpen())
         {
             keybd_event(0x1B, 0, 0, 0); keybd_event(0x1B, 0, 2, 0);   // Esc: cancel instead of dropping on whatever is below
             Mouse(0x0004); Thread.Sleep(500); effect = "CANCELLED (panel did not open)"; return;
@@ -235,6 +239,7 @@ sealed class Driver
 
     // ---- log helpers ----
     string Read() { try { using var fs = new FileStream(_log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite); using var sr = new StreamReader(fs); return sr.ReadToEnd(); } catch { return ""; } }
+    bool LastEdgeIsOpen() => Read().Split((char)10).Where(l => l.Contains("EDGE ->")).LastOrDefault()?.Contains("-> Open") == true;
     int Mark() => Read().Split('\n').Length;
     List<string> Since(int mark) => Read().Split('\n').Skip(mark - 1).Where(l => l.Length > 0).ToList();
     static bool InOrder(List<string> lines, params string[] keys)

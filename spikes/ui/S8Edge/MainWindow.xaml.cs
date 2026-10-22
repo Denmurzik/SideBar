@@ -179,6 +179,7 @@ public sealed partial class MainWindow : Window
         _dragActive = false;
         Log($"drag-out ALL completed, DropResult={e.DropResult}");
         if (e.DropResult != DataPackageOperation.None) { _items.Clear(); _names.Clear(); }
+        Log($"shelf count={_items.Count}");
     }
 
     void OnItemsStarting(object sender, DragItemsStartingEventArgs e)
@@ -195,7 +196,7 @@ public sealed partial class MainWindow : Window
     {
         _dragActive = false;
         Log($"drag-out items completed, DropResult={e.DropResult}");
-        if (e.DropResult == DataPackageOperation.None) return;
+        if (e.DropResult == DataPackageOperation.None) { Log($"shelf count={_items.Count}"); return; }
         foreach (var n in e.Items.Cast<string>().ToList())
         {
             _names.Remove(n);

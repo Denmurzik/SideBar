@@ -29,6 +29,9 @@ public sealed unsafe class EdgeWatcher
     [DllImport("user32.dll")] static extern bool GetMonitorInfoW(nint mon, ref MONITORINFO mi);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
     [DllImport("shcore.dll")] static extern int GetDpiForMonitor(nint mon, int type, out uint x, out uint y);
+    [DllImport("user32.dll")] static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool GetWindowRect(nint h, out RECT r);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(nint h, char* buf, int max);
     [DllImport("shell32.dll")] static extern int SHQueryUserNotificationState(out int state);
 
     // single static instance: the hook procedure is a static [UnmanagedCallersOnly] function (AOT friendly)
@@ -39,6 +42,7 @@ public sealed unsafe class EdgeWatcher
     uint _hookThreadId;
     volatile bool _stop;
 
+    public int MonitorLeft { get; private set; }
     public int MonitorRight { get; private set; }
     public int MonitorTop { get; private set; }
     public int MonitorBottom { get; private set; }
@@ -62,7 +66,7 @@ public sealed unsafe class EdgeWatcher
         var mon = MonitorFromPoint(default, MONITOR_DEFAULTTOPRIMARY);
         var mi = new MONITORINFO { cbSize = sizeof(MONITORINFO) };
         GetMonitorInfoW(mon, ref mi);
-        MonitorRight = mi.rcMonitor.Right; MonitorTop = mi.rcMonitor.Top; MonitorBottom = mi.rcMonitor.Bottom;
+        MonitorLeft = mi.rcMonitor.Left; MonitorRight = mi.rcMonitor.Right; MonitorTop = mi.rcMonitor.Top; MonitorBottom = mi.rcMonitor.Bottom;
         GetDpiForMonitor(mon, 0, out var dx, out _);
         Dpi = dx;
         Log?.Invoke($"primary monitor right={MonitorRight} top={MonitorTop} bottom={MonitorBottom} dpi={Dpi} peekPx={PeekPx}");
@@ -142,7 +146,8 @@ public sealed unsafe class EdgeWatcher
                 else if (!inPeek) Go(EdgeState.Hidden, x, y);
                 break;
             case EdgeState.Open:
-                if (overPanel) _leftPanelAt = 0;
+                // left button held = a drag (possibly our own drag-out) is in progress: stay open until it ends
+                if (overPanel || (GetAsyncKeyState(0x01) & 0x8000) != 0) _leftPanelAt = 0;
                 else if (_leftPanelAt == 0) _leftPanelAt = Stopwatch.GetTimestamp();
                 else if (Stopwatch.GetElapsedTime(_leftPanelAt).TotalMilliseconds >= HideDelayMs) { _leftPanelAt = 0; Go(EdgeState.Hidden, x, y); }
                 break;
@@ -155,19 +160,38 @@ public sealed unsafe class EdgeWatcher
         string why = $"x={x} y={y} lbutton={buttonHeld}";
         if (State == EdgeState.Hidden && next != EdgeState.Hidden && IsFullscreenBusy(out var qs) && !buttonHeld)
         {
-            if (_suppressedLog++ % 100 == 0) Log?.Invoke($"suppressed {next}: fullscreen/busy ({qs}) {why}");
+            if (_suppressedLog++ % 100 == 0) Log?.Invoke($"suppressed {next}: {qs} {why}");
             return;
         }
+        if (State == EdgeState.Hidden && next != EdgeState.Hidden) { IsFullscreenBusy(out var d0); why += " | " + d0; }
         State = next;
         _leftPanelAt = 0;
         StateChanged?.Invoke(next, why);
     }
     int _suppressedLog;
 
-    // QUNS_BUSY=2, QUNS_RUNNING_D3D_FULL_SCREEN=3, QUNS_PRESENTATION_MODE=4
-    public static bool IsFullscreenBusy(out int state)
+    // QUNS_BUSY=2, QUNS_RUNNING_D3D_FULL_SCREEN=3, QUNS_PRESENTATION_MODE=4.
+    // QUNS_BUSY alone is not trusted (observed with no fullscreen app): it counts only together with our own check that
+    // the foreground window covers the whole primary monitor and is not the desktop/shell.
+    public bool IsFullscreenBusy(out string detail)
     {
-        state = 0;
-        return SHQueryUserNotificationState(out state) == 0 && state is 2 or 3 or 4;
+        detail = "";
+        if (SHQueryUserNotificationState(out int state) != 0) return false;
+        bool own = ForegroundCoversMonitor(out var cls);
+        detail = $"quns={state} foregroundCoversMonitor={own} class={cls}";
+        if (state is 3 or 4) return true;
+        return state == 2 && own;
+    }
+
+    bool ForegroundCoversMonitor(out string cls)
+    {
+        cls = "";
+        var h = GetForegroundWindow();
+        if (h == 0) return false;
+        var buf = stackalloc char[128];
+        cls = new string(buf, 0, GetClassNameW(h, buf, 128));
+        if (cls is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Windows.UI.Core.CoreWindow") return false;
+        if (!GetWindowRect(h, out var r)) return false;
+        return r.Left <= MonitorLeft && r.Top <= MonitorTop && r.Right >= MonitorRight && r.Bottom >= MonitorBottom;
     }
 }
