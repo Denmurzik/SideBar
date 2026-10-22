@@ -4,6 +4,7 @@ using SideBar.Core;
 using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Edge;
+using SideBar.Tray;
 
 namespace SideBar;
 
@@ -24,8 +25,15 @@ public partial class App : Application
     PxRect _primary;
     int _generation;
     Timer? _startupTrim;
+    MessageWindow? _messages;
+    TrayIcon? _tray;
 
-    public App() => InitializeComponent();
+    public App()
+    {
+        // второй экземпляр (автозапуск + ручной) завершается до создания любого окна
+        if (!SingleInstance.TryAcquire()) Environment.Exit(0);
+        InitializeComponent();
+    }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -41,7 +49,23 @@ public partial class App : Application
         _trimmer.OnHidden();
         _hook = new MouseHook(OnMouse);
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
+
+        string exe = Environment.ProcessPath!;
+        var autostart = new Autostart();
+        autostart.RepairPath(exe);
+        _messages = new MessageWindow(OnDisplaysChanged);
+        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp));
+
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) _trimmer.OnHidden(); }), null, 2000, Timeout.Infinite);
+    }
+
+    // порядок важен: сначала снять хук, затем убрать иконку
+    void ExitApp()
+    {
+        _hook?.Dispose();
+        _tray?.Dispose();
+        _messages?.Dispose();
+        Environment.Exit(0);
     }
 
     /// <summary>Пересчёт по WM_DISPLAYCHANGE / WM_DPICHANGED / WM_SETTINGCHANGE. Только из UI-потока.</summary>
