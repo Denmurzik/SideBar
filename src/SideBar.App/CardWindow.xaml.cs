@@ -2,12 +2,14 @@ using System.Diagnostics;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Visibility = Microsoft.UI.Xaml.Visibility;   // SideBar.Core.Nearby.Visibility (Hidden/Everyone) конфликтует
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using SideBar.Core;
 using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Core.Motion;
 using SideBar.Core.Nearby;
+using SideBar.Core.Shelf;
 using SideBar.Native;
 using SideBar.Shelf;
 using Windows.Graphics;
@@ -58,8 +60,82 @@ public sealed partial class CardWindow : Window
         Root.ActualThemeChanged += (_, _) => { ApplyStrokes(); _backdrop?.SetTheme(Root.ActualTheme); };
     }
 
+    /// <summary>Полка очищена корзиной: App закрывает веер.</summary>
+    public event Action? ShelfCleared;
+
+    ShelfService? _shelfService;
+    readonly ClearConfirm _clear = new();
+    DispatcherTimer? _clearTimer;
+    bool _hasItems, _clearHover;
+
+    // корзина видна, пока на полке есть элементы и нет своего drag; вооружение сбрасывается при любом изменении
+    void UpdateClear()
+    {
+        ShelfClear.Visibility = _hasItems && !DragOut.IsActive ? Visibility.Visible : Visibility.Collapsed;
+        if (ShelfClear.Visibility == Visibility.Collapsed) Disarm();
+        else RenderClear();
+    }
+
+    void RenderClear()
+    {
+        bool armed = _clear.IsArmed(DateTimeOffset.UtcNow);
+#if DEBUG
+        armed |= _debugArmed;
+#endif
+        ShelfClearIcon.Opacity = armed ? 1 : _clearHover ? 0.9 : 0.5;
+        if (armed) ShelfClearIcon.Foreground = CriticalBrush();
+        else ShelfClearIcon.ClearValue(Microsoft.UI.Xaml.Controls.IconElement.ForegroundProperty);   // обратно к теме
+    }
+
+    static Brush CriticalBrush()
+    {
+        try { return (Brush)Application.Current.Resources["SystemFillColorCriticalBrush"]; }
+        catch (Exception) { return new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0x99, 0xA4)); }
+    }
+
+    void Disarm()
+    {
+        _clear.Reset();
+        _clearTimer?.Stop();
+        RenderClear();
+    }
+
+    void ShelfClear_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (_shelfService is null) return;
+        if (_clear.Press(DateTimeOffset.UtcNow) == ClearPress.Cleared)
+        {
+            Disarm();
+            try { _shelfService.Clear(); }
+            catch (Exception ex) { Log.Write("shelf clear failed: " + Log.Describe(ex)); }
+            ShelfCleared?.Invoke();
+            return;
+        }
+        _clearTimer ??= new DispatcherTimer { Interval = ClearConfirm.Window };
+        _clearTimer.Tick -= ClearTimerTick;
+        _clearTimer.Tick += ClearTimerTick;
+        _clearTimer.Stop();
+        _clearTimer.Start();
+        RenderClear();
+    }
+
+    void ClearTimerTick(object? sender, object e) => Disarm();
+    void ShelfClear_PointerEntered(object sender, PointerRoutedEventArgs e) { _clearHover = true; RenderClear(); }
+    void ShelfClear_PointerExited(object sender, PointerRoutedEventArgs e) { _clearHover = false; RenderClear(); }
+
+#if DEBUG
+    /// <summary>Скриншоты без ввода: SIDEBAR_DEBUG_CLEAR=armed вооружает корзину.</summary>
+    internal void DebugArmClear() { _debugArmed = true; RenderClear(); }
+    bool _debugArmed;
+#endif
+
     internal void BindShelf(ShelfService shelf)
     {
+        _shelfService = shelf;
+        Stack.DragStarting += (_, _) => UpdateClear();
+        Stack.DropCompleted += (_, _) => UpdateClear();
+        Stack.HasItemsChanged += has => { _hasItems = has; UpdateClear(); };
         Stack.HasItemsChanged += has => ShelfEmptyIcon.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         Stack.FanRequested += () => FanRequested?.Invoke();
         Stack.Bind(shelf);

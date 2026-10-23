@@ -275,6 +275,16 @@ sealed partial class ShelfService
         foreach (var guid in toDelete) ScheduleDelete(guid, _ownedDeleteDelayMs);
     }
 
+    /// <summary>Очистка полки кнопкой-корзиной: те же правила, что при выносе (Reference не трогаем, Owned — отложенное удаление), одно сохранение.</summary>
+    public int Clear()
+    {
+        var ids = Model.Items.Select(i => i.Id).ToList();
+        if (ids.Count == 0) return 0;
+        RemoveAfterDragOut(ids);
+        Log.Write($"shelf cleared n={ids.Count}");
+        return ids.Count;
+    }
+
     DropPayload ReadPayload(nint dobj, out List<VirtualDescriptor> descriptors)
     {
         var paths = Safe(() => OleData.ReadHDrop(dobj), []).Select(NormalizePath).ToList();

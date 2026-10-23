@@ -79,6 +79,7 @@ public partial class App : Application
         _window = new CardWindow();
         _window.BindShelf(_shelf);
         _window.FanRequested += OnFanRequested;
+        _window.ShelfCleared += () => _fan?.Hide();
         _identity = new IdentityProvider();   // сертификаты нужны и плитке (метка «своё»), и приёму
         _identity.Start();
         InitShare();
@@ -115,6 +116,7 @@ public partial class App : Application
                 _debugOpen = true;   // автомат мыши отключён, карточка открыта для скриншотов
                 _trimmer.OnShown();
                 _window?.SetState(PanelState.Open);
+                if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_CLEAR") == "armed") _window?.DebugArmClear();   // скриншот корзины в вооружённом виде
             }
 #endif
         });

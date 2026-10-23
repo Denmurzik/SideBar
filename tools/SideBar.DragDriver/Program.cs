@@ -175,6 +175,7 @@ sealed class Driver
         if (Path.GetFullPath(_srcDir).StartsWith(Path.GetFullPath(tmpDir), StringComparison.OrdinalIgnoreCase))
         { Rep("FAIL source files must be outside %TEMP% (they would count as temporary)"); _fail++; return; }
 
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_CLEAR_ONLY") == "1") { ClearScenarios(W, H, a, b, c); return; }   // быстрый прогон: только корзина полки (C1..C3)
         if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1" || Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_FAN_ONLY") == "1")   // быстрый прогон: только вынос стопки и отправка с плитки
         {
             var quickFolder = Path.Combine(_srcDir, "folder1");
@@ -570,8 +571,53 @@ sealed class Driver
                 !File.Exists(owned.Path) && !Directory.Exists(Path.GetDirectoryName(owned.Path)!), owned.Path);
         }
         FanScenarios(W, H, a, refFile, folder, otherCenter);
+        ClearScenarios(W, H, a, Path.Combine(_srcDir, "b.txt"), Path.Combine(_srcDir, "c.txt"));
         DefaultDelayScenario(W, H, a, refFile, folder, otherCenter);
         PendingDeleteRestartScenario(W, H, a, refFile, folder, otherCenter);
+    }
+
+    // корзина полки: правый нижний угол плитки полки (карточка - поле 12 epx, у корзины отступ 4 epx и размер 22 epx)
+    Point TrashPoint(int W, int H)
+    {
+        var r = CardRect(W, H);
+        return new Point(r.Right - (int)(27 * _scale), r.Bottom - (int)(27 * _scale));
+    }
+
+    void FillThree(int W, int H, string a, string b, string c)
+    {
+        var files = new DataObject();
+        files.SetData(DataFormats.FileDrop, new[] { a, b, c });
+        DragToPanel(files, W, H);
+    }
+
+    // C1..C3: очистка полки корзиной только вторым кликом в течение 3 с; файлы на диске целы
+    void ClearScenarios(int W, int H, string a, string b, string c)
+    {
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        if (!StartApp()) { _fail++; return; }
+        FillThree(W, H, a, b, c);
+        var s = WaitShelf(x => x.Count == 3);
+        if (s.Count != 3 || !OpenCard(W, H)) { Check("C0 shelf prepared and card open", false, Dump(s)); return; }
+        var t = TrashPoint(W, H);
+        MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
+        Click(); Thread.Sleep(600);
+        s = ReadShelf();
+        Shot("c1-armed", W, H);
+        Check("C1 first click on the trash only arms it: shelf still holds 3", s.Count == 3, Dump(s));
+        Click();
+        s = WaitShelf(x => x.Count == 0, 3000);
+        Check("C2 second click within 3 s clears the shelf; the files stay on disk; log 'shelf cleared n=3'",
+            s.Count == 0 && File.Exists(a) && File.Exists(b) && File.Exists(c) && AppLog().Contains("shelf cleared n=3"), Dump(s));
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+        FillThree(W, H, a, b, c);
+        s = WaitShelf(x => x.Count == 3);
+        if (!OpenCard(W, H)) { Check("C3 card open", false, ""); return; }
+        MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
+        Click(); Thread.Sleep(3500);
+        Click(); Thread.Sleep(600);
+        s = ReadShelf();
+        Check("C3 click, wait 3.5 s, click again: the arming expired, the shelf is not cleared", s.Count == 3, Dump(s));
     }
 
     // D3e: отложенное удаление переживает перезапуск: перезапуск внутри окна задержки не удаляет папку, после срока она удаляется
