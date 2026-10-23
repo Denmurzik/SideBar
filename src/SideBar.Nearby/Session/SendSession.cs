@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using SideBar.Nearby.Crypto;
 using SideBar.Nearby.Wire;
 using Conn = SideBar.Nearby.Protocol.Connections;
@@ -53,8 +55,9 @@ public static class SendSession
 
             // 1. ConnectionRequest + UKEY2 ClientInit (plaintext).
             var info = identity.CreateEndpointInfo(options.DeviceName, options.DeviceKind);
+            var endpointId = MdnsName.NewEndpointId();
             await connection.WritePlainAsync(
-                OfflineFrames.ConnectionRequest(MdnsName.NewEndpointId(), options.DeviceName, info.Encode()), hct);
+                OfflineFrames.ConnectionRequest(endpointId, options.DeviceName, info.Encode()), hct);
 
             using var ukey = new Ukey2Client();
             await connection.WritePlainAsync(ukey.CreateClientInit(), hct);
@@ -73,6 +76,8 @@ public static class SendSession
             if (response.V1?.ConnectionResponse?.Response != Conn.ConnectionResponseFrame.Types.ResponseStatus.Accept)
                 return new TransferResult(TransferStatus.RejectedByPeer, [], "Peer rejected the connection.");
             handshakeCts.CancelAfter(Timeout.InfiniteTimeSpan);
+            // The receiver may offer a faster path (Wi-Fi LAN) at any point from here on, e.g. while we send over Bluetooth.
+            connection.AllowBandwidthUpgrade(endpointId, options.ConnectWifiLanUpgradeAsync ?? ConnectTcpAsync);
             connection.EnableEncryption(SecureChannel.ForClient(handshake.NextSecret));
             encrypted = true;
 
@@ -147,6 +152,21 @@ public static class SendSession
         finally
         {
             foreach (var entry in entries) entry.Dispose();
+        }
+    }
+
+    private static async Task<Stream> ConnectTcpAsync(IPEndPoint endpoint, CancellationToken ct)
+    {
+        var client = new TcpClient(endpoint.AddressFamily);
+        try
+        {
+            await client.ConnectAsync(endpoint, ct).ConfigureAwait(false);
+            return client.GetStream(); // owns the socket: disposing the stream closes it
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
         }
     }
 

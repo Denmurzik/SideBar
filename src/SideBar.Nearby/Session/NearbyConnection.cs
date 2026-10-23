@@ -1,6 +1,8 @@
+using System.Net;
 using Google.Protobuf;
 using SideBar.Nearby.Crypto;
 using SideBar.Nearby.Wire;
+using Bwu = SideBar.Nearby.Protocol.Connections.BandwidthUpgradeNegotiationFrame.Types.EventType;
 using Conn = SideBar.Nearby.Protocol.Connections;
 using Share = SideBar.Nearby.Protocol.Sharing;
 
@@ -10,13 +12,20 @@ public sealed class PeerDisconnectedException(string message) : IOException(mess
 
 /// <summary>
 /// One Nearby Connections link over a stream: plaintext frames before UKEY2 completes, encrypted offline frames after.
-/// Writes are serialized, a keep-alive frame goes out every 10 seconds once encryption is on.
+/// Writes are serialized, a keep-alive frame goes out every 10 seconds once encryption is on. When allowed, the peer
+/// can move the link to a Wi-Fi LAN socket mid-session (bandwidth upgrade) under the same encryption.
 /// </summary>
 internal sealed class NearbyConnection : IAsyncDisposable
 {
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan UpgradeStepTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan PriorChannelGoodbyeTimeout = TimeSpan.FromSeconds(2);
 
-    private readonly Stream _stream;
+    // While the prior channel drains, writes are held up to this much; beyond it writers wait for the new channel.
+    private const int HeldWriteLimit = 2 * OfflineFrames.PayloadChunkSize;
+
+    private Stream _stream;
+    private bool _ownsStream;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Random _idSource = new();
@@ -31,6 +40,17 @@ internal sealed class NearbyConnection : IAsyncDisposable
     private readonly HashSet<long> _rawDone = new();
     private Func<long, byte[], bool>? _onRawBytes;
 
+    // Bandwidth upgrade. We only ever react: the side that accepted the connection (the phone) offers the path.
+    private string? _localEndpointId;
+    private Func<IPEndPoint, CancellationToken, Task<Stream>>? _connectUpgrade;
+    private bool _upgraded;
+
+    // Set from our LAST_WRITE_TO_PRIOR_CHANNEL until the peer's SAFE_TO_CLOSE_PRIOR_CHANNEL (the prior channel drains).
+    private Stream? _upgradeStream;
+    private List<Conn.OfflineFrame>? _held;
+    private long _heldBytes;
+    private TaskCompletionSource? _resumed;
+
     private readonly string _role;
 
     /// <summary>True once a write failed: the stream may be mid-frame and must not be written to again.</summary>
@@ -38,6 +58,7 @@ internal sealed class NearbyConnection : IAsyncDisposable
     private readonly SessionOptions _options;
 
     /// <param name="role">"send" or "receive": prefix of the <see cref="NearbyLog"/> event kinds.</param>
+    /// <param name="stream">Owned by the caller; after a bandwidth upgrade it is closed here and the new socket is ours.</param>
     public NearbyConnection(Stream stream, string role, SessionOptions options)
     {
         _stream = stream;
@@ -55,7 +76,7 @@ internal sealed class NearbyConnection : IAsyncDisposable
         if (v1 is null) { Log(direction, "NoV1"); return; }
         if (v1.Type != Conn.V1Frame.Types.FrameType.PayloadTransfer || v1.PayloadTransfer is null)
         {
-            Log(direction, v1.Type.ToString());
+            Log(direction, v1.Type.ToString(), null, v1.BandwidthUpgradeNegotiation?.EventType.ToString());
             return;
         }
         var chunk = v1.PayloadTransfer.PayloadChunk;
@@ -102,20 +123,54 @@ internal sealed class NearbyConnection : IAsyncDisposable
         _keepAlive = Task.Run(KeepAliveLoopAsync);
     }
 
+    /// <summary>
+    /// Accepts the peer's bandwidth-upgrade offers to Wi-Fi LAN (others are declined); without this call they are ignored.
+    /// </summary>
+    /// <param name="localEndpointId">Our endpoint id from the ConnectionRequest; it introduces us on the new socket.</param>
+    /// <param name="connect">Opens the TCP connection to the offered address.</param>
+    public void AllowBandwidthUpgrade(string localEndpointId, Func<IPEndPoint, CancellationToken, Task<Stream>> connect)
+    {
+        _localEndpointId = localEndpointId;
+        _connectUpgrade = connect;
+    }
+
     public async Task SendOfflineAsync(Conn.OfflineFrame frame, CancellationToken ct)
     {
-        var channel = _channel ?? throw new InvalidOperationException("Encryption is not enabled.");
-        // Encrypt and write under one lock so the sequence number order matches the wire order.
-        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
-        try { await FrameIO.WriteAsync(_stream, channel.Encrypt(frame.ToByteArray()), ct).ConfigureAwait(false); }
+        if (_channel is null) throw new InvalidOperationException("Encryption is not enabled.");
+        while (true)
+        {
+            Task? resumed = null;
+            // Encrypt and write under one lock so the sequence number order matches the wire order.
+            await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                if (_held is null)
+                    await WriteLockedAsync(frame, ct).ConfigureAwait(false);
+                else if (_heldBytes < HeldWriteLimit)
+                {
+                    // Queued, not awaited: the reader that completes the upgrade may be this very caller's next step.
+                    _held.Add(frame);
+                    _heldBytes += frame.CalculateSize();
+                }
+                else
+                    resumed = _resumed!.Task;
+            }
+            finally { _writeLock.Release(); }
+            if (resumed is null) break;
+            await resumed.WaitAsync(ct).ConfigureAwait(false);
+        }
+        LogOffline("tx", frame);
+    }
+
+    private async Task WriteLockedAsync(Conn.OfflineFrame frame, CancellationToken ct)
+    {
+        try { await FrameIO.WriteAsync(_stream, _channel!.Encrypt(frame.ToByteArray()), ct).ConfigureAwait(false); }
         catch (Exception)
         {
             // A write that failed or was cancelled may have left half a frame on the wire.
             WriteFaulted = true;
             throw;
         }
-        finally { _writeLock.Release(); }
-        LogOffline("tx", frame);
     }
 
     public async Task<Conn.OfflineFrame> ReadOfflineAsync(CancellationToken ct)
@@ -146,8 +201,8 @@ internal sealed class NearbyConnection : IAsyncDisposable
     }
 
     /// <summary>
-    /// Reads until a complete Quick Share frame arrives. Keep-alives and bandwidth-upgrade frames are skipped;
-    /// a Disconnection frame raises <see cref="PeerDisconnectedException"/>. FILE payload chunks are passed to
+    /// Reads until a complete Quick Share frame arrives. Keep-alives are skipped, bandwidth-upgrade frames are handled
+    /// here (see <see cref="AllowBandwidthUpgrade"/>); a Disconnection frame raises <see cref="PeerDisconnectedException"/>. FILE payload chunks are passed to
     /// <paramref name="onFileChunk"/> (null means they are not expected); when it returns true reading stops and
     /// null is returned.
     /// </summary>
@@ -208,9 +263,156 @@ internal sealed class NearbyConnection : IAsyncDisposable
                     }
                     break;
 
-                // KeepAlive, BandwidthUpgradeNegotiation and anything else: not needed on Wi-Fi LAN without upgrade.
+                case Conn.V1Frame.Types.FrameType.BandwidthUpgradeNegotiation:
+                    if (v1.BandwidthUpgradeNegotiation is { } upgrade)
+                        await OnBandwidthUpgradeAsync(upgrade, ct).ConfigureAwait(false);
+                    break;
+
+                // KeepAlive and anything else need no action.
             }
         }
+    }
+
+    private async Task OnBandwidthUpgradeAsync(Conn.BandwidthUpgradeNegotiationFrame frame, CancellationToken ct)
+    {
+        switch (frame.EventType)
+        {
+            case Bwu.UpgradePathAvailable when _connectUpgrade is not null && !_upgraded && _upgradeStream is null:
+                await TryUpgradeAsync(frame.UpgradePathInfo, ct).ConfigureAwait(false);
+                break;
+
+            // The peer will not write to the prior channel again: we have read all of it.
+            case Bwu.LastWriteToPriorChannel when _upgradeStream is not null:
+                await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+                try { await WriteLockedAsync(OfflineFrames.BandwidthUpgrade(Bwu.SafeToClosePriorChannel), ct).ConfigureAwait(false); }
+                finally { _writeLock.Release(); }
+                Log("tx", "BandwidthUpgradeNegotiation", null, nameof(Bwu.SafeToClosePriorChannel));
+                break;
+
+            // The peer has read all we wrote to the prior channel.
+            case Bwu.SafeToClosePriorChannel when _upgradeStream is not null:
+                await SwapStreamAsync(ct).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Opens the offered socket and introduces us on it (plaintext: the peer does not know yet whose socket it is), then
+    /// writes our last frame to the prior channel. Any failure up to that point leaves the session where it is.
+    /// </summary>
+    private async Task TryUpgradeAsync(Conn.BandwidthUpgradeNegotiationFrame.Types.UpgradePathInfo? info, CancellationToken ct)
+    {
+        var endpoint = WifiLanEndpoint(info);
+        if (endpoint is null)
+        {
+            Log("bwu", "Declined", null, info?.Medium.ToString());
+            await SendOfflineAsync(OfflineFrames.BandwidthUpgradeFailure(info), ct).ConfigureAwait(false);
+            return;
+        }
+
+        Stream? stream = null;
+        try
+        {
+            using var step = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            step.CancelAfter(UpgradeStepTimeout);
+            stream = await _connectUpgrade!(endpoint, step.Token).ConfigureAwait(false);
+            await FrameIO.WriteAsync(stream, OfflineFrames.BandwidthUpgradeClientIntroduction(_localEndpointId!).ToByteArray(), step.Token)
+                .ConfigureAwait(false);
+            if (info!.SupportsClientIntroductionAck)
+            {
+                step.CancelAfter(UpgradeStepTimeout);
+                var ack = ParseOffline(await FrameIO.ReadAsync(stream, step.Token).ConfigureAwait(false));
+                if (ack.V1?.BandwidthUpgradeNegotiation?.EventType != Bwu.ClientIntroductionAck)
+                    throw new InvalidDataException("Expected CLIENT_INTRODUCTION_ACK.");
+            }
+        }
+        catch (Exception e) when (!ct.IsCancellationRequested)
+        {
+            if (stream is not null) await stream.DisposeAsync().ConfigureAwait(false);
+            // Not a transfer failure: the peer learns the path did not work and the session stays where it is.
+            Log("bwu", "Failed", null, e.GetType().Name);
+            await SendOfflineAsync(OfflineFrames.BandwidthUpgradeFailure(info), ct).ConfigureAwait(false);
+            return;
+        }
+        catch (Exception)
+        {
+            if (stream is not null) await stream.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        var committed = false;
+        try
+        {
+            await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await WriteLockedAsync(OfflineFrames.BandwidthUpgrade(Bwu.LastWriteToPriorChannel), ct).ConfigureAwait(false);
+                // From here on nothing else goes to the prior channel except our SAFE_TO_CLOSE answer.
+                _upgradeStream = stream;
+                _held = [];
+                _heldBytes = 0;
+                _resumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                committed = true;
+            }
+            finally { _writeLock.Release(); }
+        }
+        finally
+        {
+            if (!committed) await stream.DisposeAsync().ConfigureAwait(false);
+        }
+        Log("tx", "BandwidthUpgradeNegotiation", null, nameof(Bwu.LastWriteToPriorChannel));
+    }
+
+    private static IPEndPoint? WifiLanEndpoint(Conn.BandwidthUpgradeNegotiationFrame.Types.UpgradePathInfo? info)
+    {
+        if (info is null || info.Medium != Conn.BandwidthUpgradeNegotiationFrame.Types.UpgradePathInfo.Types.Medium.WifiLan
+            || info.WifiLanSocket is not { } socket)
+            return null;
+        if (socket.IpAddress.Length is not (4 or 16) || socket.WifiPort is <= 0 or > IPEndPoint.MaxPort) return null;
+        return new IPEndPoint(new IPAddress(socket.IpAddress.Span), socket.WifiPort);
+    }
+
+    /// <summary>
+    /// Closes the drained prior channel and moves the session, with the same <see cref="SecureChannel"/> and its sequence
+    /// numbers, to the upgraded socket; the writes held meanwhile go out there first, in order.
+    /// </summary>
+    private async Task SwapStreamAsync(CancellationToken ct)
+    {
+        await ClosePriorChannelAsync(_stream).ConfigureAwait(false);
+        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            _stream = _upgradeStream!;
+            _ownsStream = true;
+            _upgradeStream = null;
+            _upgraded = true;
+            var held = _held!;
+            _held = null;
+            foreach (var frame in held) await WriteLockedAsync(frame, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _resumed!.TrySetResult();
+            _writeLock.Release();
+        }
+        Log("bwu", "Upgraded");
+    }
+
+    // As the reference implementation does: an unencrypted Disconnection (it must not use up a sequence number), then a
+    // short wait for the peer's, so neither side closes before the other has read SAFE_TO_CLOSE (an Android Bluetooth
+    // socket loses unread data when the other end closes).
+    private static async Task ClosePriorChannelAsync(Stream prior)
+    {
+        using var limit = new CancellationTokenSource(PriorChannelGoodbyeTimeout);
+        try { await GoodbyeAsync(prior, limit.Token).WaitAsync(limit.Token).ConfigureAwait(false); }
+        catch (Exception) { }
+        await prior.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private static async Task GoodbyeAsync(Stream prior, CancellationToken ct)
+    {
+        await FrameIO.WriteAsync(prior, OfflineFrames.Disconnection().ToByteArray(), ct).ConfigureAwait(false);
+        await FrameIO.ReadAsync(prior, ct).ConfigureAwait(false);
     }
 
     private byte[]? AppendBytesChunk(Conn.PayloadTransferFrame transfer)
@@ -265,6 +467,8 @@ internal sealed class NearbyConnection : IAsyncDisposable
         {
             try { await _keepAlive.ConfigureAwait(false); } catch (Exception) { }
         }
+        if (_upgradeStream is not null) await _upgradeStream.DisposeAsync().ConfigureAwait(false);
+        if (_ownsStream) await _stream.DisposeAsync().ConfigureAwait(false);
         _lifetime.Dispose();
         _writeLock.Dispose();
     }

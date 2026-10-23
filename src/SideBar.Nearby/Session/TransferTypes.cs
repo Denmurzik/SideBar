@@ -1,3 +1,4 @@
+using System.Net;
 using SideBar.Nearby.Wire;
 
 namespace SideBar.Nearby.Session;
@@ -94,6 +95,12 @@ public sealed record SessionOptions(
 
     /// <summary>Free bytes on the volume of the given directory; injectable for tests (default: <see cref="DriveInfo"/>).</summary>
     public Func<string, long>? FreeBytes { get; init; }
+
+    /// <summary>
+    /// Sending: opens the Wi-Fi LAN socket the receiver offers in a bandwidth upgrade; injectable for tests
+    /// (default: a plain TCP connection).
+    /// </summary>
+    public Func<IPEndPoint, CancellationToken, Task<Stream>>? ConnectWifiLanUpgradeAsync { get; init; }
 
     public IShareIdentity ResolvedIdentity => Identity ?? new AnonymousIdentity();
 }

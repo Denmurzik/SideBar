@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using Google.Protobuf;
 using SideBar.Nearby.Crypto;
 using SideBar.Nearby.Session;
 using SideBar.Nearby.Wire;
@@ -75,6 +76,32 @@ internal static class TestFrames
 
     public static Share.Frame Of(Share.V1Frame.Types.FrameType type) =>
         new() { Version = Share.Frame.Types.Version.V1, V1 = new Share.V1Frame { Type = type } };
+
+    public static Conn.OfflineFrame Bwu(Conn.BandwidthUpgradeNegotiationFrame.Types.EventType type) =>
+        Offline(new Conn.V1Frame
+        {
+            Type = Conn.V1Frame.Types.FrameType.BandwidthUpgradeNegotiation,
+            BandwidthUpgradeNegotiation = new Conn.BandwidthUpgradeNegotiationFrame { EventType = type },
+        });
+
+    public static Conn.OfflineFrame UpgradePathAvailable(
+        IPEndPoint endpoint, bool ack,
+        Conn.BandwidthUpgradeNegotiationFrame.Types.UpgradePathInfo.Types.Medium medium =
+            Conn.BandwidthUpgradeNegotiationFrame.Types.UpgradePathInfo.Types.Medium.WifiLan)
+    {
+        var frame = Bwu(Conn.BandwidthUpgradeNegotiationFrame.Types.EventType.UpgradePathAvailable);
+        frame.V1.BandwidthUpgradeNegotiation.UpgradePathInfo = new Conn.BandwidthUpgradeNegotiationFrame.Types.UpgradePathInfo
+        {
+            Medium = medium,
+            WifiLanSocket = new Conn.BandwidthUpgradeNegotiationFrame.Types.UpgradePathInfo.Types.WifiLanSocket
+            {
+                IpAddress = Google.Protobuf.ByteString.CopyFrom(endpoint.Address.GetAddressBytes()),
+                WifiPort = endpoint.Port,
+            },
+            SupportsClientIntroductionAck = ack,
+        };
+        return frame;
+    }
 }
 
 /// <summary>A hand-driven sender: does the real handshake, then lets a test inject arbitrary frames.</summary>
@@ -206,4 +233,101 @@ internal sealed class FakeReceiver : IAsyncDisposable
     }
 
     public ValueTask DisposeAsync() => _connection.DisposeAsync();
+}
+
+/// <summary>
+/// A receiver that speaks the wire format by hand (no <see cref="NearbyConnection"/>), so one encrypted session can be
+/// driven over two sockets the way a phone does in a bandwidth upgrade.
+/// </summary>
+internal sealed class RawReceiver
+{
+    private readonly SecureChannel _channel;
+    private readonly byte[] _authString;
+    public string SenderEndpointId { get; }
+
+    private RawReceiver(SecureChannel channel, byte[] authString, string senderEndpointId)
+    {
+        _channel = channel;
+        _authString = authString;
+        SenderEndpointId = senderEndpointId;
+    }
+
+    /// <summary>Plaintext handshake on <paramref name="stream"/>; everything after it is encrypted.</summary>
+    public static async Task<RawReceiver> HandshakeAsync(Stream stream, CancellationToken ct)
+    {
+        var request = Conn.OfflineFrame.Parser.ParseFrom(await FrameIO.ReadAsync(stream, ct));
+        using var ukey = new Ukey2Server();
+        await FrameIO.WriteAsync(stream, ukey.ProcessClientInit(await FrameIO.ReadAsync(stream, ct)), ct);
+        var handshake = ukey.ProcessClientFinish(await FrameIO.ReadAsync(stream, ct));
+        await FrameIO.ReadAsync(stream, ct);
+        await FrameIO.WriteAsync(stream, OfflineFrames.ConnectionResponse(accept: true).ToByteArray(), ct);
+        return new RawReceiver(SecureChannel.ForServer(handshake.NextSecret), handshake.AuthString.ToArray(),
+            request.V1.ConnectionRequest.EndpointId);
+    }
+
+    public Task SendAsync(Stream stream, Conn.OfflineFrame frame, CancellationToken ct) =>
+        FrameIO.WriteAsync(stream, _channel.Encrypt(frame.ToByteArray()), ct).AsTask();
+
+    public async Task SendSharingAsync(Stream stream, Share.Frame frame, CancellationToken ct)
+    {
+        var data = frame.ToByteArray();
+        var header = OfflineFrames.BytesHeader(Random.Shared.NextInt64(), data.Length);
+        await SendAsync(stream, OfflineFrames.PayloadChunk(header, 0, data, last: false), ct);
+        await SendAsync(stream, OfflineFrames.PayloadChunk(header, data.Length, [], last: true), ct);
+    }
+
+    public Task SendPairedKeyEncryptionAsync(Stream stream, CancellationToken ct) =>
+        SendSharingAsync(stream, SharingFrames.PairedKeyEncryption(
+            new AnonymousIdentity().CreatePairedKeyEncryption(_authString, PairedKeyRole.Receiver, null)), ct);
+
+    public Task SendPairedKeyResultAsync(Stream stream, CancellationToken ct) =>
+        SendSharingAsync(stream, SharingFrames.PairedKeyResult(Share.PairedKeyResultFrame.Types.Status.Unable), ct);
+
+    public Task AcceptAsync(Stream stream, CancellationToken ct) =>
+        SendSharingAsync(stream, SharingFrames.Response(Share.ConnectionResponseFrame.Types.Status.Accept), ct);
+
+    /// <summary>
+    /// Reads encrypted frames until <paramref name="stop"/> matches one (which is returned). FILE chunks go to
+    /// <paramref name="sink"/>, Quick Share frames (sent whole in their first chunk) to <paramref name="sharing"/>.
+    /// </summary>
+    public async Task<Conn.OfflineFrame> ReadUntilAsync(
+        Stream stream, Func<Conn.OfflineFrame, bool> stop, FileSink sink, CancellationToken ct, List<Share.Frame>? sharing = null)
+    {
+        while (true)
+        {
+            var frame = Conn.OfflineFrame.Parser.ParseFrom(_channel.Decrypt(await FrameIO.ReadAsync(stream, ct)));
+            var transfer = frame.V1?.PayloadTransfer;
+            if (transfer?.PayloadChunk is { } chunk)
+            {
+                if (transfer.PayloadHeader.Type == Conn.PayloadTransferFrame.Types.PayloadHeader.Types.PayloadType.File)
+                    sink.Add(chunk);
+                else if (!chunk.Body.IsEmpty)
+                    sharing?.Add(Share.Frame.Parser.ParseFrom(chunk.Body));
+            }
+            if (stop(frame)) return frame;
+        }
+    }
+
+    public static bool IsBwu(Conn.OfflineFrame frame, Conn.BandwidthUpgradeNegotiationFrame.Types.EventType type) =>
+        frame.V1?.Type == Conn.V1Frame.Types.FrameType.BandwidthUpgradeNegotiation
+        && frame.V1.BandwidthUpgradeNegotiation?.EventType == type;
+}
+
+/// <summary>Reassembles one FILE payload and fails on any gap, overlap or chunk after the last one.</summary>
+internal sealed class FileSink
+{
+    private readonly MemoryStream _data = new();
+    public bool Done { get; private set; }
+    public int Chunks { get; private set; }
+    public long Length => _data.Length;
+    public byte[] Bytes => _data.ToArray();
+
+    public void Add(Conn.PayloadTransferFrame.Types.PayloadChunk chunk)
+    {
+        Assert.False(Done, "Chunk after the last one.");
+        Assert.Equal(_data.Length, chunk.Offset);
+        chunk.Body.WriteTo(_data);
+        Chunks++;
+        Done = (chunk.Flags & (int)Conn.PayloadTransferFrame.Types.PayloadChunk.Types.Flags.LastChunk) != 0;
+    }
 }
