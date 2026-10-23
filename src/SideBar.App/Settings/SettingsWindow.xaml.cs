@@ -40,9 +40,27 @@ public sealed partial class SettingsWindow : Window
 
     internal static void ShowOrActivate(SettingsDeps deps, int? section = null)
     {
+        var created = s_current is null;
         s_current ??= new SettingsWindow(deps);
+        Log.Write(created ? "settings window opened" : "settings window raised");
         s_current.Raise(section);
+#if DEBUG
+        if (created) s_weak = new WeakReference(s_current);
+#endif
     }
+
+#if DEBUG
+    static WeakReference? s_weak;
+
+    // самопроверка без ввода (SIDEBAR_DEBUG_SETTINGS=selftest): закрыть окно и проверить, что сборка мусора его освобождает
+    internal static void DebugClose() => s_current?.Close();
+
+    internal static void DebugReport()
+    {
+        for (var i = 0; i < 3; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); }
+        Log.Write("settings window released=" + (s_weak is { IsAlive: false }) + " current=" + (s_current is not null) + " ws=" + Environment.WorkingSet / (1 << 20) + "MB gc=" + GC.GetTotalMemory(false) / (1 << 20) + "MB");
+    }
+#endif
 
     readonly SettingsDeps _deps;
     readonly SettingsStore _store;
@@ -130,7 +148,11 @@ public sealed partial class SettingsWindow : Window
         _clearTimer?.Stop();
         _clearTimer = null;
         _syncs.Clear();
+        Scroll.Content = null;   // страницы держат обработчики, указывающие на окно
+        Array.Clear(_pages);
+        Content = null;
         if (ReferenceEquals(s_current, this)) s_current = null;
+        Log.Write("settings window closed");
         _deps.Closed();
     }
 

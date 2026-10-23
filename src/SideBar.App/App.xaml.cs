@@ -152,7 +152,26 @@ public partial class App : Application
         _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused) { OpenSettings = () => ShowSettings() };
 #if DEBUG
         // скриншоты без ввода: SIDEBAR_DEBUG_SETTINGS=<0..4> открывает окно настроек на нужном разделе
-        if (int.TryParse(Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_SETTINGS"), out var debugSection)) _ui.TryEnqueue(() => ShowSettings(debugSection));
+        var debugSettings = Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_SETTINGS");
+        if (int.TryParse(debugSettings, out var debugSection)) _ui.TryEnqueue(() => ShowSettings(debugSection));
+        else if (debugSettings == "selftest")   // повторный вызов поднимает то же окно; закрытие освобождает его
+            _ui.TryEnqueue(() =>
+            {
+                ShowSettings();
+                ShowSettings();
+                _ = Task.Run(async () =>
+                {
+                    for (var i = 0; i < 8; i++)
+                    {
+                        await Task.Delay(2500);
+                        _ui.TryEnqueue(SettingsWindow.DebugClose);
+                        await Task.Delay(1500);
+                        _ui.TryEnqueue(SettingsWindow.DebugReport);
+                        await Task.Delay(500);
+                        _ui.TryEnqueue(() => ShowSettings(i % 5));
+                    }
+                });
+            });
 #endif
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
