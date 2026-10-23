@@ -20,7 +20,7 @@ public sealed record TransferResult(TransferStatus Status, IReadOnlyList<string>
     /// <summary>Texts and links received in a completed transfer; their values are never logged or put into <see cref="Detail"/>.</summary>
     public IReadOnlyList<ReceivedText> ReceivedTexts { get; init; } = [];
 
-    /// <summary>Sending: the receiver proved to be one of the user's own devices (our VerifyPairedKey returned Success before the Introduction).</summary>
+    /// <summary>Sending: the receiver proved to be one of the user's own devices (our VerifyPairedKey returned Success for a key received before our Introduction).</summary>
     public bool PeerVerified { get; init; }
 }
 

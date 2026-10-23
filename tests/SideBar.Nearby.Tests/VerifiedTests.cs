@@ -225,4 +225,113 @@ public sealed class VerifiedTests : IDisposable
         Assert.Equal("Pixel 9", offer.VerifiedName);
         Assert.Equal("Spoofed name", offer.SenderName);
     }
+
+    [Fact]
+    public async Task First_paired_key_counts_and_a_later_valid_one_does_not_verify()
+    {
+        var pair = new OwnPair();
+        var advert = pair.Phone.CreateEndpointInfo("x", DeviceKind.Phone);
+
+        var (offer, _, asked) = await RunFakeAsync(pair.Pc, advert, async (s, ct) =>
+        {
+            var forged = Signed(pair.Phone, s.AuthString);
+            var bad = forged.SignedData.ToByteArray();
+            bad[^1] ^= 0xFF;
+            forged.SignedData = Google.Protobuf.ByteString.CopyFrom(bad);
+            await s.SendPairedKeyAsync(forged, ct);
+            await s.SendPairedKeyAsync(Signed(pair.Phone, s.AuthString), ct);
+            await s.IntroduceAsync(ct, TestFrames.File(1, 3));
+        });
+
+        Assert.True(asked);
+        Assert.False(offer!.Verified);
+    }
+
+    [Fact]
+    public async Task Sender_ignores_a_valid_paired_key_that_arrives_after_its_introduction()
+    {
+        var pair = new OwnPair();
+        using var cts = Timeout();
+        using var link = await Link.OpenAsync(cts.Token);
+        var send = SendSession.SendFilesAsync(
+            link.Client,
+            new SessionOptions("Sender", Identity: pair.Phone) { RemoteEndpointInfo = pair.Pc.CreateEndpointInfo("My PC", DeviceKind.Laptop) },
+            [_file], ct: cts.Token);
+
+        // The anonymous key sent by FakeReceiver does not verify; the Introduction follows it.
+        await using var receiver = await FakeReceiver.AcceptAsync(link.Server, cts.Token);
+        await receiver.SendPairedKeyAsync(pair.Pc.CreatePairedKeyEncryption(receiver.AuthString, PairedKeyRole.Receiver, null), cts.Token);
+        await receiver.SendSharingAsync(SharingFrames.Response(Share.ConnectionResponseFrame.Types.Status.Reject), cts.Token);
+
+        var result = await send;
+        Assert.Equal(TransferStatus.RejectedByPeer, result.Status);
+        Assert.False(result.PeerVerified);
+    }
+
+    [Fact]
+    public async Task Replayed_advertisement_of_own_device_with_stranger_signature_is_not_verified()
+    {
+        var pair = new OwnPair();
+        var stranger = Stranger();
+        // The metadata of the phone's public advertisement is copied, the signature is the stranger's own.
+        var advert = pair.Phone.CreateEndpointInfo("x", DeviceKind.Phone);
+
+        var (offer, _, asked) = await RunFakeAsync(pair.Pc, advert, async (s, ct) =>
+        {
+            await s.SendPairedKeyAsync(Signed(stranger, s.AuthString), ct);
+            await s.IntroduceAsync(ct, TestFrames.File(1, 3));
+        });
+
+        Assert.True(asked);
+        Assert.False(offer!.Verified);
+        Assert.Null(offer.VerifiedName);
+    }
+
+    [Fact]
+    public async Task Reflected_paired_key_is_not_verified()
+    {
+        var pair = new OwnPair();
+        var advert = pair.Phone.CreateEndpointInfo("x", DeviceKind.Phone);
+
+        var (offer, _, asked) = await RunFakeAsync(pair.Pc, advert, async (s, ct) =>
+        {
+            // Echo the receiver's own key frame back to it.
+            var theirs = await s.ReadAsync(Share.V1Frame.Types.FrameType.PairedKeyEncryption, ct);
+            await s.SendPairedKeyAsync(theirs.V1.PairedKeyEncryption, ct);
+            await s.IntroduceAsync(ct, TestFrames.File(1, 3));
+        });
+
+        Assert.True(asked);
+        Assert.False(offer!.Verified);
+        Assert.Null(offer.VerifiedName);
+    }
+
+    [Fact]
+    public async Task Stranger_posing_as_Pixel_9_is_rejected_without_asking_in_own_devices_mode()
+    {
+        var pair = new OwnPair();
+        var stranger = Stranger();
+        var advert = new EndpointInfo
+        {
+            Kind = DeviceKind.Phone, Name = "Pixel 9",
+            Metadata = stranger.CreateEndpointInfo("x", DeviceKind.Phone).Metadata,
+        };
+        using var cts = Timeout();
+        using var link = await Link.OpenAsync(cts.Token);
+        var asked = false;
+        var receive = ReceiveSession.ReceiveAsync(
+            link.Server, new SessionOptions("My PC", Identity: pair.Pc) { RejectUnverified = true }, _out,
+            (_, _) => { asked = true; return Task.FromResult(true); }, ct: cts.Token);
+
+        await using var sender = await FakeSender.ConnectAsync(link.Client, cts.Token, advert);
+        await sender.SendPairedKeyAsync(Signed(stranger, sender.AuthString), cts.Token);
+        await sender.IntroduceAsync(cts.Token, TestFrames.File(1, 3));
+        var status = await sender.ReadResponseAsync(cts.Token);
+
+        var result = await receive;
+        Assert.Equal(Share.ConnectionResponseFrame.Types.Status.Reject, status);
+        Assert.Equal(TransferStatus.RejectedByPeer, result.Status);
+        Assert.Equal("unverified", result.Detail);
+        Assert.False(asked);
+    }
 }

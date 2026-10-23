@@ -95,8 +95,8 @@ public static class SendSession
                             throw new InvalidDataException("PairedKeyEncryption frame without a body.");
                         gotKeyEncryption = true;
                         var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Sender, options.RemoteEndpointInfo);
-                        // The Introduction is only sent after this frame, so a Success is always "before Introduction".
-                        peerVerified = status == Share.PairedKeyResultFrame.Types.Status.Success;
+                        // Only a key that arrived before our Introduction counts.
+                        if (!introduced) peerVerified = status == Share.PairedKeyResultFrame.Types.Status.Success;
                         await connection.SendSharingAsync(SharingFrames.PairedKeyResult(status), ct);
                         break;
 

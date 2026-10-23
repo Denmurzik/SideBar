@@ -61,6 +61,7 @@ public static class ReceiveSession
             var saved = new List<string>();
             var introduced = false;
             var peerVerified = false;
+            var gotPeerKey = false;
             long totalSize = 0, receivedTotal = 0;
             var texts = new List<Share.TextMetadata>();
             var pendingTexts = new HashSet<long>();
@@ -123,8 +124,9 @@ public static class ReceiveSession
                             if (v1.PairedKeyEncryption is null)
                                 throw new InvalidDataException("PairedKeyEncryption frame without a body.");
                             var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Receiver, remoteInfo);
-                            // Only a key that arrived before the Introduction counts.
-                            if (!introduced) peerVerified = status == Share.PairedKeyResultFrame.Types.Status.Success;
+                            // Only the first key, and only if it arrived before the Introduction, counts; later ones are answered but ignored.
+                            if (!introduced && !gotPeerKey) peerVerified = status == Share.PairedKeyResultFrame.Types.Status.Success;
+                            gotPeerKey = true;
                             await connection.SendSharingAsync(SharingFrames.PairedKeyResult(status), ct);
                             break;
 

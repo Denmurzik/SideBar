@@ -140,11 +140,15 @@ internal sealed class FakeReceiver : IAsyncDisposable
     private readonly NearbyConnection _connection;
     public Share.IntroductionFrame Introduction { get; }
 
-    private FakeReceiver(NearbyConnection connection, Share.IntroductionFrame introduction)
+    private FakeReceiver(NearbyConnection connection, Share.IntroductionFrame introduction, byte[] authString)
     {
         _connection = connection;
         Introduction = introduction;
+        AuthString = authString;
     }
+
+    /// <summary>UKEY2 auth string of this session, for signing a PairedKeyEncryption.</summary>
+    public byte[] AuthString { get; }
 
     public static async Task<FakeReceiver> AcceptAsync(Stream stream, CancellationToken ct)
     {
@@ -165,13 +169,16 @@ internal sealed class FakeReceiver : IAsyncDisposable
         {
             var frame = (await c.ReadSharingAsync(null, ct))!;
             if (frame.V1?.Type == Share.V1Frame.Types.FrameType.Introduction)
-                return new FakeReceiver(c, frame.V1.Introduction);
+                return new FakeReceiver(c, frame.V1.Introduction, handshake.AuthString);
         }
     }
 
     public Task SendOfflineAsync(Conn.OfflineFrame frame, CancellationToken ct) => _connection.SendOfflineAsync(frame, ct);
 
     public Task SendSharingAsync(Share.Frame frame, CancellationToken ct) => _connection.SendSharingAsync(frame, ct);
+
+    public Task SendPairedKeyAsync(Share.PairedKeyEncryptionFrame frame, CancellationToken ct) =>
+        SendSharingAsync(SharingFrames.PairedKeyEncryption(frame), ct);
 
     public Task AcceptTransferAsync(CancellationToken ct) =>
         SendSharingAsync(SharingFrames.Response(Share.ConnectionResponseFrame.Types.Status.Accept), ct);
