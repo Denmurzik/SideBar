@@ -134,6 +134,9 @@ public sealed class ShareTileModel
         Changed?.Invoke();
     }
 
+    /// <summary>Таймер плитки стоял и запускается снова: простой не засчитывается как прошедшее время.</summary>
+    public void Resume(DateTimeOffset now) => _clock = now;
+
     public void Tick(DateTimeOffset now)
     {
         var elapsed = now - _clock;
