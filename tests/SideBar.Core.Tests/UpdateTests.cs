@@ -91,10 +91,11 @@ public class UpdateTests
     }
 
     [Fact]
-    public void Started_in_the_future_counts_delay_from_now()
+    public void Started_in_the_future_means_startup_delay_already_elapsed()
     {
-        Assert.False(UpdatePolicy.ShouldCheck(T0, T0.AddHours(1), null));
-        Assert.False(UpdatePolicy.ShouldCheck(T0.AddSeconds(5), T0.AddDays(3), null));
+        Assert.True(UpdatePolicy.ShouldCheck(T0, T0.AddHours(1), null));
+        Assert.True(UpdatePolicy.ShouldCheck(T0.AddSeconds(5), T0.AddDays(3), null));
+        Assert.False(UpdatePolicy.ShouldCheck(T0, T0.AddHours(1), T0.AddHours(-1)));
     }
 
     [Fact]
@@ -139,6 +140,18 @@ public class UpdateTests
     [InlineData("")]
     public void Not_found_body_is_rejected(string json)
     {
+        Assert.False(Parse(json, out _));
+    }
+
+    [Fact]
+    public void Backslash_in_url_is_rejected_by_url_check_not_by_json()
+    {
+        const string ok = "https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0";
+        Assert.True(Parse("{\"tag_name\":\"v0.2.0\",\"html_url\":\"" + ok + "\"}", out _));
+        var bs = (char)92;
+        var json = "{\"tag_name\":\"v0.2.0\",\"html_url\":\"" + ok + bs + bs + "x\"}"; // JSON-экранирование: два слэша -> один '\'
+        using (var doc = System.Text.Json.JsonDocument.Parse(json))
+            Assert.Contains(bs, doc.RootElement.GetProperty("html_url").GetString()!);
         Assert.False(Parse(json, out _));
     }
 
