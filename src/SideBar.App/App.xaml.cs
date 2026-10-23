@@ -39,7 +39,7 @@ public partial class App : Application
     readonly BumpGate _bump = new();
     readonly AttentionBounce _attention = new();
     readonly ReceiveTileModel _recv = new();
-    bool _debugOpen;   // DEBUG: SIDEBAR_DEBUG_OPEN=1 держит карточку открытой для скриншотов
+    bool _debugOpen = false;   // DEBUG: SIDEBAR_DEBUG_OPEN=1 держит карточку открытой для скриншотов
     ShareTileModel? _share;
     NearbyService? _nearby;
     DispatcherTimer? _tileTimer;
