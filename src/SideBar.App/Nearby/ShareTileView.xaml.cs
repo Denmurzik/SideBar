@@ -112,7 +112,7 @@ public sealed partial class ShareTileView : UserControl
         return content != TileContent.Idle;
     }
 
-    /// <summary>Карточка приехала на место: строки запроса сдвинулись под курсор, нажатия снова ждут 600 мс.</summary>
+    /// <summary>Карточка приехала на место: строки запроса сдвинулись под курсор, нажатия снова ждут 350 мс.</summary>
     public void NotifyCardMoved() => _arming.Placed(DateTimeOffset.UtcNow);
 
     bool CanPress() => _arming.CanAccept(DateTimeOffset.UtcNow, _settledOpen());
@@ -199,7 +199,7 @@ public sealed partial class ShareTileView : UserControl
     }
 
     // Кнопка на Border + Tapped, как у иконок устройств: карточка не активируется, штатный Button в ней не проверен
-    // gate: нажатие засчитывается, только если оно прошло проверку в момент PointerPressed (карточка открыта и стоит, строки не двигались 600 мс)
+    // gate: нажатие засчитывается, только если оно прошло проверку в момент PointerPressed (карточка открыта и стоит, строки не двигались 350 мс)
     static Border Button(string label, Action act, bool accent, bool narrow = false, Func<bool>? gate = null)
     {
         Brush normal = accent ? (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));

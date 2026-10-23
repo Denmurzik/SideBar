@@ -24,9 +24,9 @@ public sealed class ReceiveTileModel
     public static readonly TimeSpan NoteDuration = TimeSpan.FromSeconds(8);
     /// <summary>Time left for a note after the pointer leaves it.</summary>
     public static readonly TimeSpan NoteAfterHover = TimeSpan.FromSeconds(3);
-    /// <summary>The card stays open this long after the last consent was decided.</summary>
     /// <summary>One tick never counts for more than this: a long gap (the timer was stopped) must not eat a fresh note.</summary>
     public static readonly TimeSpan MaxTickStep = TimeSpan.FromSeconds(1);
+    /// <summary>The card stays open this long after the last consent was decided.</summary>
     public static readonly TimeSpan HoldAfterDecision = TimeSpan.FromSeconds(1.5);
 
     readonly List<ConsentItem> _consents = [];
