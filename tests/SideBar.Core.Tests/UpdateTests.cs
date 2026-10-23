@@ -222,6 +222,7 @@ public class UpdateOutcomeTests
     public void Older_release_is_not_available() =>
         Assert.Equal(UpdateKind.UpToDate, UpdateOutcome.Evaluate(200, Body("v0.0.9"), Cur).Kind);
 
+
     [Fact]
     public void State_store_roundtrips_and_tolerates_garbage()
     {
@@ -232,11 +233,124 @@ public class UpdateOutcomeTests
             var store = new UpdateStateStore(p);
             Assert.Null(store.LastCheck);
             var t = new DateTimeOffset(2026, 10, 23, 12, 0, 0, TimeSpan.Zero);
-            store.SaveLastCheck(t);
-            Assert.Equal(t, new UpdateStateStore(p).LastCheck);
+            store.Save(new UpdateState(t, "v0.2.0", "https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0"));
+            var back = new UpdateStateStore(p).Load();
+            Assert.Equal(t, back.LastCheck);
+            Assert.Equal("v0.2.0", back.Tag);
             File.WriteAllText(p, "{{{");
             Assert.Null(store.LastCheck);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+}
+
+public class UpdateServiceTests : IDisposable
+{
+    private static readonly Version Cur = new(0, 1, 0);
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "sb-upds-" + Guid.NewGuid().ToString("N"));
+    private DateTimeOffset _now = new(2026, 10, 23, 12, 0, 0, TimeSpan.Zero);
+    private bool _enabled = true;
+    private int _fetches;
+    private (int, byte[]?) _reply = (404, null);
+    private bool _throw;
+    private readonly UpdateStateStore _store;
+
+    public UpdateServiceTests() => _store = new UpdateStateStore(Path.Combine(_dir, "update-state.json"));
+    public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
+
+    private static byte[] Body(string tag) => System.Text.Encoding.UTF8.GetBytes(
+        $"{{\"tag_name\":\"{tag}\",\"html_url\":\"https://github.com/Denmurzik/SideBar/releases/tag/{tag}\"}}");
+
+    private UpdateService Make()
+    {
+        var s = new UpdateService(_store, Cur, _ =>
+        {
+            _fetches++;
+            if (_throw) throw new HttpRequestException("secret host");
+            return Task.FromResult(_reply);
+        }, () => _now, () => _enabled);
+        _now += TimeSpan.FromMinutes(5);   // льготные 2 мин после старта прошли
+        return s;
+    }
+
+    [Fact]
+    public async Task Disabled_makes_no_request()
+    {
+        _enabled = false;
+        await Make().TickAsync(CancellationToken.None);
+        Assert.Equal(0, _fetches);
+    }
+
+    [Fact]
+    public async Task Recent_check_makes_no_request()
+    {
+        _store.Save(new UpdateState(_now, null, null));
+        await Make().TickAsync(CancellationToken.None);
+        Assert.Equal(0, _fetches);
+    }
+
+    [Fact]
+    public async Task Network_failure_moves_last_check()
+    {
+        _throw = true;
+        var s = Make();
+        await s.TickAsync(CancellationToken.None);
+        Assert.Equal(1, _fetches);
+        Assert.Equal(_now, _store.LastCheck);
+        await s.TickAsync(CancellationToken.None);   // повтор раньше чем через 24 ч не идёт
+        Assert.Equal(1, _fetches);
+    }
+
+    [Fact]
+    public async Task Failed_check_keeps_found_update_and_404_clears_it()
+    {
+        _reply = (200, Body("v0.2.0"));
+        var s = Make();
+        await s.CheckAsync(CancellationToken.None);
+        Assert.NotNull(s.Available);
+        _throw = true;
+        await s.CheckAsync(CancellationToken.None);
+        Assert.NotNull(s.Available);
+        Assert.Equal("v0.2.0", _store.Load().Tag);
+        _throw = false;
+        _reply = (404, null);
+        await s.CheckAsync(CancellationToken.None);
+        Assert.Null(s.Available);
+        Assert.Null(_store.Load().Tag);
+    }
+
+    [Fact]
+    public void Persisted_newer_release_is_restored_and_hidden_when_disabled()
+    {
+        _store.Save(new UpdateState(_now, "v0.2.0", "https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0"));
+        var s = Make();
+        s.RestorePersisted();
+        Assert.Equal(new Version(0, 2, 0), s.Available!.Version);
+        _enabled = false;
+        Assert.Null(s.Available);
+        Assert.Equal(0, _fetches);
+    }
+
+    [Fact]
+    public void Persisted_release_not_newer_or_invalid_is_dropped()
+    {
+        _store.Save(new UpdateState(_now, "v0.1.0", "https://github.com/Denmurzik/SideBar/releases/tag/v0.1.0"));
+        var s = Make();
+        s.RestorePersisted();
+        Assert.Null(s.Available);
+        Assert.Null(_store.Load().Tag);
+
+        _store.Save(new UpdateState(_now, "v9.0.0", "https://evil.example/x"));
+        s.RestorePersisted();
+        Assert.Null(s.Available);
+    }
+
+    [Fact]
+    public async Task Manual_check_works_when_disabled()
+    {
+        _enabled = false;
+        var s = Make();
+        await s.CheckAsync(CancellationToken.None);
+        Assert.Equal(1, _fetches);
     }
 }
