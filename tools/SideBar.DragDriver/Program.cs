@@ -40,6 +40,8 @@ sealed class Driver
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(nint hwnd, out uint pid);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(nint hwnd, System.Text.StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, nint extra);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern nint FindWindowW(string cls, string? title);
+    [DllImport("user32.dll")] static extern bool PostMessageW(nint hwnd, uint msg, nint wParam, nint lParam);
 
     const int Reference = 0, Owned = 1;
 
@@ -51,6 +53,7 @@ sealed class Driver
     readonly List<string> _report = [];
     Form _src = null!, _other = null!;
     volatile bool _otherRejects;
+    Action? _afterDrop;
     volatile string[] _received = [];
     volatile string _otherEffect = "";
     volatile object? _pending;
@@ -175,6 +178,7 @@ sealed class Driver
         if (Path.GetFullPath(_srcDir).StartsWith(Path.GetFullPath(tmpDir), StringComparison.OrdinalIgnoreCase))
         { Rep("FAIL source files must be outside %TEMP% (they would count as temporary)"); _fail++; return; }
 
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_PAUSE_ONLY") == "1") { PauseScenarios(W, H, a); return; }   // быстрый прогон: пауза при официальном приложении (P1..P4)
         if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_CLEAR_ONLY") == "1") { ClearScenarios(W, H, a, b, c); return; }   // быстрый прогон: только корзина полки (C1..C5)
         if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1" || Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_FAN_ONLY") == "1")   // быстрый прогон: только вынос стопки и отправка с плитки
         {
@@ -599,6 +603,58 @@ sealed class Driver
         return !log.Contains("drag-out starting") && FanZone() == null && !fg;
     }
 
+    /// <summary>Контекстное меню трея как от правого клика: то же сообщение, что шлёт оболочка (v4); снимок только области меню.</summary>
+    void ShotTrayMenu(string name, int W, int H)
+    {
+        var hwnd = FindWindowW("SideBar.MessageWindow", null);
+        if (hwnd == 0) { Rep("    (tray shot " + name + ": message window not found)"); return; }
+        PostMessageW(hwnd, 0x8001, (nint)(((_scr.Bottom - 60) << 16) | ((_scr.Right - 60) & 0xFFFF)), 0x7B);
+        Thread.Sleep(1200);
+        try
+        {
+            var dir = Path.Combine(_work, "shots");
+            Directory.CreateDirectory(dir);
+            var r = new Rectangle(_scr.Right - 480, _scr.Bottom - 260, 480, 230);
+            using var bmp = new Bitmap(r.Width, r.Height);
+            using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(r.Location, Point.Empty, r.Size);
+            bmp.Save(Path.Combine(dir, name + ".png"), System.Drawing.Imaging.ImageFormat.Png);
+        }
+        catch (Exception e) { Rep("    (tray shot " + name + " failed: " + e.Message + ")"); }
+        keybd_event(0x1B, 0, 0, 0); keybd_event(0x1B, 0, 2, 0);   // Esc закрывает меню
+        Thread.Sleep(400);
+    }
+
+    // P1..P4: пока работает официальный nearby_share.exe (копия ping.exe), стек на паузе: меню трея, подсказка на плитке, возобновление
+    void PauseScenarios(int W, int H, string a)
+    {
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        if (!StartApp()) { _fail++; return; }
+        var fakeDir = Path.Combine(_work, "fake");
+        Directory.CreateDirectory(fakeDir);
+        var fake = Path.Combine(fakeDir, "nearby_share.exe");
+        File.Copy(Path.Combine(Environment.SystemDirectory, "PING.EXE"), fake, true);
+        ShotTrayMenu("p0-tray-normal", W, H);
+        Process? proc = null;
+        try
+        {
+            proc = Process.Start(new ProcessStartInfo(fake, "-t 127.0.0.1") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true });
+            bool paused = WaitLog("receive paused", 15000) && AppLog().Contains("official app running");
+            Check("P1 fake nearby_share.exe running -> log 'official app running' and 'receive paused'", paused, AppLog());
+            ShotTrayMenu("p1-tray-paused", W, H);
+            var files = new DataObject();
+            files.SetData(DataFormats.FileDrop, new[] { a });
+            _afterDrop = () => Shot("p2-hint", W, H);
+            bool dropped = DragToPanel(files, W, H, QsTile(W, H));
+            bool hint = dropped && (_lastLog.Contains("share tile OfficialAppRunning") || WaitLog("share tile OfficialAppRunning", 3000));
+            Check("P2 file dropped on the Quick Share tile while paused -> tile OfficialAppRunning, no search", hint && !AppLog().Contains("share tile Searching"), _lastLog + " | " + AppLog());
+        }
+        finally { try { proc?.Kill(true); } catch { } }
+        bool resumed = WaitLog("official app stopped", 15000) && WaitLog("receive resumed", 5000);
+        Check("P3 fake closed -> log 'official app stopped' and 'receive resumed'", resumed, AppLog());
+        ShotTrayMenu("p3-tray-resumed", W, H);
+    }
+
     // C1..C5: очистка полки корзиной только вторым кликом в течение 3 с; файлы на диске целы; Owned уходит в отложенное удаление
     void ClearScenarios(int W, int H, string a, string b, string c)
     {
@@ -1008,6 +1064,7 @@ sealed class Driver
         if (dropAt is { } at) { MoveTo(at.X, at.Y, 300); Thread.Sleep(400); }
         else { MoveTo(W - (int)((8 + 108) * _scale), H, 300); Thread.Sleep(400); }   // центр карточки
         Mouse(0x0004);                                   // ЛКМ вверх -> drop
+        if (_afterDrop is { } hook) { _afterDrop = null; Thread.Sleep(300); hook(); }   // снимок сразу после drop'а, пока подсказка плитки ещё видна
         Thread.Sleep(1200);
         MoveTo(W - 700, H, 200); Thread.Sleep(500);      // уходим: карточка закроется, следующий drag откроет её заново
         _lastLog = AppLog();
