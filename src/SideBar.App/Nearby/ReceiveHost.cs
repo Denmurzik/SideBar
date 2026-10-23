@@ -160,8 +160,16 @@ sealed class ReceiveHost : IDisposable
         {
             if (_pause.IsPaused)
             {
-                // не принятые сессии отменяются, принятые доигрывают; слушатель и реклама сняты
+                // не принятые сессии отменяются, принятые доигрывают (но сетевая политика их по-прежнему обрывает); слушатель и реклама сняты
                 CancelSessions(new ReceiveDecision(Listen: false, CancelUnaccepted: true, CancelAccepted: false));
+                bool accepted;
+                lock (_gate) accepted = _live.Any(l => l.Accepted);
+                if (accepted)
+                {
+                    var (_, pausedCategory) = ObserveNetwork();
+                    var policy = ReceivePolicy.Decide(Visibility.Hidden, pausedCategory, true);
+                    CancelSessions(policy with { CancelUnaccepted = false });
+                }
                 Stop();
                 return;
             }
@@ -181,22 +189,7 @@ sealed class ReceiveHost : IDisposable
             (IPAddress Address, int Index)? lan = null;
             NetworkCategory? category = null;
             var networkChecked = visibility != Visibility.Hidden || anyAccepted;
-            if (networkChecked)
-            {
-                var route = Route();
-                if (route is { } r)
-                {
-                    lan = (r.Address, r.InterfaceIndex);
-                    var lookup = NetworkInfo.LookupCategory(r.InterfaceIndex);
-                    category = _network.Observe(lookup, DateTimeOffset.UtcNow);   // один сбой поиска не равен Unknown от NLM
-                    Log.Write(lookup is null ? $"receive network lookup failed, using {category}" : $"receive network {category}");
-                }
-                else
-                {
-                    _network.Reset();
-                    Log.Write("receive network none");
-                }
-            }
+            if (networkChecked) (lan, category) = ObserveNetwork();
             else _network.Reset();
             var decision = ReceivePolicy.Decide(visibility, category, networkChecked);
             CancelSessions(decision);
@@ -219,6 +212,22 @@ sealed class ReceiveHost : IDisposable
             Log.Write("receive evaluate failed: " + Log.Describe(e));
         }
         finally { _evaluate.Release(); }
+    }
+
+    // под _evaluate
+    ((IPAddress Address, int Index)? Lan, NetworkCategory? Category) ObserveNetwork()
+    {
+        var route = Route();
+        if (route is not { } r)
+        {
+            _network.Reset();
+            Log.Write("receive network none");
+            return (null, null);
+        }
+        var lookup = NetworkInfo.LookupCategory(r.InterfaceIndex);
+        var category = _network.Observe(lookup, DateTimeOffset.UtcNow);   // один сбой поиска не равен Unknown от NLM
+        Log.Write(lookup is null ? $"receive network lookup failed, using {category}" : $"receive network {category}");
+        return ((r.Address, r.InterfaceIndex), category);
     }
 
     static (IPAddress Address, int InterfaceIndex)? Route()
@@ -351,6 +360,12 @@ sealed class ReceiveHost : IDisposable
                 continue;
             }
             failures = 0;
+            if (_pause.IsPaused)
+            {
+                client.Dispose();   // принято прямо перед паузой
+                Log.Write("receive connection dropped (paused)");
+                continue;
+            }
             if (Interlocked.Increment(ref _sessions) > MaxSessions)
             {
                 Interlocked.Decrement(ref _sessions);
@@ -380,6 +395,11 @@ sealed class ReceiveHost : IDisposable
         {
             using (client)
             {
+                if (_pause.IsPaused)
+                {
+                    Log.Write("receive session dropped (paused)");   // пауза началась между приёмом соединения и его регистрацией
+                    return;
+                }
                 client.NoDelay = true;
                 Log.Write("receive session start");
                 // режим и идентичность фиксируются на старте сессии: смена сертификатов её не трогает

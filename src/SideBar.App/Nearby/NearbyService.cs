@@ -243,6 +243,13 @@ sealed class NearbyService : IDisposable
         {
             if (_cts is not null) return;   // отправка уже идёт
             epoch = _epoch;
+            if (_pause.IsPaused)
+            {
+                // официальное приложение запустили после начала поиска: отправка не начинается
+                Log.Write("share: choose refused, stack paused");
+                Post(epoch, () => Finished?.Invoke(false, Strings.CloseOfficialApp));
+                return;
+            }
             if (!_endpoints.TryGetValue(id, out target))
             {
                 // устройство пропало между кликом и выбором: плитка не должна остаться в «отправке»

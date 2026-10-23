@@ -8,7 +8,7 @@ public sealed class OfficialAppWatcher : IDisposable
     public static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);
 
     readonly Func<bool> _probe;
-    readonly object _gate = new();
+    readonly object _gate = new(), _poll = new();
     Timer? _timer;
     volatile bool _running;
 
@@ -21,15 +21,16 @@ public sealed class OfficialAppWatcher : IDisposable
     /// <summary>Один опрос (сразу при старте, чтобы первое решение приёма учитывало процесс).</summary>
     public void Poll()
     {
-        bool now;
-        try { now = _probe(); }
-        catch (Exception) { return; }   // сбой опроса не равен «закрыли»: состояние не меняется
-        lock (_gate)
+        // весь опрос под одним замком: true/false не могут прийти не по порядку
+        lock (_poll)
         {
+            bool now;
+            try { now = _probe(); }
+            catch (Exception) { return; }   // сбой опроса не равен «закрыли»: состояние не меняется
             if (now == _running) return;
             _running = now;
+            RunningChanged?.Invoke(now);
         }
-        RunningChanged?.Invoke(now);
     }
 
     public void Start()

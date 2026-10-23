@@ -105,4 +105,27 @@ public class OfficialAppTests
         w.Poll();
         Assert.True(w.Running);
     }
+
+    [Fact]
+    public async Task Overlapping_polls_deliver_in_order()
+    {
+        var gate = new ManualResetEventSlim();
+        var entered = new ManualResetEventSlim();
+        int calls = 0;
+        using var w = new OfficialAppWatcher(() =>
+        {
+            if (Interlocked.Increment(ref calls) == 1) { entered.Set(); gate.Wait(); return true; }
+            return false;
+        });
+        var seen = new List<bool>();
+        w.RunningChanged += v => { lock (seen) seen.Add(v); };
+        var a = Task.Run(w.Poll);
+        entered.Wait();
+        var b = Task.Run(w.Poll);
+        await Task.Delay(100);
+        gate.Set();
+        await Task.WhenAll(a, b);
+        Assert.Equal([true, false], seen);
+        Assert.False(w.Running);
+    }
 }

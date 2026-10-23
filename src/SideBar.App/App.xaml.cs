@@ -231,6 +231,8 @@ public partial class App : Application
         if (_stack.IsPaused)
         {
             ShareStaging.TakePending();   // копии временных файлов не нужны
+            if (_share.State is ShareTileState.Searching or ShareTileState.Choosing or ShareTileState.Sending)
+                Log.Write("share: drop ignored (paused)");   // идущий сеанс не трогаем
             _share.ShowOfficialAppRunning(DateTimeOffset.UtcNow);
             return;
         }
