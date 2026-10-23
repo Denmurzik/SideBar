@@ -118,11 +118,11 @@ public sealed class SettingsStore
     }
 
     /// <summary>
-    /// Перенос видимости, сохранённой M4 в реестре: только пока в настройках стоит значение по умолчанию (Hidden); «Все» не переносится
+    /// Перенос видимости, сохранённой M4 в реестре: только пока в настройках стоит значение по умолчанию (OwnDevices); «Все» не переносится
     /// (временный режим не сохраняется). Чистая функция: App сам читает реестр и удаляет значение сразу после этого вызова.
     /// </summary>
     public static AppSettings MigrateVisibility(AppSettings settings, Visibility? fromRegistry) =>
-        fromRegistry is { } v && v != Visibility.Everyone && Enum.IsDefined(v) && settings.Visibility == Visibility.Hidden
+        fromRegistry is { } v && v != Visibility.Everyone && Enum.IsDefined(v) && settings.Visibility == new AppSettings().Visibility
             ? settings with { Visibility = v }
             : settings;
 

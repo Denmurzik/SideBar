@@ -15,7 +15,7 @@ public sealed record AppSettings
 {
     public Language Language { get; init; } = Language.Auto;
     public bool CheckForUpdates { get; init; } = true;
-    public Visibility Visibility { get; init; } = Visibility.Hidden;
+    public Visibility Visibility { get; init; } = Visibility.OwnDevices;
     /// <summary>null — имя компьютера.</summary>
     public string? PcName { get; init; }
     /// <summary>null — «Загрузки».</summary>

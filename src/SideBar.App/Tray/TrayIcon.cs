@@ -15,7 +15,7 @@ sealed unsafe class TrayIcon : IDisposable
     const uint MF_STRING = 0, MF_CHECKED = 8, MF_GRAYED = 1, MF_BYCOMMAND = 0, MF_SEPARATOR = 0x800;
     const uint TPM_RIGHTBUTTON = 2, TPM_BOTTOMALIGN = 0x20, TPM_RETURNCMD = 0x100;
     const int SM_CXSMICON = 49;
-    const int CmdAutostart = 1, CmdExit = 2, CmdHidden = 3, CmdOwnDevices = 4, CmdEveryone = 5;   // 3..5 — радиогруппа видимости
+    const int CmdAutostart = 1, CmdExit = 2, CmdHidden = 3, CmdOwnDevices = 4, CmdEveryone = 5, CmdSettings = 6;   // 3..5 — радиогруппа видимости
 
     [StructLayout(LayoutKind.Sequential)]
     struct NOTIFYICONDATAW
@@ -58,6 +58,9 @@ sealed unsafe class TrayIcon : IDisposable
     readonly uint _taskbarCreated;
     nint _icon;
     bool _added;
+
+    /// <summary>Пункт «Настройки…»: вызывается на UI-потоке после закрытия меню.</summary>
+    public Action? OpenSettings { get; set; }
 
     public TrayIcon(MessageWindow window, Autostart autostart, string exePath, Action onExit,
         Func<Visibility> mode, Func<bool> ownDevicesAvailable, Action<Visibility> setMode, Func<bool> stackPaused)
@@ -111,6 +114,8 @@ sealed unsafe class TrayIcon : IDisposable
     void ShowMenu(int x, int y)
     {
         nint menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING, CmdSettings, Strings.SettingsMenu);
+        AppendMenuW(menu, MF_SEPARATOR, 0, null);
         // пока открыт официальный Quick Share, наш стек не слушает и не рекламируется
         if (_stackPaused()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, Strings.StackPaused);
         AppendMenuW(menu, MF_STRING, CmdHidden, Strings.VisibilityHidden);
@@ -133,6 +138,7 @@ sealed unsafe class TrayIcon : IDisposable
         else if (cmd == CmdHidden) _setMode(Visibility.Hidden);
         else if (cmd == CmdOwnDevices) _setMode(Visibility.OwnDevices);
         else if (cmd == CmdEveryone) _setMode(Visibility.Everyone);
+        else if (cmd == CmdSettings) OpenSettings?.Invoke();
         else if (cmd == CmdExit) _onExit();
     }
 

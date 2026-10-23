@@ -18,7 +18,7 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(new AppSettings(), s);
         Assert.Equal(Language.Auto, s.Language);
         Assert.True(s.CheckForUpdates);
-        Assert.Equal(Visibility.Hidden, s.Visibility);
+        Assert.Equal(Visibility.OwnDevices, s.Visibility);
         Assert.Null(s.PcName);
         Assert.Null(s.ReceiveFolder);
         Assert.Null(s.OfficialExePath);
@@ -108,7 +108,7 @@ public sealed class SettingsTests : IDisposable
         File.WriteAllText(FilePath, """{ "language": "Klingon", "visibility": "99", "edgeOpenDelay": "7", "shelfRetention": "", "checkForUpdates": false }""");
         var s = new SettingsStore(FilePath).Current;
         Assert.Equal(Language.Auto, s.Language);
-        Assert.Equal(Visibility.Hidden, s.Visibility);
+        Assert.Equal(Visibility.OwnDevices, s.Visibility);
         Assert.Equal(EdgeOpenDelay.Ms150, s.EdgeOpenDelay);
         Assert.Equal(ShelfRetention.Never, s.ShelfRetention);
         Assert.False(s.CheckForUpdates);
@@ -128,5 +128,7 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(def, SettingsStore.MigrateVisibility(def, (Visibility)99));
         var chosen = def with { Visibility = Visibility.Everyone };
         Assert.Equal(chosen, SettingsStore.MigrateVisibility(chosen, Visibility.Hidden));
+        Assert.Equal(Visibility.Hidden, SettingsStore.MigrateVisibility(def, Visibility.Hidden).Visibility);   // по умолчанию — OwnDevices
+        Assert.Equal(def, SettingsStore.MigrateVisibility(def, Visibility.OwnDevices));
     }
 }
