@@ -602,12 +602,13 @@ sealed class Driver
     // C1..C5: очистка полки корзиной только вторым кликом в течение 3 с; файлы на диске целы; Owned уходит в отложенное удаление
     void ClearScenarios(int W, int H, string a, string b, string c)
     {
+        File.WriteAllText(c, "cccccccc");   // сценарий про пропавшую ссылку удаляет c.txt
         StopApp();
         try { Directory.Delete(_dataDir, true); } catch { }
         if (!StartApp()) { _fail++; return; }
         FillThree(W, H, a, b, c);
         var s = WaitShelf(x => x.Count == 3);
-        if (s.Count != 3 || !OpenCard(W, H)) { Check("C0 shelf prepared and card open", false, Dump(s)); return; }
+        if (s.Count != 3 || !OpenCard(W, H)) { Check("C0 shelf prepared and card open", false, Dump(s) ); return; }
         var t = TrashPoint(W, H);
         MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
         Click(); Thread.Sleep(600);
@@ -654,7 +655,7 @@ sealed class Driver
         if (s.Count != 2 || owned == null || !OpenCard(W, H)) { Check("C4 shelf prepared (png owned + file ref) and card open", false, Dump(s)); return; }
         var ownedDir = Path.GetDirectoryName(owned.Path)!;
         MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
-        Click(); Thread.Sleep(300); Click();
+        Click(); Thread.Sleep(600); Click();
         s = WaitShelf(x => x.Count == 0, 3000);
         bool alive = File.Exists(owned.Path);
         var pending = ReadPending();
@@ -667,19 +668,23 @@ sealed class Driver
         FillThree(W, H, a, b, c);
         s = WaitShelf(x => x.Count == 3);
         if (s.Count != 3) { Check("C5 shelf prepared", false, Dump(s)); return; }
-        if (!DragStackTo(new Point(W - 700, H), W, H)) return;
+        _otherRejects = true;   // OTHER отвечает None: элементы остаются на полке (на пустом месте экрана мог бы стоять чужой приёмник)
+        bool dragged = DragStackTo(new Point(_other.Left + 150, _other.Top + 75), W, H);
+        _otherRejects = false;
+        if (!dragged) return;
         var log = AppLog();
         if (!log.Contains("shelf trash"))
         { Rep("SKIP C5 needs a Debug app: the 'shelf trash' log hook exists only in Debug"); return; }
         int started = log.IndexOf("drag-out starting", StringComparison.Ordinal);
-        int hidden = started < 0 ? -1 : log.IndexOf("shelf trash Collapsed", started, StringComparison.Ordinal);
+        // DragStarting прячет корзину сразу, а "drag-out starting" пишется после асинхронной подготовки: Collapsed идёт раньше. Лог сброшен OpenCard'ом в начале drag'а.
+        int hidden = log.IndexOf("shelf trash Collapsed", StringComparison.Ordinal);
         int completed = hidden < 0 ? -1 : log.IndexOf("drag-out completed", hidden, StringComparison.Ordinal);
         int shown = completed < 0 ? -1 : log.IndexOf("shelf trash Visible", completed, StringComparison.Ordinal);
         s = ReadShelf();
         // цель выноса - пустое место (DropResult=None): элементы остаются на полке, корзина обязана вернуться
-        bool back = s.Count == 0 || shown > completed;
-        Check("C5 trash is hidden while a stack item is dragged out (starting < Collapsed < completed) and is back after the drag",
-            started >= 0 && hidden > started && completed > hidden && completed >= 0 && back && log.Contains("DropResult=None"),
+        bool back = shown > completed;
+        Check("C5 trash is hidden while a stack item is dragged out (Collapsed < completed) and is back after the drag",
+            started >= 0 && hidden >= 0 && completed > hidden && back && log.Contains("DropResult=None"),
             $"starting={started} collapsed={hidden} completed={completed} visibleAfter={shown} shelf={s.Count}\n" + log);
     }
 
