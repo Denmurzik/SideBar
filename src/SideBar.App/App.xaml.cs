@@ -5,6 +5,7 @@ using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Edge;
 using SideBar.Shelf;
+using SideBar.Sharing;
 using SideBar.Tray;
 using WinRT.Interop;
 
@@ -31,6 +32,9 @@ public partial class App : Application
     ShelfService? _shelf;
     OleDropTarget.DropRegistration? _dropTarget;
     FanWindow? _fan;
+    Notifications? _notifications;
+    ReceiveHost? _receive;
+    PromptWindow? _prompt;
     PxRect? _fanZone;   // под _gate: зона веера для проверки клика вне (рабочий поток хука)
 
     public App()
@@ -81,7 +85,29 @@ public partial class App : Application
         var autostart = new Autostart();
         try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
         _messages = new MessageWindow(OnDisplaysChanged);
-        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp));
+        _notifications = new Notifications(_ui, _messages.Handle);
+        _notifications.Register();
+        if (!_notifications.Available)
+        {
+            // уведомления Windows недоступны (unpackaged + self-contained): запрос и итоги показываем панелью рядом с карточкой
+            _notifications.SetFallback((spec, ct) =>
+            {
+                if (_prompt is null)
+                {
+                    _prompt = new PromptWindow();
+                    _prompt.SetAnchor(() =>
+                    {
+                        lock (_gate) return (_layout.CardRectAt(_layout.LeftFor(PanelState.Open)), _scale);
+                    });
+                }
+                _prompt.Present(spec, ct);
+            });
+        }
+        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, PeekForRequest);
+#if DEBUG
+        if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.ToggleEveryone();   // автотест без клика по меню трея
+#endif
+        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.IsEveryone, _receive.ToggleEveryone);
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) _trimmer.OnHidden(); }), null, 2000, Timeout.Infinite);
@@ -94,6 +120,8 @@ public partial class App : Application
         {
             try { _hook?.Dispose(); } catch { }
             try { _dropTarget?.Dispose(); } catch { }
+            try { _receive?.Dispose(); } catch { }
+            try { _notifications?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
             try { _messages?.Dispose(); } catch { }
         }
@@ -120,6 +148,21 @@ public partial class App : Application
             _trimmer.OnShown();
             _window?.SetState(s);
         }
+    }
+
+    /// <summary>Входящий запрос (UI-поток): карточка выглядывает на 1.5 с, если она скрыта; открытую или уже выглядывающую не трогаем.</summary>
+    void PeekForRequest()
+    {
+        var machine = _machine;
+        if (machine is null || _window is null) return;
+        lock (_gate) { if (machine.State != PanelState.Hidden) return; }
+        _window.SetState(PanelState.Peek);
+        _ = Task.Delay(1500).ContinueWith(_ => _ui?.TryEnqueue(() =>
+        {
+            bool stillHidden;
+            lock (_gate) stillHidden = machine.State == PanelState.Hidden;
+            if (stillHidden) _window?.SetState(PanelState.Hidden);
+        }), TaskScheduler.Default);
     }
 
     /// <summary>Клик по стопке (UI-поток): показать веер слева от открытой карточки.</summary>
