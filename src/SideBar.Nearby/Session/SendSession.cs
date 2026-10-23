@@ -129,6 +129,9 @@ public static class SendSession
     private sealed class PeerWatch
     {
         public volatile TransferResult? Abort;
+
+        /// <summary>The abort is an explicit cancel by the peer, not just a disconnection or a read error.</summary>
+        public volatile bool Explicit;
         public volatile bool SendFinished;
     }
 
@@ -155,11 +158,19 @@ public static class SendSession
         {
             try { await SendAllAsync(connection, entries, observer, sendCts.Token); }
             catch (Exception e) when (!ct.IsCancellationRequested
-                && (e is OperationCanceledException || SessionErrors.IsHandled(e)) && watch.Abort is not null)
+                && (e is OperationCanceledException || SessionErrors.IsHandled(e)))
             {
-                return watch.Abort;
+                // A write error usually means the peer is gone; let the reader say why, so the mapping does not
+                // depend on which of the two noticed first.
+                if (watch.Abort is null)
+                    await Task.WhenAny(reader, Task.Delay(TimeSpan.FromMilliseconds(500), ct));
+                return watch.Abort ?? (e is OperationCanceledException
+                    ? new TransferResult(TransferStatus.Failed, [], "Transfer interrupted.")
+                    : SessionErrors.ToResult(e));
             }
             watch.SendFinished = true;
+            // The peer cancelled right after the last chunk. A mere Disconnection here is the receiver finishing.
+            if (watch.Abort is { } late && watch.Explicit) return late;
 
             // Do not slam the socket shut: closing with unread data makes TCP send a RST, which can discard what the
             // receiver has not processed yet (seen as "failed to send" on the phone). Let the receiver finish first.
@@ -174,7 +185,9 @@ public static class SendSession
         finally
         {
             await readerCts.CancelAsync();
-            await reader;
+            // The reader reports through PeerWatch; whatever it throws must not replace the real result.
+            try { await reader; }
+            catch (Exception) { }
         }
     }
 
@@ -206,8 +219,9 @@ public static class SendSession
     private static async Task WatchPeerAsync(
         NearbyConnection connection, PeerWatch watch, CancellationTokenSource sendCts, CancellationToken token)
     {
-        void Abort(TransferResult result)
+        void Abort(TransferResult result, bool explicitCancel = false)
         {
+            if (watch.Abort is null) watch.Explicit = explicitCancel;
             watch.Abort ??= result;
             sendCts.Cancel();
         }
@@ -220,14 +234,14 @@ public static class SendSession
                 // Once everything is sent, anything but the Disconnection is of no interest (as before).
                 if (frame?.V1?.Type == Share.V1Frame.Types.FrameType.Cancel && !watch.SendFinished)
                 {
-                    Abort(new TransferResult(TransferStatus.CancelledByPeer, [], "Receiver cancelled the transfer."));
+                    Abort(new TransferResult(TransferStatus.CancelledByPeer, [], "Receiver cancelled the transfer."), explicitCancel: true);
                     return;
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
             catch (PeerCancelledException e) when (!watch.SendFinished)
             {
-                Abort(SessionErrors.ToResult(e));
+                Abort(SessionErrors.ToResult(e), explicitCancel: true);
                 return;
             }
             catch (PeerCancelledException) { }

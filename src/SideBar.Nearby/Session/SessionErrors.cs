@@ -25,7 +25,7 @@ internal static class SessionErrors
 
     public static bool IsHandled(Exception e) =>
         e is IOException or UnauthorizedAccessException or InvalidDataException or Ukey2Exception
-            or SecureChannelException or PeerCancelledException or SessionTimeoutException;
+            or SecureChannelException or PeerCancelledException or SessionTimeoutException or ObjectDisposedException;
 
     private static bool IsTransportError(Exception e) =>
         e is EndOfStreamException or ObjectDisposedException or SafeIoException || e.InnerException is SocketException;

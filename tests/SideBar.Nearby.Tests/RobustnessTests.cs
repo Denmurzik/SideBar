@@ -99,6 +99,9 @@ public sealed class RobustnessTests : IDisposable
                     { Type = Conn.V1Frame.Types.FrameType.PayloadTransfer }), ct);
                 break;
             case 1:
+                // Only after an accepted Introduction: a chunk-less DATA frame for an announced file.
+                await peer.IntroduceAsync(ct, TestFrames.File(1, 1));
+                await peer.ReadResponseAsync(ct);
                 await peer.SendOfflineAsync(TestFrames.Offline(new Conn.V1Frame
                 {
                     Type = Conn.V1Frame.Types.FrameType.PayloadTransfer,
@@ -350,5 +353,74 @@ public sealed class RobustnessTests : IDisposable
         }
         Assert.Equal(3, Directory.GetFiles(_out).Length);
         Assert.All(offers, o => Assert.False(o.Verified));
+    }
+
+    [Fact]
+    public async Task Consent_that_ignores_the_token_still_times_out()
+    {
+        var ct = Token();
+        using var link = await Link.OpenAsync(ct);
+        var options = new SessionOptions("R") { DecisionTimeout = TimeSpan.FromMilliseconds(300) };
+        var never = new TaskCompletionSource<bool>();
+        var receive = Receive(link, ct, options, (_, _) => never.Task);
+        await using var peer = await FakeSender.ConnectAsync(link.Client, ct);
+        await peer.IntroduceAsync(ct, TestFrames.File(7, 10));
+
+        Assert.Equal(Share.ConnectionResponseFrame.Types.Status.Reject, await peer.ReadResponseAsync(ct));
+        Assert.Equal(TransferStatus.TimedOut, (await receive).Status);
+    }
+
+    [Fact]
+    public async Task Keep_alives_keep_the_session_alive()
+    {
+        var ct = Token();
+        using var link = await Link.OpenAsync(ct);
+        var options = new SessionOptions("R") { IdleTimeout = TimeSpan.FromMilliseconds(300) };
+        var receive = Receive(link, ct, options);
+        await using var peer = await FakeSender.ConnectAsync(link.Client, ct);
+        for (var i = 0; i < 10; i++)
+        {
+            await peer.SendOfflineAsync(OfflineFrames.KeepAlive(ack: false), ct);
+            await Task.Delay(100, ct);
+        }
+        await peer.IntroduceAsync(ct, TestFrames.File(7, 10));
+
+        Assert.Equal(Share.ConnectionResponseFrame.Types.Status.Accept, await peer.ReadResponseAsync(ct));
+        Assert.Equal(TransferStatus.TimedOut, (await receive).Status); // silent after that
+    }
+
+    [Fact]
+    public async Task Sender_maps_cancel_seen_during_the_last_chunks_to_cancelled_by_peer()
+    {
+        var ct = Token();
+        using var link = await Link.OpenAsync(ct);
+        var file = MakeFile("tiny.bin", 1);
+        var send = SendSession.SendFilesAsync(link.Client, new SessionOptions("S"), [file], new SlowProgress(), ct);
+        await using var peer = await FakeReceiver.AcceptAsync(link.Server, ct);
+        await peer.AcceptTransferAsync(ct);
+        await peer.SendSharingAsync(TestFrames.Of(Share.V1Frame.Types.FrameType.Cancel), ct);
+
+        Assert.Equal(TransferStatus.CancelledByPeer, (await send).Status);
+    }
+
+    private sealed class SlowProgress : ITransferObserver
+    {
+        // Holds the sender after its first chunk so the reader has surely seen the peer's cancel.
+        void ITransferObserver.Progress(TransferProgress progress) => Thread.Sleep(500);
+    }
+
+    [Fact]
+    public async Task Sender_reports_failure_when_the_peer_drops_the_connection()
+    {
+        var ct = Token();
+        using var link = await Link.OpenAsync(ct);
+        var big = MakeFile("drop.bin", 64L * 1024 * 1024);
+        var send = SendSession.SendFilesAsync(link.Client, new SessionOptions("S"), [big], null, ct);
+        var peer = await FakeReceiver.AcceptAsync(link.Server, ct);
+        await peer.AcceptTransferAsync(ct);
+        link.Server.Dispose();
+
+        Assert.Equal(TransferStatus.Failed, (await send).Status);
+        await peer.DisposeAsync();
     }
 }

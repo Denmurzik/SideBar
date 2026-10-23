@@ -150,7 +150,7 @@ public static class ReceiveSession
                             bool decisionExpired() => expired;
                             var allowed = false;
                             var timedOut = false;
-                            try { allowed = await consent(offer, decision.Token); }
+                            try { allowed = await consent(offer, decision.Token).WaitAsync(decision.Token); }
                             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { timedOut = true; }
                             finally { decision.Dispose(); }
                             timedOut |= !allowed && decisionExpired();
