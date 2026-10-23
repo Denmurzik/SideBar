@@ -23,6 +23,7 @@ UsedUserAreasWarning=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
+AppMutex=Local\SideBar.SingleInstance
 RestartApplications=no
 LicenseFile=..\LICENSE
 SetupIconFile=..\src\SideBar.App\Assets\SideBar.ico
@@ -43,10 +44,6 @@ Source: "..\artifacts\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 [Icons]
 Name: "{group}\SideBar"; Filename: "{app}\SideBar.exe"
 
-; Значение автозапуска создаёт само приложение; здесь только удаление при деинсталляции.
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "SideBar"; ValueType: none; Flags: uninsdeletevalue dontcreatekey
-
 [Run]
 ; Удаляем старое правило (ошибка, если его нет, игнорируется), затем добавляем: дубликаты не копятся.
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FwRule}"""; Flags: runhidden waituntilterminated
@@ -55,3 +52,11 @@ Filename: "{app}\SideBar.exe"; Description: "{cm:LaunchProgram,SideBar}"; Flags:
 
 [UninstallRun]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FwRule}"""; Flags: runhidden waituntilterminated; RunOnceId: "DelFwRule"
+
+[Code]
+{ Значение автозапуска создаёт приложение; удаляем его при деинсталляции (для пользователя, запустившего деинсталлятор). }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'SideBar');
+end;

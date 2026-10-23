@@ -94,9 +94,47 @@ jobs:
           path: artifacts/installer/SideBar-${{ steps.ver.outputs.version }}-setup.exe
           if-no-files-found: error
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  smoke:
     needs: installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SideBar-setup
+          path: dist
+
+      - name: Install, reinstall, uninstall
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist -Filter 'SideBar-*-setup.exe').FullName
+          $dir = Join-Path $env:ProgramFiles 'SideBar'
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          function Rules { @(netsh advfirewall firewall show rule name="SideBar Quick Share" | Select-String '^Rule Name:').Count }
+          function Fail($m) { Write-Host "::error::$m"; Get-Process SideBar -ErrorAction SilentlyContinue | Stop-Process -Force; exit 1 }
+
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Fail "install exit $($p.ExitCode)" }
+          if (-not (Test-Path "$dir\SideBar.exe")) { Fail 'SideBar.exe missing after install' }
+          if ((Rules) -ne 1) { Fail "rules after install: $(Rules)" }
+
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Fail "reinstall exit $($p.ExitCode)" }
+          if ((Rules) -ne 1) { Fail "rules after reinstall: $(Rules)" }
+
+          if (Get-Process SideBar -ErrorAction SilentlyContinue) { Fail 'SideBar was launched in silent mode' }
+
+          New-ItemProperty -Path $runKey -Name SideBar -Value "$dir\SideBar.exe" -PropertyType String -Force | Out-Null
+          $p = Start-Process "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Fail "uninstall exit $($p.ExitCode)" }
+          for ($i = 0; $i -lt 20 -and (Test-Path "$dir\SideBar.exe"); $i++) { Start-Sleep 1 }
+          if (Get-ItemProperty -Path $runKey -Name SideBar -ErrorAction SilentlyContinue) { Fail 'Run value still present' }
+          if ((Rules) -ne 0) { Fail "rules after uninstall: $(Rules)" }
+          if (Test-Path "$dir\SideBar.exe") { Fail 'SideBar.exe still present' }
+          Write-Host 'smoke OK'
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [installer, smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -122,4 +160,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VER: ${{ needs.installer.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "dist/SideBar-$VER-setup.exe"             --title "SideBar $VER" --notes-file docs/release-notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/SideBar-$VER-setup.exe" \
+            --title "SideBar $VER" \
+            --notes-file docs/release-notes.md
