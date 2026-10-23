@@ -1,6 +1,6 @@
 namespace SideBar.Core.Nearby;
 
-public enum ShareTileState { Idle, Searching, Choosing, Sending, Done, Failed }
+public enum ShareTileState { Idle, Searching, Choosing, Sending, Done, Failed, OfficialAppRunning }
 
 /// <summary>Тип устройства для глифа плитки; Core не зависит от протокольной библиотеки, App отображает DeviceKind сюда.</summary>
 public enum ShareDeviceKind { Other, Phone, Tablet, Laptop }
@@ -16,6 +16,7 @@ public sealed class ShareTileModel
 {
     public const int MaxDevices = 4;
     public const string NoDevicesReason = "Устройства не найдены — откройте Quick Share на телефоне";
+    public const string OfficialAppHint = "Закройте официальное приложение Quick Share";
     public static readonly TimeSpan ChooseTimeout = TimeSpan.FromSeconds(60);
     public static readonly TimeSpan ResultDuration = TimeSpan.FromSeconds(1.5);
 
@@ -54,6 +55,17 @@ public sealed class ShareTileModel
         _paths = [.. paths];
         _startedAt = _clock = now;
         State = ShareTileState.Searching;
+        Changed?.Invoke();
+    }
+
+    /// <summary>Отправка заблокирована: работает официальный Quick Share. Подсказка видна <see cref="ResultDuration"/>; идущий поиск или передачу не трогает.</summary>
+    public void ShowOfficialAppRunning(DateTimeOffset now)
+    {
+        if (State is ShareTileState.Searching or ShareTileState.Choosing or ShareTileState.Sending) return;
+        Reset();
+        _finishedAt = _clock = now;
+        FailReason = OfficialAppHint;
+        State = ShareTileState.OfficialAppRunning;
         Changed?.Invoke();
     }
 
@@ -122,7 +134,7 @@ public sealed class ShareTileModel
                 FailReason = NoDevicesReason;
                 Changed?.Invoke();
                 break;
-            case ShareTileState.Done or ShareTileState.Failed when now - _finishedAt >= ResultDuration:
+            case ShareTileState.Done or ShareTileState.Failed or ShareTileState.OfficialAppRunning when now - _finishedAt >= ResultDuration:
                 Reset();
                 Changed?.Invoke();
                 break;

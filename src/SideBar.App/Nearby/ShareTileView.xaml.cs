@@ -78,7 +78,7 @@ public sealed partial class ShareTileView : UserControl
         bool send = content == TileContent.Send;   // отправка под запросом не прерывается, просто не видна
         SearchPanel.Visibility = send && m.State == ShareTileState.Searching ? Visibility.Visible : Visibility.Collapsed;
         DevicesGrid.Visibility = send && m.State == ShareTileState.Choosing ? Visibility.Visible : Visibility.Collapsed;
-        ChosenPanel.Visibility = send && m.State is ShareTileState.Sending or ShareTileState.Done or ShareTileState.Failed ? Visibility.Visible : Visibility.Collapsed;
+        ChosenPanel.Visibility = send && m.State is ShareTileState.Sending or ShareTileState.Done or ShareTileState.Failed or ShareTileState.OfficialAppRunning ? Visibility.Visible : Visibility.Collapsed;
         ConsentPanel.Visibility = content == TileContent.Consent ? Visibility.Visible : Visibility.Collapsed;
         NotePanel.Visibility = content == TileContent.Note ? Visibility.Visible : Visibility.Collapsed;
         if (content == TileContent.Consent) RenderConsents();
@@ -105,7 +105,7 @@ public sealed partial class ShareTileView : UserControl
                 ChosenIcon.Glyph = CheckGlyph;
                 ChosenText.Text = m.Note ?? Strings.Sent;
                 break;
-            case ShareTileState.Failed:
+            case ShareTileState.Failed or ShareTileState.OfficialAppRunning:
                 RingTrack.Visibility = Visibility.Collapsed;
                 RingArc.Data = null;
                 ChosenIcon.Glyph = CrossGlyph;

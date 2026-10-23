@@ -26,6 +26,7 @@ sealed class NearbyService : IDisposable
 
     readonly DispatcherQueue _ui;
     readonly IdentityProvider _identity;
+    readonly IStackPause _pause;
     readonly object _gate = new();
     readonly Dictionary<string, DiscoveredEndpoint> _endpoints = new(StringComparer.OrdinalIgnoreCase);
     QuickShareBrowser? _browser;
@@ -40,9 +41,10 @@ sealed class NearbyService : IDisposable
     public event Action<double>? Progress;
     public event Action<bool, string?>? Finished;
 
-    public NearbyService(DispatcherQueue ui, IdentityProvider identity)
+    public NearbyService(DispatcherQueue ui, IdentityProvider identity, IStackPause pause)
     {
         _ui = ui;
+        _pause = pause;
         _identity = identity;
         _identity.Changed += OnIdentityChanged;
         // белый список: тип кадра, размеры, enum-поля; имена файлов и устройств сюда не попадают
@@ -85,6 +87,14 @@ sealed class NearbyService : IDisposable
         Cancel();
         int epoch;
         Task<(List<string> Files, bool Truncated)> files;
+        if (_pause.IsPaused)
+        {
+            // официальный Quick Share держит порт и рекламу: свой стек молчит
+            Log.Write("share: refused, stack paused");
+            lock (_gate) epoch = ++_epoch;
+            Post(epoch, () => Finished?.Invoke(false, Strings.CloseOfficialApp));
+            return;
+        }
         lock (_gate)
         {
             epoch = ++_epoch;

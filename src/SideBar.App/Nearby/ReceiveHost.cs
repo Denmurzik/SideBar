@@ -23,6 +23,7 @@ sealed class ReceiveHost : IDisposable
 
     readonly VisibilityModel _visibility;
     readonly IdentityProvider _identity;
+    readonly IStackPause _pause;
     readonly object _gate = new();   // _visibility
     readonly DispatcherQueue _ui;
     readonly Notifications _notifications;
@@ -55,9 +56,10 @@ sealed class ReceiveHost : IDisposable
     // под какое состояние зарегистрирована реклама: смена адреса, режима или идентичности (перезагрузка сертификатов) — новая регистрация со свежей солью
     (IPAddress Address, int Index, Visibility Mode, CertificateIdentity? Identity)? _bound;
 
-    public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action bounce, IdentityProvider identity)
+    public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action bounce, IdentityProvider identity, IStackPause pause)
     {
         _ui = ui;
+        _pause = pause;
         _identity = identity;
         _visibility = new VisibilityModel(identity.Current is not null, VisibilitySettings.Load());
         _notifications = notifications;
@@ -67,6 +69,7 @@ sealed class ReceiveHost : IDisposable
         NetworkChange.NetworkAddressChanged += OnNetworkChanged;
         // модель уже создана; подписка, затем повторное чтение Current: перезагрузка между чтением и подпиской не теряется
         identity.Changed += OnIdentityChanged;
+        pause.Changed += OnPauseChanged;
         lock (_gate) _visibility.SetOwnDevicesAvailable(identity.Current is not null);
         Log.Write($"visibility {_visibility.Current}");
         NoteDegraded();
@@ -126,6 +129,13 @@ sealed class ReceiveHost : IDisposable
         _ui.TryEnqueue(() => _notifications.Info("certs", Strings.CertsUnavailable));
     }
 
+    // официальное приложение запустили или закрыли (или M5 поставил/снял паузу): остановить стек либо поднять заново со свежей солью
+    void OnPauseChanged()
+    {
+        Log.Write(_pause.IsPaused ? "receive paused" : "receive resumed");
+        _ = Task.Run(() => EvaluateAsync());
+    }
+
     void OnNetworkChanged(object? sender, EventArgs e) => _ = Task.Run(() => EvaluateAsync());
 
     void OnTick()
@@ -148,6 +158,13 @@ sealed class ReceiveHost : IDisposable
         catch (OperationCanceledException) { return; }
         try
         {
+            if (_pause.IsPaused)
+            {
+                // не принятые сессии отменяются, принятые доигрывают; слушатель и реклама сняты
+                CancelSessions(new ReceiveDecision(Listen: false, CancelUnaccepted: true, CancelAccepted: false));
+                Stop();
+                return;
+            }
             Visibility visibility;
             bool anyAccepted, useCertificates, named;
             lock (_gate)
@@ -482,6 +499,7 @@ sealed class ReceiveHost : IDisposable
         _disposed = true;
         NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
         _identity.Changed -= OnIdentityChanged;
+        _pause.Changed -= OnPauseChanged;
         _timer.Dispose();
         try { _lifetime.Cancel(); } catch (Exception) { }   // прерывает идущий StartAsync/RegisterAsync и все сессии
         // тот же затвор, что у Evaluate: Stop не гоняется с StartAsync

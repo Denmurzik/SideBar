@@ -36,6 +36,8 @@ public partial class App : Application
     FanWindow? _fan;
     Notifications? _notifications;
     ReceiveHost? _receive;
+    readonly StackPause _stack = new();
+    OfficialAppWatcher? _official;
     IdentityProvider? _identity;
     readonly BumpGate _bump = new();
     readonly AttentionBounce _attention = new();
@@ -122,7 +124,15 @@ public partial class App : Application
         try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
         _messages = new MessageWindow(OnDisplaysChanged);
         _notifications = new Notifications(_ui, _messages.Handle, _recv);
-        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity);
+        _official = new OfficialAppWatcher();
+        _official.RunningChanged += running =>
+        {
+            Log.Write(running ? "official app running" : "official app stopped");
+            _stack.SetOfficialRunning(running);
+        };
+        _official.Poll();   // первое решение приёма уже учитывает процесс
+        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack);
+        _official.Start();
 #if DEBUG
         if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.SetMode(SideBar.Core.Nearby.Visibility.Everyone, persist: false);   // автотест без клика по меню трея
         // скриншоты заметок: каждые 6 с показывает заметку file | unsafe | link | text | cancel (с SIDEBAR_DEBUG_OPEN=1)
@@ -141,7 +151,7 @@ public partial class App : Application
     void InitShare()
     {
         _share = new ShareTileModel();
-        _nearby = new NearbyService(_ui!, _identity!);
+        _nearby = new NearbyService(_ui!, _identity!, _stack);
         _window!.BindShare(_share, _recv, (id, accept) => _notifications?.Decide(id, accept));
         _window.OwnItemsDropped += OnShareDrop;
         _share.Changed += OnShareChanged;
@@ -218,6 +228,12 @@ public partial class App : Application
     void OnShareDrop(IReadOnlyList<string> paths)
     {
         if (_share is null || _nearby is null) return;
+        if (_stack.IsPaused)
+        {
+            ShareStaging.TakePending();   // копии временных файлов не нужны
+            _share.ShowOfficialAppRunning(DateTimeOffset.UtcNow);
+            return;
+        }
         _share.BeginShare(paths, DateTimeOffset.UtcNow);
         var staged = ShareStaging.TakePending();   // копии временных файлов делаются в фоне, отправка их дожидается
         if (_share.State == ShareTileState.Searching) _nearby.StartShare(paths, staged);
@@ -238,6 +254,7 @@ public partial class App : Application
     {
         try
         {
+            try { _official?.Dispose(); } catch { }
             try { _nearby?.Dispose(); } catch { }
             try { _hook?.Dispose(); } catch { }
             try { _dropTarget?.Dispose(); } catch { }
