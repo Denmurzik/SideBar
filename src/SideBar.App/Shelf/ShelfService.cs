@@ -93,16 +93,20 @@ sealed partial class ShelfService
     List<KeyValuePair<Guid, DateTimeOffset>> AdoptPendingDeletes(ShelfModel model, IReadOnlyList<PendingDelete> saved, out bool changed)
     {
         var referenced = ReferencedDirs(model);
+        var now = DateTimeOffset.UtcNow;
+        changed = false;
         lock (_pendingGate)
         {
             _pendingDeletes.Clear();
             foreach (var p in saved)
             {
-                var dir = GuidDir(p.Guid);
-                if (!Directory.Exists(dir) || referenced.Contains(NormalizeDir(dir))) continue;
-                _pendingDeletes[p.Guid] = p.DeleteAfterUtc;
+                var dir = FindGuidDir(p.Guid);
+                if (dir == null || referenced.Contains(NormalizeDir(dir))) continue;
+                var capped = PendingDeletePolicy.Cap(p.DeleteAfterUtc, now, TimeSpan.FromMilliseconds(_ownedDeleteDelayMs));
+                if (capped != p.DeleteAfterUtc) changed = true;
+                _pendingDeletes[p.Guid] = capped;
             }
-            changed = _pendingDeletes.Count != saved.Count;
+            changed |= _pendingDeletes.Count != saved.Count;
             return [.. _pendingDeletes];
         }
     }
@@ -117,8 +121,19 @@ sealed partial class ShelfService
         }
     }
 
-    /// <summary>Папка элемента: Materializer называет её <c>Guid.ToString("N")</c>.</summary>
-    string GuidDir(Guid guid) => Path.Combine(ShelfRoot, guid.ToString("N"));
+    /// <summary>Папка элемента по разобранному Guid (имя может быть в любом формате Guid, как в SweepOrphans); null — нет или это reparse point.</summary>
+    string? FindGuidDir(Guid guid)
+    {
+        try
+        {
+            if (!Directory.Exists(ShelfRoot)) return null;
+            foreach (var dir in Directory.EnumerateDirectories(ShelfRoot))
+                if (Guid.TryParse(Path.GetFileName(dir), out var g) && g == guid
+                    && (File.GetAttributes(dir) & FileAttributes.ReparsePoint) == 0) return dir;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return null;
+    }
 
     static string NormalizeDir(string dir) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir));
 
@@ -450,9 +465,8 @@ sealed partial class ShelfService
         {
             try
             {
-                var dir = GuidDir(guid);
-                if (!IsStrictlyInsideShelf(dir) || !Directory.Exists(dir)) return;
-                if ((File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0) return;
+                var dir = FindGuidDir(guid);
+                if (dir == null || !IsStrictlyInsideShelf(dir)) return;
                 if (!IsDirFree(dir))
                 {
                     if (waitedSec + BusyRetrySec <= BusyGiveUpSec)
@@ -462,7 +476,7 @@ sealed partial class ShelfService
                     }
                     else Log.Write("owned file still busy, left to the next startup");
                 }
-                else Directory.Delete(dir, recursive: true);
+                else Materializer.TryDeleteDir(dir);
             }
             catch (Exception e)
             {
@@ -474,7 +488,7 @@ sealed partial class ShelfService
                 lock (_pendingGate)
                 {
                     _pending.Remove(timer!);
-                    if (!retrying && !Directory.Exists(GuidDir(guid))) _pendingDeletes.Remove(guid);
+                    if (!retrying && FindGuidDir(guid) == null) _pendingDeletes.Remove(guid);
                 }
                 timer!.Dispose();
             }

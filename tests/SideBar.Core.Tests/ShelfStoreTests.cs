@@ -223,4 +223,15 @@ public sealed class ShelfStoreTests : IDisposable
         Assert.Empty(items);
         Assert.Empty(pending);
     }
+
+    [Fact]
+    public void PendingDeletePolicy_caps_far_future_keeps_normal_and_past()
+    {
+        var now = new DateTimeOffset(2026, 10, 23, 12, 0, 0, TimeSpan.Zero);
+        var delay = TimeSpan.FromMinutes(10);
+        Assert.Equal(now.AddHours(1), PendingDeletePolicy.Cap(now.AddYears(50), now, delay));
+        Assert.Equal(now.AddMinutes(10), PendingDeletePolicy.Cap(now.AddMinutes(10), now, delay));
+        Assert.Equal(now.AddMinutes(-5), PendingDeletePolicy.Cap(now.AddMinutes(-5), now, delay));
+        Assert.Equal(now.AddHours(3), PendingDeletePolicy.Cap(now.AddYears(1), now, TimeSpan.FromHours(3)));
+    }
 }
