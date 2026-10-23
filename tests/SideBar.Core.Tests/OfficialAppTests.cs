@@ -9,10 +9,10 @@ public class OfficialAppTests
     [Fact]
     public void Tile_shows_official_app_running_hint()
     {
-        var m = new ShareTileModel();
+        var m = new ShareTileModel(SideBar.Core.Localization.UiTexts.Ru);
         m.ShowOfficialAppRunning(T0);
         Assert.Equal(ShareTileState.OfficialAppRunning, m.State);
-        Assert.Equal(ShareTileModel.OfficialAppHint, m.FailReason);
+        Assert.Equal(SideBar.Core.Localization.UiTexts.Ru.OfficialAppHint, m.FailReason);
         Assert.True(m.HoldsCardOpen);
         Assert.False(m.KeepsCardOpen);
         m.Tick(T0 + ShareTileModel.ResultDuration - TimeSpan.FromMilliseconds(1));
@@ -25,7 +25,7 @@ public class OfficialAppTests
     [Fact]
     public void Tile_hint_does_not_interrupt_sending()
     {
-        var m = new ShareTileModel();
+        var m = new ShareTileModel(SideBar.Core.Localization.UiTexts.Ru);
         m.BeginShare(["a.txt"], T0);
         m.DeviceFound(new DeviceView("id1", "D", ShareDeviceKind.Phone));
         m.Choose("id1");
