@@ -12,7 +12,7 @@ public class OfficialAppTests
         var m = new ShareTileModel();
         m.ShowOfficialAppRunning(T0);
         Assert.Equal(ShareTileState.OfficialAppRunning, m.State);
-        Assert.Equal(ShareTileModel.OfficialAppHint, m.FailReason);
+        Assert.Equal(SideBar.Core.Localization.UiTexts.Ru.OfficialAppHint, m.FailReason);
         Assert.True(m.HoldsCardOpen);
         Assert.False(m.KeepsCardOpen);
         m.Tick(T0 + ShareTileModel.ResultDuration - TimeSpan.FromMilliseconds(1));

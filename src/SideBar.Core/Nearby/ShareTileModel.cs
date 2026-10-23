@@ -1,3 +1,5 @@
+using SideBar.Core.Localization;
+
 namespace SideBar.Core.Nearby;
 
 public enum ShareTileState { Idle, Searching, Choosing, Sending, Done, Failed, OfficialAppRunning }
@@ -15,14 +17,16 @@ public sealed record DeviceView(string Id, string Name, ShareDeviceKind Kind, bo
 public sealed class ShareTileModel
 {
     public const int MaxDevices = 4;
-    public const string NoDevicesReason = "Устройства не найдены — откройте Quick Share на телефоне";
-    public const string OfficialAppHint = "Закройте официальное приложение Quick Share";
     public static readonly TimeSpan ChooseTimeout = TimeSpan.FromSeconds(60);
     public static readonly TimeSpan ResultDuration = TimeSpan.FromSeconds(1.5);
 
+    readonly UiText _text;
     readonly List<DeviceView> _found = [];
     IReadOnlyList<string> _paths = [];
     DateTimeOffset _startedAt, _finishedAt, _clock;
+
+    /// <param name="text">Язык подсказок плитки; по умолчанию русский.</param>
+    public ShareTileModel(UiText? text = null) => _text = text ?? UiTexts.Ru;
 
     public ShareTileState State { get; private set; }
 
@@ -64,7 +68,7 @@ public sealed class ShareTileModel
         if (State is ShareTileState.Searching or ShareTileState.Choosing or ShareTileState.Sending) return;
         Reset();
         _finishedAt = _clock = now;
-        FailReason = OfficialAppHint;
+        FailReason = _text.OfficialAppHint;
         State = ShareTileState.OfficialAppRunning;
         Changed?.Invoke();
     }
@@ -131,7 +135,7 @@ public sealed class ShareTileModel
             case ShareTileState.Searching or ShareTileState.Choosing when now - _startedAt >= ChooseTimeout:
                 _finishedAt = now;
                 State = ShareTileState.Failed;
-                FailReason = NoDevicesReason;
+                FailReason = _text.NoDevicesReason;
                 Changed?.Invoke();
                 break;
             case ShareTileState.Done or ShareTileState.Failed or ShareTileState.OfficialAppRunning when now - _finishedAt >= ResultDuration:

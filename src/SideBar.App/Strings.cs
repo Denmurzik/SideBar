@@ -1,153 +1,157 @@
+using System.Globalization;
+using SideBar.Core.Localization;
+using SideBar.Core.Settings;
+
 namespace SideBar;
 
-/// <summary>Строки UI (RU; EN — в M7).</summary>
+/// <summary>Фасад строк UI: язык выбирается один раз при старте (<see cref="UiLanguage.Resolve"/>), сами строки — в SideBar.Core.Localization.</summary>
 static class Strings
 {
     public const string AppName = "SideBar";
-    public const string Autostart = "Запускать при входе в Windows";
-    public const string Exit = "Выход";
-
-    public const string VisibilityHidden = "Скрыто";
-    public const string VisibilityOwnDevices = "Свои устройства";
-    public const string VisibilityEveryone = "Все (10 мин)";
-    public const string StackPaused = "Quick Share на паузе — открыт официальный Quick Share";
-    public const string OwnMark = "своё";
-    /// <summary>Имя своего устройства, если в сертификате его нет: имя из рекламы задаёт пир и сюда не попадает.</summary>
-    public const string OwnDevice = "Ваше устройство";
-    public const string CertsUnavailable = "Сертификаты Quick Share недоступны — работает только режим „Все“";
-    public const string UnknownDevice = "Устройство";
-    public const string Accept = "Принять";
-    public const string Decline = "Отклонить";
-    public const string Open = "Открыть";
-    public const string ShowInFolder = "Показать в папке";
-    public const string Copy = "Копировать";
-    public const string OpenLink = "Открыть ссылку";
-    public static string MoreConsents(int n) => $"ещё {n}";
-    public const string WifiUnsupported = "Передача Wi-Fi-сетей не поддерживается";
-    public const string NotEnoughSpace = "Недостаточно места на диске для приёма";
-    public const string SenderCancelled = "Отправитель отменил передачу";
-    public const string TimedOut = "Время ожидания истекло, передача отклонена";
-    public const string ReceivePublicNetwork = "Сеть общедоступная — приём выключен";
-    public const string ReceiveNoLan = "Нет подключения к локальной сети";
-    public const string ReceiveFailed = "Не удалось получить данные";
-
-    public static string Files(int n)
-    {
-        int m100 = n % 100, m10 = n % 10;
-        string word = m100 is >= 11 and <= 14 ? "файлов" : m10 == 1 ? "файл" : m10 is >= 2 and <= 4 ? "файла" : "файлов";
-        return $"{n} {word}";
-    }
-
-    public static string Received(int n) => $"Получено: {Files(n)}";
-    public static string ReceivedFrom(string device, int n) => $"{device}: получено {Files(n)}";
-
-    public static string SharedLink(string device, string domain) => $"{device} поделился ссылкой · {domain}";
-    public static string SharedText(string device) => $"{device} поделился текстом";
-    public const string TransferInterrupted = "Передача прервана";
-
-    public static string Pin(string pin) => $"PIN {pin}";
-
-    public static string WantsToSend(string device, int files, int texts, bool onlyLinks)
-    {
-        string what = files > 0
-            ? texts > 0 ? $"отправить {Files(files)} и текст" : $"отправить {Files(files)}"
-            : onlyLinks ? (texts > 1 ? "поделиться ссылками" : "поделиться ссылкой") : "поделиться текстом";
-        return $"{device} хочет {what}";
-    }
-    public const string Searching = "Поиск устройств…";
-    public const string SendToDevice = "Отправить на устройство";
-    public const string Sent = "Отправлено";
-    public const string SendFailed = "Не удалось отправить";
-    public const string SendRejected = "Получатель отклонил";
-    public const string SendCancelled = "Получатель отменил передачу";
-    public static readonly string OnlyFirstFiles = $"Отправлены только первые {Nearby.NearbyService.MaxFiles} файлов";
-    public const string SendUnverified = "Не удалось подтвердить устройство";
-    public const string SendTimedOut = "Получатель не ответил";
-    public const string CloseOfficialApp = SideBar.Core.Nearby.ShareTileModel.OfficialAppHint;
-    public const string NothingToSend = "Нечего отправлять";
-    // окно настроек
-    public const string SettingsMenu = "Настройки…";
-    public const string SettingsTitle = "Настройки SideBar";
-    public const string NavGeneral = "Основное";
-    public const string NavQuickShare = "Quick Share";
-    public const string NavPanel = "Панель";
-    public const string NavShelf = "Временный буфер";
-    public const string NavAbout = "О программе";
-    public const string On = "Вкл";
-    public const string Off = "Выкл";
-    public const string Change = "Изменить…";
-    public const string Reset = "Сбросить";
-
-    public const string AutostartDesc = "SideBar будет открываться вместе с системой";
-    public const string LanguageTitle = "Язык";
-    public const string LanguageDesc = "Применится после перезапуска";
-    public const string LanguageAuto = "Авто";
-    public const string LanguageRu = "Русский";
+    // названия языков — на самом языке, не из таблиц (кириллица записана кодами: в App нет русского текста)
+    public const string LanguageRu = "\u0420\u0443\u0441\u0441\u043A\u0438\u0439";   // Русский
     public const string LanguageEn = "English";
-    public const string CheckUpdatesTitle = "Проверять обновления";
-    public static string CheckUpdatesDesc(string version) => $"Версия {version}";
-    public const string CheckNow = "Проверить сейчас";
-    public const string CheckNowSoon = "Появится после обновления";
-    public const string CheckingNow = "Проверяем…";
-    public const string UpToDate = "Установлена последняя версия";
-    public const string CheckFailed = "Не удалось проверить";
-    public const string CheckFailedClosed = "Не удалось проверить (репозиторий закрыт)";
-    public static string UpdateAvailable(string version) => $"Доступна версия {version}";
-    public const string ReleasesTitle = "Страница релизов";
-    public const string ReleasesLink = "Открыть на GitHub";
 
-    public const string VisibilityTitle = "Видимость";
-    public const string VisibilityDesc = "Кому ваш компьютер показывается в Quick Share";
-    public const string PcNameTitle = "Имя этого ПК";
-    public const string PcNameDesc = "Так компьютер видят другие устройства (до 32 символов)";
-    public const string ReceiveFolderTitle = "Папка для принятых файлов";
-    public const string DownloadsName = "Загрузки";
-    public const string ReceiveFolderMissing = "Папка недоступна для записи — файлы принимаются в «Загрузки»";
-    public const string CertsTitle = "Сертификаты Quick Share";
-    public static string CertsLoaded(int peers, string until) => $"загружены · устройств {peers} · действуют до {until}";
-    public static string CertsFailed(string reason) => $"недоступны: {reason}";
-    public const string CertsLoading = "загружаются…";
-    public const string CertsMissing = "Quick Share не найден или вы не входили в аккаунт";
-    public const string CertsUnreadable = "файлы заняты или недоступны";
-    public const string CertsFormat = "неизвестный формат файлов";
-    public const string CertsNoValid = "нет действующего сертификата";
-    public const string CertsRefreshTitle = "Обновить сертификаты сейчас";
-    public const string CertsRefreshDesc = "Перечитать сертификаты официального Quick Share";
-    public const string CertsRefreshSoon = "появится после обновления";
-    public const string Refresh = "Обновить";
-    public const string OfficialPathTitle = "Путь к официальному Quick Share";
-    public const string OfficialPathMissing = "Файл не найден — официальное приложение не будет запускаться";
+    static bool _russian = true;
+    public static UiText T { get; private set; } = UiTexts.Ru;
 
-    public const string DelayStandard = "Стандартная";
-    public const string EdgeDelayTitle = "Задержка открытия у края";
-    public const string EdgeDelayDesc = "Сколько курсор держится у края, прежде чем карточка откроется";
-    public static string Ms(int n) => $"{n} мс";
-    public const string BounceTitle = "Подпрыгивать при входящих";
-    public const string BounceDesc = "Скрытая карточка привлекает внимание, когда приходит запрос или файл";
-    public const string FullscreenTitle = "Показывать в полноэкранных приложениях";
-    public const string FullscreenDesc = "Перетаскивание файла к краю работает всегда";
+    /// <summary>Вызывается один раз в начале OnLaunched; смена языка в настройках действует после перезапуска.</summary>
+    public static void Initialize(AppSettings settings)
+    {
+        var lang = UiLanguage.Resolve(settings, CultureInfo.CurrentUICulture);
+#if DEBUG
+        // скриншоты: SIDEBAR_UI_LANG=ru|en перекрывает и настройку, и язык Windows
+        lang = Environment.GetEnvironmentVariable("SIDEBAR_UI_LANG") switch { "en" => Language.English, "ru" => Language.Russian, _ => lang };
+#endif
+        _russian = lang == Language.Russian;
+        T = UiTexts.For(_russian ? "ru" : "en");
+    }
 
-    public const string RetentionTitle = "Автоматически убирать файлы из буфера через";
-    public const string RetentionNever = "Никогда";
-    public const string RetentionDay = "1 день";
-    public const string RetentionWeek = "7 дней";
-    public const string ClearShelfTitle = "Очистить буфер";
-    public const string ClearShelfDesc = "Убрать все файлы из временного буфера";
-    public const string Clear = "Очистить";
-    public const string ClearSure = "Точно очистить?";
+    public static string Files(int n) => T.Files(n, _russian);
+    public static string Autostart => T.Autostart;
+    public static string Exit => T.Exit;
+    public static string VisibilityHidden => T.VisibilityHidden;
+    public static string VisibilityOwnDevices => T.VisibilityOwnDevices;
+    public static string VisibilityEveryone => T.VisibilityEveryone;
+    public static string StackPaused => T.StackPaused;
+    public static string OwnMark => T.OwnMark;
+    public static string OwnDevice => T.OwnDevice;
+    public static string CertsUnavailable => T.CertsUnavailable;
+    public static string UnknownDevice => T.UnknownDevice;
+    public static string Accept => T.Accept;
+    public static string Decline => T.Decline;
+    public static string Open => T.Open;
+    public static string ShowInFolder => T.ShowInFolder;
+    public static string Copy => T.Copy;
+    public static string OpenLink => T.OpenLink;
+    public static string WifiUnsupported => T.WifiUnsupported;
+    public static string NotEnoughSpace => T.NotEnoughSpace;
+    public static string SenderCancelled => T.SenderCancelled;
+    public static string TimedOut => T.TimedOut;
+    public static string ReceivePublicNetwork => T.ReceivePublicNetwork;
+    public static string ReceiveNoLan => T.ReceiveNoLan;
+    public static string ReceiveFailed => T.ReceiveFailed;
+    public static string TransferInterrupted => T.TransferInterrupted;
+    public static string Searching => T.Searching;
+    public static string SendToDevice => T.SendToDevice;
+    public static string Sent => T.Sent;
+    public static string SendFailed => T.SendFailed;
+    public static string SendRejected => T.SendRejected;
+    public static string SendCancelled => T.SendCancelled;
+    public static string SendUnverified => T.SendUnverified;
+    public static string SendTimedOut => T.SendTimedOut;
+    public static string NothingToSend => T.NothingToSend;
+    public static string SettingsMenu => T.SettingsMenu;
+    public static string SettingsTitle => T.SettingsTitle;
+    public static string NavGeneral => T.NavGeneral;
+    public static string NavQuickShare => T.NavQuickShare;
+    public static string NavPanel => T.NavPanel;
+    public static string NavShelf => T.NavShelf;
+    public static string NavAbout => T.NavAbout;
+    public static string On => T.On;
+    public static string Off => T.Off;
+    public static string Change => T.Change;
+    public static string Reset => T.Reset;
+    public static string AutostartDesc => T.AutostartDesc;
+    public static string LanguageTitle => T.LanguageTitle;
+    public static string LanguageDesc => T.LanguageDesc;
+    public static string LanguageAuto => T.LanguageAuto;
+    public static string CheckUpdatesTitle => T.CheckUpdatesTitle;
+    public static string CheckNow => T.CheckNow;
+    public static string CheckNowSoon => T.CheckNowSoon;
+    public static string CheckingNow => T.CheckingNow;
+    public static string UpToDate => T.UpToDate;
+    public static string CheckFailed => T.CheckFailed;
+    public static string CheckFailedClosed => T.CheckFailedClosed;
+    public static string ReleasesTitle => T.ReleasesTitle;
+    public static string ReleasesLink => T.ReleasesLink;
+    public static string VisibilityTitle => T.VisibilityTitle;
+    public static string VisibilityDesc => T.VisibilityDesc;
+    public static string PcNameTitle => T.PcNameTitle;
+    public static string PcNameDesc => T.PcNameDesc;
+    public static string ReceiveFolderTitle => T.ReceiveFolderTitle;
+    public static string DownloadsName => T.DownloadsName;
+    public static string ReceiveFolderMissing => T.ReceiveFolderMissing;
+    public static string CertsTitle => T.CertsTitle;
+    public static string CertsLoading => T.CertsLoading;
+    public static string CertsMissing => T.CertsMissing;
+    public static string CertsUnreadable => T.CertsUnreadable;
+    public static string CertsFormat => T.CertsFormat;
+    public static string CertsNoValid => T.CertsNoValid;
+    public static string CertsRefreshTitle => T.CertsRefreshTitle;
+    public static string CertsRefreshDesc => T.CertsRefreshDesc;
+    public static string CertsRefreshSoon => T.CertsRefreshSoon;
+    public static string Refresh => T.Refresh;
+    public static string OfficialPathTitle => T.OfficialPathTitle;
+    public static string OfficialPathMissing => T.OfficialPathMissing;
+    public static string DelayStandard => T.DelayStandard;
+    public static string EdgeDelayTitle => T.EdgeDelayTitle;
+    public static string EdgeDelayDesc => T.EdgeDelayDesc;
+    public static string BounceTitle => T.BounceTitle;
+    public static string BounceDesc => T.BounceDesc;
+    public static string FullscreenTitle => T.FullscreenTitle;
+    public static string FullscreenDesc => T.FullscreenDesc;
+    public static string RetentionTitle => T.RetentionTitle;
+    public static string RetentionNever => T.RetentionNever;
+    public static string RetentionDay => T.RetentionDay;
+    public static string RetentionWeek => T.RetentionWeek;
+    public static string ClearShelfTitle => T.ClearShelfTitle;
+    public static string ClearShelfDesc => T.ClearShelfDesc;
+    public static string Clear => T.Clear;
+    public static string ClearSure => T.ClearSure;
+    public static string AboutLicense => T.AboutLicense;
+    public static string AboutLicenseValue => T.AboutLicenseValue;
+    public static string AboutRepo => T.AboutRepo;
+    public static string AboutRepoLink => T.AboutRepoLink;
+    public static string RefreshCertsNow => T.RefreshCertsNow;
+    public static string RefreshDone => T.RefreshDone;
+    public static string RefreshNotInstalled => T.RefreshNotInstalled;
+    public static string RefreshOfficialOpen => T.RefreshOfficialOpen;
+    public static string RefreshDeferred => T.RefreshDeferred;
+    public static string RefreshFailed => T.RefreshFailed;
+    public static string CertsStale => T.CertsStale;
+    public static string OfficialResident => T.OfficialResident;
+    public static string OfficialLeftover => T.OfficialLeftover;
+    public static string NoDevicesReason => T.NoDevicesReason;
+    public static string OfficialAppHint => T.OfficialAppHint;
+    public static string CloseOfficialApp => T.OfficialAppHint;
 
-    public const string AboutLicense = "Лицензия";
-    public const string AboutLicenseValue = "GNU GPLv3";
-    public const string AboutRepo = "Репозиторий";
-    public const string AboutRepoLink = "github.com/Denmurzik/SideBar";
+    public static string MoreConsents(int n) => string.Format(T.MoreConsentsFmt, n);
+    public static string Received(int n) => string.Format(T.ReceivedFmt, Files(n));
+    public static string ReceivedFrom(string device, int n) => string.Format(T.ReceivedFromFmt, device, Files(n));
+    public static string SharedLink(string device, string domain) => string.Format(T.SharedLinkFmt, device, domain);
+    public static string SharedText(string device) => string.Format(T.SharedTextFmt, device);
+    public static string Pin(string pin) => string.Format(T.PinFmt, pin);
 
-    public const string RefreshCertsNow = "Обновить сертификаты сейчас";
-    public const string RefreshDone = "Сертификаты обновлены";
-    public const string RefreshNotInstalled = "Quick Share не установлен";
-    public const string RefreshOfficialOpen = "Quick Share уже открыт";
-    public const string RefreshDeferred = "Обновление отложено";
-    public const string RefreshFailed = "Не удалось обновить";
-    public const string CertsStale = "Не удаётся обновить сертификаты Quick Share — откройте официальное приложение Quick Share один раз";
-    public const string OfficialResident = "Официальный Quick Share запущен — SideBar на паузе. Закройте его в трее, чтобы SideBar принимал файлы";
-    public const string OfficialLeftover = "Обновление сертификатов не завершилось — официальный Quick Share остался открытым. Закройте его в трее, чтобы SideBar принимал файлы";
+    public static string WantsToSend(string device, int files, int texts, bool onlyLinks) =>
+        files > 0 ? string.Format(texts > 0 ? T.WantsFilesAndTextFmt : T.WantsFilesFmt, device, Files(files))
+        : onlyLinks ? string.Format(texts > 1 ? T.WantsLinksFmt : T.WantsLinkFmt, device)
+        : string.Format(T.WantsTextFmt, device);
+
+    public static string OnlyFirstFiles => string.Format(T.OnlyFirstFilesFmt, Nearby.NearbyService.MaxFiles);
+    public static string CheckUpdatesDesc(string version) => string.Format(T.CheckUpdatesDescFmt, version);
+    public static string UpdateAvailable(string version) => string.Format(T.UpdateAvailableFmt, version);
+    public static string Ms(int n) => string.Format(T.MsFmt, n);
+    public static string CertsLoaded(int peers, string until) => string.Format(T.CertsLoadedFmt, peers, until);
+    public static string CertsFailed(string reason) => string.Format(T.CertsFailedFmt, reason);
 }
