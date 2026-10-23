@@ -118,13 +118,24 @@ public class SettingsApplyTests
     }
 
     [Theory]
-    [InlineData(Language.Auto, "ru-RU", Language.Russian)]
-    [InlineData(Language.Auto, "en-US", Language.English)]
-    [InlineData(Language.Auto, "de-DE", Language.English)]
-    [InlineData(Language.Russian, "en-US", Language.Russian)]
-    [InlineData(Language.English, "ru-RU", Language.English)]
+    [InlineData(Language.Auto, "ru", Language.Russian)]
+    [InlineData(Language.Auto, "en", Language.English)]
+    [InlineData(Language.Auto, "de", Language.English)]
+    [InlineData(Language.Auto, "", Language.English)]
+    [InlineData(Language.Russian, "en", Language.Russian)]
+    [InlineData(Language.English, "ru", Language.English)]
     public void UiLanguage_resolves(Language setting, string culture, Language expected) =>
-        Assert.Equal(expected, UiLanguage.Resolve(new AppSettings { Language = setting }, CultureInfo.GetCultureInfo(culture)));
+        Assert.Equal(expected, UiLanguage.Resolve(new AppSettings { Language = setting }, culture));
+
+    [Theory]
+    [InlineData(0x0419, "ru")]   // ru-RU
+    [InlineData(0x0819, "ru")]   // ru-MD: тот же основной язык
+    [InlineData(0x0409, "en")]
+    [InlineData(0x0407, "en")]
+    [InlineData(0x0422, "en")]   // uk-UA: не русский
+    [InlineData(0x0000, "en")]
+    public void LangId_maps_primary_language(int langId, string expected) =>
+        Assert.Equal(expected, UiLanguage.FromLangId((ushort)langId));
 }
 
 public class TrimGateTests

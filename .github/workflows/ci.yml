@@ -120,17 +120,30 @@ jobs:
           $setup = (Get-ChildItem dist -Filter 'SideBar-*-setup.exe').FullName
           $dir = Join-Path $env:ProgramFiles 'SideBar'
           $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $exe = "$dir\SideBar.exe"
           function Rules { @(netsh advfirewall firewall show rule name="SideBar Quick Share" | Select-String '^Rule Name:').Count }
+          # все входящие правила, привязанные к нашему exe (любое имя, любое действие)
+          function ProgRules { @(Get-NetFirewallApplicationFilter -Program $exe -ErrorAction SilentlyContinue | Get-NetFirewallRule | Where-Object { $_.Direction -eq 'Inbound' }) }
           function Fail($m) { Write-Host "::error::$m"; Get-Process SideBar -ErrorAction SilentlyContinue | Stop-Process -Force; exit 1 }
+
+          # Block-правило для нашего exe (как после «Отмены» в запросе брандмауэра): установщик обязан его убрать
+          netsh advfirewall firewall add rule name="SideBar smoke block" dir=in action=block program="$exe" protocol=TCP profile=any | Out-Null
+          if ((ProgRules).Count -ne 1) { Fail "precondition: block rule not created ($((ProgRules).Count))" }
 
           $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if ($p.ExitCode -ne 0) { Fail "install exit $($p.ExitCode)" }
           if (-not (Test-Path "$dir\SideBar.exe")) { Fail 'SideBar.exe missing after install' }
           if ((Rules) -ne 1) { Fail "rules after install: $(Rules)" }
+          $pr = @(ProgRules)
+          if ($pr.Count -ne 1) { Fail "inbound rules for exe after install: $($pr.Count) (stale Block rule not removed?)" }
+          if ($pr[0].DisplayName -ne 'SideBar Quick Share' -or $pr[0].Action -ne 'Allow') { Fail "unexpected rule: $($pr[0].DisplayName) $($pr[0].Action)" }
+          $prof = [string]$pr[0].Profile
+          if ($prof -notmatch 'Private' -or $prof -notmatch 'Domain' -or $prof -match 'Public|Any|All') { Fail "rule profile: $prof (expected Private, Domain)" }
 
           $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if ($p.ExitCode -ne 0) { Fail "reinstall exit $($p.ExitCode)" }
           if ((Rules) -ne 1) { Fail "rules after reinstall: $(Rules)" }
+          if ((ProgRules).Count -ne 1) { Fail "inbound rules for exe after reinstall: $((ProgRules).Count)" }
 
           if (Get-Process SideBar -ErrorAction SilentlyContinue) { Fail 'SideBar was launched in silent mode' }
 
@@ -141,6 +154,7 @@ jobs:
           for ($i = 0; $i -lt 20 -and (Test-Path "$dir\SideBar.exe"); $i++) { Start-Sleep 1 }
           if (Get-ItemProperty -Path $runKey -Name SideBar -ErrorAction SilentlyContinue) { Fail 'Run value still present' }
           if ((Rules) -ne 0) { Fail "rules after uninstall: $(Rules)" }
+          if ((ProgRules).Count -ne 0) { Fail "inbound rules for exe after uninstall: $((ProgRules).Count)" }
           if (Test-Path "$dir\SideBar.exe") { Fail 'SideBar.exe still present' }
           Write-Host 'smoke OK'
           exit 0

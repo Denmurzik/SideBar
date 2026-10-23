@@ -274,6 +274,26 @@ public class UpdateServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Failing_state_save_does_not_cause_hourly_requests()
+    {
+        // родитель пути — обычный файл: Save глотает ошибку, файл не появляется
+        var blocker = Path.Combine(_dir, "blocker");
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(blocker, "x");
+        var brokenStore = new UpdateStateStore(Path.Combine(blocker, "update-state.json"));
+        var s = new UpdateService(brokenStore, Cur, _ => { _fetches++; return Task.FromResult(_reply); }, () => _now, () => _enabled);
+        _now += TimeSpan.FromMinutes(5);
+        await s.TickAsync(CancellationToken.None);
+        Assert.Equal(1, _fetches);
+        Assert.Null(brokenStore.LastCheck);   // убедились, что файл действительно не записался
+        for (var i = 0; i < 23; i++) { _now += TimeSpan.FromHours(1); await s.TickAsync(CancellationToken.None); }
+        Assert.Equal(1, _fetches);
+        _now += TimeSpan.FromHours(2);
+        await s.TickAsync(CancellationToken.None);
+        Assert.Equal(2, _fetches);
+    }
+
+    [Fact]
     public async Task Disabled_makes_no_request()
     {
         _enabled = false;

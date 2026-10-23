@@ -129,6 +129,8 @@ public sealed record UiText
     public required string UpdateAvailableFmt { get; init; }
     public required string MsFmt { get; init; }
     public required string CertsLoadedFmt { get; init; }
+    /// <summary>Формат даты в «действуют до»; применяется с InvariantCulture (в InvariantGlobalization месяцы всё равно английские).</summary>
+    public required string CertDateFormat { get; init; }
     public required string CertsFailedFmt { get; init; }
 
     /// <summary>Правило множественного числа языка: живёт в таблице, чтобы язык и правило не расходились.</summary>
