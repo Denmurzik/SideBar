@@ -21,6 +21,7 @@ public sealed partial class ShareTileView : UserControl
     readonly Grid[] _slots;
     readonly FontIcon[] _slotIcons;
     readonly TextBlock[] _slotNames;
+    readonly TextBlock[] _slotOwn;
     readonly string?[] _slotIds = new string?[ShareTileModel.MaxDevices];
 
     /// <summary>Клик по иконке устройства (UI-поток).</summary>
@@ -32,6 +33,8 @@ public sealed partial class ShareTileView : UserControl
         _slots = [Slot0, Slot1, Slot2, Slot3];
         _slotIcons = [SlotIcon0, SlotIcon1, SlotIcon2, SlotIcon3];
         _slotNames = [SlotName0, SlotName1, SlotName2, SlotName3];
+        _slotOwn = [SlotOwn0, SlotOwn1, SlotOwn2, SlotOwn3];
+        foreach (var mark in _slotOwn) mark.Text = "● " + Strings.OwnMark;   // маленькая точка акцентного цвета и «своё» под именем
         for (int i = 0; i < _slots.Length; i++)
         {
             int k = i;
@@ -69,13 +72,13 @@ public sealed partial class ShareTileView : UserControl
     /// <summary>Возвращает true, если плитка занята (логотип надо скрыть). Приоритет: запрос > отправка > заметка > покой.</summary>
     public bool Render(ShareTileModel m)
     {
-        string key = m.State + "|" + string.Join(',', m.Devices.Select(d => d.Id)) + "|" + (_recv?.HasConsent ?? false) + "|" + (_recv?.CurrentNote?.Id ?? 0);
+        string key = m.State + "|" + string.Join(',', m.Devices.Select(d => d.Id + (d.IsOwn ? "*" : ""))) + "|" + (_recv?.HasConsent ?? false) + "|" + (_recv?.CurrentNote?.Id ?? 0);
         if (key != _contentKey) { _contentKey = key; _arming.Placed(DateTimeOffset.UtcNow); }   // под курсором могла оказаться другая кнопка
         var content = _recv?.Content(m.State) ?? (m.State == ShareTileState.Idle ? TileContent.Idle : TileContent.Send);
         bool send = content == TileContent.Send;   // отправка под запросом не прерывается, просто не видна
         SearchPanel.Visibility = send && m.State == ShareTileState.Searching ? Visibility.Visible : Visibility.Collapsed;
         DevicesGrid.Visibility = send && m.State == ShareTileState.Choosing ? Visibility.Visible : Visibility.Collapsed;
-        ChosenPanel.Visibility = send && m.State is ShareTileState.Sending or ShareTileState.Done or ShareTileState.Failed ? Visibility.Visible : Visibility.Collapsed;
+        ChosenPanel.Visibility = send && m.State is ShareTileState.Sending or ShareTileState.Done or ShareTileState.Failed or ShareTileState.OfficialAppRunning ? Visibility.Visible : Visibility.Collapsed;
         ConsentPanel.Visibility = content == TileContent.Consent ? Visibility.Visible : Visibility.Collapsed;
         NotePanel.Visibility = content == TileContent.Note ? Visibility.Visible : Visibility.Collapsed;
         if (content == TileContent.Consent) RenderConsents();
@@ -102,7 +105,7 @@ public sealed partial class ShareTileView : UserControl
                 ChosenIcon.Glyph = CheckGlyph;
                 ChosenText.Text = m.Note ?? Strings.Sent;
                 break;
-            case ShareTileState.Failed:
+            case ShareTileState.Failed or ShareTileState.OfficialAppRunning:
                 RingTrack.Visibility = Visibility.Collapsed;
                 RingArc.Data = null;
                 ChosenIcon.Glyph = CrossGlyph;
@@ -177,30 +180,44 @@ public sealed partial class ShareTileView : UserControl
         _noteSignature = signature;
         NotePanel.Children.Clear();
         if (note is null) return;
+        // текст по центру свободной области, снизу кнопки в ряд (одна — на всю ширину)
+        var lines = new StackPanel { Spacing = 4, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Stretch };
         for (int i = 0; i < note.Lines.Count; i++)
         {
-            NotePanel.Children.Add(new TextBlock
+            lines.Children.Add(new TextBlock
             {
-                Text = note.Lines[i], FontSize = 12,
+                Text = note.Lines[i], FontSize = 12, TextAlignment = TextAlignment.Center,
                 FontWeight = i == 0 ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
                 TextWrapping = TextWrapping.Wrap, MaxLines = 3, TextTrimming = TextTrimming.CharacterEllipsis,
             });
         }
-        foreach (var b in note.Buttons)
+        Grid.SetRow(lines, 0);
+        if (note.Buttons.Count == 0) Grid.SetRowSpan(lines, 2);
+        NotePanel.Children.Add(lines);
+        if (note.Buttons.Count == 0) return;
+        var row = new Grid { ColumnSpacing = 8, Height = NoteButtonHeight };   // зазор и поля — как внутренний отступ плитки
+        Grid.SetRow(row, 1);
+        for (int i = 0; i < note.Buttons.Count; i++)
         {
-            var button = b;
-            NotePanel.Children.Add(Button(button.Label, () =>
+            var button = note.Buttons[i];
+            row.ColumnDefinitions.Add(new ColumnDefinition());
+            var b = Button(button.Label, () =>
             {
                 try { button.Act(); }
                 catch (Exception e) { Log.Write("note action failed: " + Log.Describe(e)); }
                 r.RemoveNote(note.Id);
-            }, accent: false, gate: CanPress));
+            }, accent: false, gate: CanPress, tall: true);
+            Grid.SetColumn(b, i);
+            row.Children.Add(b);
         }
+        NotePanel.Children.Add(row);
     }
+
+    const double NoteButtonHeight = 64;
 
     // Кнопка на Border + Tapped, как у иконок устройств: карточка не активируется, штатный Button в ней не проверен
     // gate: нажатие засчитывается, только если оно прошло проверку в момент PointerPressed (карточка открыта и стоит, строки не двигались 350 мс)
-    static Border Button(string label, Action act, bool accent, bool narrow = false, Func<bool>? gate = null)
+    static Border Button(string label, Action act, bool accent, bool narrow = false, Func<bool>? gate = null, bool tall = false)
     {
         Brush normal = accent ? (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
         Brush hover = accent ? (Brush)Application.Current.Resources["AccentFillColorSecondaryBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x3C, 0xFF, 0xFF, 0xFF));
@@ -209,6 +226,14 @@ public sealed partial class ShareTileView : UserControl
             Text = label, FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis,
             Foreground = accent ? (Brush)Application.Current.Resources["TextOnAccentFillColorPrimaryBrush"] : (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"],
         };
+        if (tall)
+        {
+            // высокая кнопка заметки: подпись по центру, переносится на 2 строки
+            text.TextWrapping = TextWrapping.Wrap;
+            text.TextAlignment = TextAlignment.Center;
+            text.MaxLines = 2;
+            text.VerticalAlignment = VerticalAlignment.Center;
+        }
         var border = new Border { CornerRadius = new CornerRadius(4), Padding = new Thickness(narrow ? 10 : 6, 5, narrow ? 10 : 6, 5), Background = normal, Child = text };
         border.PointerEntered += (_, _) => border.Background = hover;
         border.PointerExited += (_, _) => border.Background = normal;
@@ -238,6 +263,7 @@ public sealed partial class ShareTileView : UserControl
             _slotIds[i] = d.Id;
             _slotIcons[i].Glyph = GlyphFor(d.Kind);
             _slotNames[i].Text = d.Name.Trim();
+            _slotOwn[i].Visibility = d.IsOwn ? Visibility.Visible : Visibility.Collapsed;
             _slots[i].Visibility = Visibility.Visible;
         }
     }

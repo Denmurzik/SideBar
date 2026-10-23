@@ -21,7 +21,7 @@ public sealed class ReceiveTileModel
     /// <summary>Consent rows that fit into the tile at once; with more, one row is shown with a counter and prev/next.</summary>
     public const int MaxStackedRows = 2;
     public const int MaxNotes = 4;
-    public static readonly TimeSpan NoteDuration = TimeSpan.FromSeconds(8);
+    public static readonly TimeSpan NoteDuration = TimeSpan.FromSeconds(10);
     /// <summary>Time left for a note after the pointer leaves it.</summary>
     public static readonly TimeSpan NoteAfterHover = TimeSpan.FromSeconds(3);
     /// <summary>One tick never counts for more than this: a long gap (the timer was stopped) must not eat a fresh note.</summary>

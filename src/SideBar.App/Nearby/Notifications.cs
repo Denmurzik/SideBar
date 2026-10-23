@@ -63,7 +63,8 @@ sealed partial class Notifications
         else _ui.TryEnqueue(Add);
     }
 
-    public void Received(IReadOnlyList<string> paths)
+    /// <param name="ownDevice">Имя своего (верифицированного) устройства: заметка "&lt;имя&gt;: получено N"; null — обычный текст.</param>
+    public void Received(IReadOnlyList<string> paths, string? ownDevice = null)
     {
         if (paths.Count == 0) return;
         string path = paths[0];
@@ -71,7 +72,7 @@ sealed partial class Notifications
         TileButton[] buttons = paths.Count == 1 && DisplayText.IsSafeToOpen(path)
             ? [new(Strings.Open, () => Launch(path)), new(Strings.ShowInFolder, () => ShowInFolder(path))]
             : [new(Strings.ShowInFolder, () => ShowInFolder(path))];
-        Note("received", [Strings.Received(paths.Count)], buttons);
+        Note("received", [ownDevice is null ? Strings.Received(paths.Count) : Strings.ReceivedFrom(ownDevice, paths.Count)], buttons);
     }
 
     /// <summary>Текст/ссылка уже в буфере обмена; заметка с превью и кнопками.</summary>

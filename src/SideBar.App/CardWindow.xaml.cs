@@ -2,12 +2,14 @@ using System.Diagnostics;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Visibility = Microsoft.UI.Xaml.Visibility;   // SideBar.Core.Nearby.Visibility (Hidden/Everyone) конфликтует
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using SideBar.Core;
 using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Core.Motion;
 using SideBar.Core.Nearby;
+using SideBar.Core.Shelf;
 using SideBar.Native;
 using SideBar.Shelf;
 using Windows.Graphics;
@@ -58,8 +60,102 @@ public sealed partial class CardWindow : Window
         Root.ActualThemeChanged += (_, _) => { ApplyStrokes(); _backdrop?.SetTheme(Root.ActualTheme); };
     }
 
+    /// <summary>Полка очищена корзиной: App закрывает веер.</summary>
+    public event Action? ShelfCleared;
+
+    ShelfService? _shelfService;
+    readonly ClearConfirm _clear = new();
+    DispatcherTimer? _clearTimer;
+    bool _hasItems, _clearHover, _dragging;
+
+    // корзина видна, пока на полке есть элементы и нет своего drag (_dragging); вооружение сбрасывается при любом изменении
+    void UpdateClear()
+    {
+        var visibility = _hasItems && !_dragging ? Visibility.Visible : Visibility.Collapsed;
+#if DEBUG
+        if (visibility != ShelfClear.Visibility) Log.Write("shelf trash " + visibility);   // хук для DragDriver C5
+#endif
+        ShelfClear.Visibility = visibility;
+        if (ShelfClear.Visibility == Visibility.Collapsed) { _clearHover = false; Disarm(); }   // PointerExited не придёт
+        else RenderClear();
+    }
+
+    void RenderClear()
+    {
+        bool armed = _clear.IsArmed(DateTimeOffset.UtcNow);
+#if DEBUG
+        armed |= _debugArmed;
+#endif
+        ShelfClearIcon.Opacity = armed ? 1 : _clearHover ? 0.9 : 0.5;
+        if (armed) ShelfClearIcon.Foreground = CriticalBrush();
+        else ShelfClearIcon.ClearValue(Microsoft.UI.Xaml.Controls.IconElement.ForegroundProperty);   // обратно к теме
+    }
+
+    static Brush CriticalBrush()
+    {
+        try { return (Brush)Application.Current.Resources["SystemFillColorCriticalBrush"]; }
+        catch (Exception) { return new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0x99, 0xA4)); }
+    }
+
+    void Disarm()
+    {
+        _clear.Reset();
+        _clearTimer?.Stop();
+        RenderClear();
+    }
+
+    void ShelfClear_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+        PressClear();
+    }
+
+    // быстрый второй клик WinUI отдаёт как DoubleTapped, а не Tapped: это тоже второе нажатие
+    void ShelfClear_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+        PressClear();
+    }
+
+    void PressClear()
+    {
+        if (_shelfService is null) return;
+        var press = _clear.Press(DateTimeOffset.UtcNow);
+        if (press == ClearPress.Ignored) return;   // второе событие того же быстрого клика
+        if (press == ClearPress.Cleared)
+        {
+            Disarm();
+            try { _shelfService.Clear(); }
+            catch (Exception ex) { Log.Write("shelf clear failed: " + Log.Describe(ex)); }
+            ShelfCleared?.Invoke();
+            return;
+        }
+        _clearTimer ??= new DispatcherTimer { Interval = ClearConfirm.Window };
+        _clearTimer.Tick -= ClearTimerTick;
+        _clearTimer.Tick += ClearTimerTick;
+        _clearTimer.Stop();
+        _clearTimer.Start();
+        RenderClear();
+    }
+
+    void ClearTimerTick(object? sender, object e) => Disarm();
+    void ShelfClear_PointerEntered(object sender, PointerRoutedEventArgs e) { _clearHover = true; RenderClear(); }
+    void ShelfClear_PointerExited(object sender, PointerRoutedEventArgs e) { _clearHover = false; RenderClear(); }
+
+#if DEBUG
+    /// <summary>Скриншоты без ввода: SIDEBAR_DEBUG_CLEAR=armed вооружает корзину.</summary>
+    internal void DebugArmClear() { _debugArmed = true; RenderClear(); }
+    bool _debugArmed;
+#endif
+
     internal void BindShelf(ShelfService shelf)
     {
+        _shelfService = shelf;
+        // DragOut.Start асинхронный: IsActive в DragStarting ещё false, поэтому свой флаг
+        Stack.DragStarting += (_, _) => { _dragging = true; UpdateClear(); };
+        Stack.DropCompleted += (_, _) => { _dragging = false; UpdateClear(); };
+        Settled += state => { if (state == PanelState.Hidden && _dragging) { _dragging = false; UpdateClear(); } };   // потерянный DropCompleted
+        Stack.HasItemsChanged += has => { _hasItems = has; UpdateClear(); };
         Stack.HasItemsChanged += has => ShelfEmptyIcon.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         Stack.FanRequested += () => FanRequested?.Invoke();
         Stack.Bind(shelf);

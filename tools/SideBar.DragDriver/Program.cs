@@ -40,6 +40,9 @@ sealed class Driver
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(nint hwnd, out uint pid);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(nint hwnd, System.Text.StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, nint extra);
+    delegate bool EnumWindowsProc(nint hwnd, nint lParam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, nint lParam);
+    [DllImport("user32.dll")] static extern bool PostMessageW(nint hwnd, uint msg, nint wParam, nint lParam);
 
     const int Reference = 0, Owned = 1;
 
@@ -51,6 +54,7 @@ sealed class Driver
     readonly List<string> _report = [];
     Form _src = null!, _other = null!;
     volatile bool _otherRejects;
+    Action? _afterDrop;
     volatile string[] _received = [];
     volatile string _otherEffect = "";
     volatile object? _pending;
@@ -175,6 +179,8 @@ sealed class Driver
         if (Path.GetFullPath(_srcDir).StartsWith(Path.GetFullPath(tmpDir), StringComparison.OrdinalIgnoreCase))
         { Rep("FAIL source files must be outside %TEMP% (they would count as temporary)"); _fail++; return; }
 
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_PAUSE_ONLY") == "1") { PauseScenarios(W, H, a); return; }   // быстрый прогон: пауза при официальном приложении (P1..P3)
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_CLEAR_ONLY") == "1") { ClearScenarios(W, H, a, b, c); return; }   // быстрый прогон: только корзина полки (C1..C6)
         if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1" || Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_FAN_ONLY") == "1")   // быстрый прогон: только вынос стопки и отправка с плитки
         {
             var quickFolder = Path.Combine(_srcDir, "folder1");
@@ -570,8 +576,217 @@ sealed class Driver
                 !File.Exists(owned.Path) && !Directory.Exists(Path.GetDirectoryName(owned.Path)!), owned.Path);
         }
         FanScenarios(W, H, a, refFile, folder, otherCenter);
+        ClearScenarios(W, H, a, Path.Combine(_srcDir, "b.txt"), Path.Combine(_srcDir, "c.txt"));
         DefaultDelayScenario(W, H, a, refFile, folder, otherCenter);
         PendingDeleteRestartScenario(W, H, a, refFile, folder, otherCenter);
+    }
+
+    // корзина полки: правый нижний угол плитки полки (карточка - поле 12 epx, у корзины отступ 4 epx и размер 22 epx)
+    Point TrashPoint(int W, int H)
+    {
+        var r = CardRect(W, H);
+        return new Point(r.Right - (int)(27 * _scale), r.Bottom - (int)(27 * _scale));
+    }
+
+    void FillThree(int W, int H, string a, string b, string c)
+    {
+        var files = new DataObject();
+        files.SetData(DataFormats.FileDrop, new[] { a, b, c });
+        DragToPanel(files, W, H);
+    }
+
+    /// <summary>Клик по корзине не должен ничего запускать: ни выноса, ни веера, ни активации окон приложения.</summary>
+    bool QuietClick(out string why)
+    {
+        var log = AppLog();
+        bool fg = ForegroundIsApp(out var cls);
+        why = $"dragOut={log.Contains("drag-out starting")} fan={FanZone() != null} foregroundIsApp={fg} ({cls})";
+        return !log.Contains("drag-out starting") && FanZone() == null && !fg;
+    }
+
+    /// <summary>Окно сообщений трея именно нашего процесса (по PID и классу); 0, если не найдено.</summary>
+    nint AppMessageWindow()
+    {
+        nint found = 0;
+        if (_app == null) return 0;
+        uint pid = (uint)_app.Id;
+        EnumWindows((h, _) =>
+        {
+            GetWindowThreadProcessId(h, out var p);
+            if (p != pid) return true;
+            var sb = new System.Text.StringBuilder(64);
+            GetClassNameW(h, sb, 64);
+            if (sb.ToString() == "SideBar.MessageWindow") { found = h; return false; }
+            return true;
+        }, 0);
+        return found;
+    }
+
+    /// <summary>Контекстное меню трея как от правого клика: то же сообщение, что шлёт оболочка (v4); снимок только области меню.</summary>
+    void ShotTrayMenu(string name, int W, int H)
+    {
+        var hwnd = AppMessageWindow();   // только окно запущенного нами процесса, не чужой экземпляр SideBar
+        if (hwnd == 0) { Rep("    (tray shot " + name + ": message window not found)"); return; }
+        PostMessageW(hwnd, 0x8001, (nint)(((_scr.Bottom - 60) << 16) | ((_scr.Right - 60) & 0xFFFF)), 0x7B);
+        Thread.Sleep(1200);
+        try
+        {
+            var dir = Path.Combine(_work, "shots");
+            Directory.CreateDirectory(dir);
+            var r = new Rectangle(_scr.Right - 480, _scr.Bottom - 260, 480, 230);
+            using var bmp = new Bitmap(r.Width, r.Height);
+            using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(r.Location, Point.Empty, r.Size);
+            bmp.Save(Path.Combine(dir, name + ".png"), System.Drawing.Imaging.ImageFormat.Png);
+        }
+        catch (Exception e) { Rep("    (tray shot " + name + " failed: " + e.Message + ")"); }
+        keybd_event(0x1B, 0, 0, 0); keybd_event(0x1B, 0, 2, 0);   // Esc закрывает меню
+        Thread.Sleep(400);
+    }
+
+    // P1..P3: пока работает официальный nearby_share.exe (копия ping.exe), стек на паузе: меню трея, подсказка на плитке, возобновление
+    void PauseScenarios(int W, int H, string a)
+    {
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        if (!StartApp()) { _fail++; return; }
+        var fakeDir = Path.Combine(_work, "fake");
+        Directory.CreateDirectory(fakeDir);
+        var fake = Path.Combine(fakeDir, "nearby_share.exe");
+        File.Copy(Path.Combine(Environment.SystemDirectory, "PING.EXE"), fake, true);
+        ShotTrayMenu("p0-tray-normal", W, H);
+        Process? proc = null;
+        try
+        {
+            proc = Process.Start(new ProcessStartInfo(fake, "-t 127.0.0.1") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true });
+            bool paused = WaitLog("receive paused", 15000) && AppLog().Contains("official app running");
+            Check("P1 fake nearby_share.exe running -> log 'official app running' and 'receive paused'", paused, AppLog());
+            ShotTrayMenu("p1-tray-paused", W, H);
+            var files = new DataObject();
+            files.SetData(DataFormats.FileDrop, new[] { a });
+            _afterDrop = () => Shot("p2-hint", W, H);
+            bool dropped = DragToPanel(files, W, H, QsTile(W, H));
+            bool hint = dropped && (_lastLog.Contains("share tile OfficialAppRunning") || WaitLog("share tile OfficialAppRunning", 3000));
+            Check("P2 file dropped on the Quick Share tile while paused -> tile OfficialAppRunning, no search", hint && !AppLog().Contains("share tile Searching"), _lastLog + " | " + AppLog());
+        }
+        finally { try { proc?.Kill(true); } catch { } }
+        bool resumed = WaitLog("official app stopped", 15000) && WaitLog("receive resumed", 5000);
+        Check("P3 fake closed -> log 'official app stopped' and 'receive resumed'", resumed, AppLog());
+        ShotTrayMenu("p3-tray-resumed", W, H);
+    }
+
+    // C1..C5: очистка полки корзиной только вторым кликом в течение 3 с; файлы на диске целы; Owned уходит в отложенное удаление
+    void ClearScenarios(int W, int H, string a, string b, string c)
+    {
+        File.WriteAllText(c, "cccccccc");   // сценарий про пропавшую ссылку удаляет c.txt
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        if (!StartApp()) { _fail++; return; }
+        FillThree(W, H, a, b, c);
+        var s = WaitShelf(x => x.Count == 3);
+        if (s.Count != 3 || !OpenCard(W, H)) { Check("C0 shelf prepared and card open", false, Dump(s)); return; }
+        var t = TrashPoint(W, H);
+        MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
+        Click(); Thread.Sleep(600);
+        s = ReadShelf();
+        bool quiet = QuietClick(out var why);
+        Check("C1 first click on the trash only arms it: shelf still holds 3; no drag-out, no fan, card not foreground", s.Count == 3 && quiet, Dump(s) + "\n" + why);
+        Click();
+        s = WaitShelf(x => x.Count == 0, 3000);
+        quiet = QuietClick(out why);
+        Check("C2 second click within 3 s clears the shelf; the files stay on disk; log 'shelf cleared n=3'; no drag-out, no fan, card not foreground",
+            s.Count == 0 && File.Exists(a) && File.Exists(b) && File.Exists(c) && AppLog().Contains("shelf cleared n=3") && quiet, Dump(s) + "\n" + why);
+        Shot("c2-cleared", W, H);
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+        FillThree(W, H, a, b, c);
+        s = WaitShelf(x => x.Count == 3);
+        if (!OpenCard(W, H)) { Check("C3 card open", false, ""); return; }
+        MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
+        Click(); Thread.Sleep(3500);
+        Click(); Thread.Sleep(600);
+        s = ReadShelf();
+        quiet = QuietClick(out why);
+        bool expired = s.Count == 3;
+        Click();   // третий клик: после перевооружения очищает полку
+        var cleared = WaitShelf(x => x.Count == 0, 3000);
+        Check("C3 click, wait 3.5 s, click again: the arming expired (shelf holds 3); a third click then clears it; no drag-out, no fan, card not foreground",
+            expired && cleared.Count == 0 && quiet && AppLog().Contains("shelf cleared n=3"), $"afterSecond={s.Count} afterThird={cleared.Count}\n" + why);
+        Shot("c3-after", W, H);
+
+        // C4: Owned (PNG из %TEMP%) уходит с полки, файл жив сразу после очистки и записан в pendingDeletes
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        if (!StartApp()) { _fail++; return; }
+        var png = Path.Combine(Path.GetTempPath(), "drive-clear-owned.png");
+        using (var bmp = new Bitmap(16, 16)) bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+        var pngDrop = new DataObject();
+        pngDrop.SetData(DataFormats.FileDrop, new[] { png });
+        DragToPanel(pngDrop, W, H);
+        var two = new DataObject();
+        two.SetData(DataFormats.FileDrop, new[] { a });
+        DragToPanel(two, W, H);
+        s = WaitShelf(x => x.Count == 2);
+        try { File.Delete(png); } catch { }
+        var owned = s.FirstOrDefault(x => x.Kind == Owned);
+        if (s.Count != 2 || owned == null || !OpenCard(W, H)) { Check("C4 shelf prepared (png owned + file ref) and card open", false, Dump(s)); return; }
+        var ownedDir = Path.GetDirectoryName(owned.Path)!;
+        MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
+        Click(); Thread.Sleep(600); Click();
+        s = WaitShelf(x => x.Count == 0, 3000);
+        bool alive = File.Exists(owned.Path);
+        var pending = ReadPending();
+        bool recorded = Guid.TryParse(Path.GetFileName(ownedDir), out var ownedGuid) && pending.Any(p => Guid.Parse(p.Guid) == ownedGuid);
+        Check("C4 Owned item: clear removes it from the shelf, its file still exists right after, shelf.json pendingDeletes holds it",
+            s.Count == 0 && alive && recorded && File.Exists(a), $"alive={alive} pending=[{string.Join("; ", pending)}]\n" + Dump(s));
+
+        // C5: корзина скрыта, пока стопку выносят, и возвращается после drag'а
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+        FillThree(W, H, a, b, c);
+        s = WaitShelf(x => x.Count == 3);
+        if (s.Count != 3) { Check("C5 shelf prepared", false, Dump(s)); return; }
+        _otherRejects = true;   // OTHER отвечает None: элементы остаются на полке (на пустом месте экрана мог бы стоять чужой приёмник)
+        bool dragged = DragStackTo(new Point(_other.Left + 150, _other.Top + 75), W, H);
+        _otherRejects = false;
+        if (!dragged) return;
+        var log = AppLog();
+        if (!log.Contains("shelf trash"))
+        { Rep("SKIP C5 needs a Debug app: the 'shelf trash' log hook exists only in Debug"); return; }
+        int started = log.IndexOf("drag-out starting", StringComparison.Ordinal);
+        // DragStarting прячет корзину сразу, а "drag-out starting" пишется после асинхронной подготовки: Collapsed идёт раньше. Лог сброшен OpenCard'ом в начале drag'а.
+        int hidden = log.IndexOf("shelf trash Collapsed", StringComparison.Ordinal);
+        int completed = hidden < 0 ? -1 : log.IndexOf("drag-out completed", hidden, StringComparison.Ordinal);
+        int shown = completed < 0 ? -1 : log.IndexOf("shelf trash Visible", completed, StringComparison.Ordinal);
+        s = ReadShelf();
+        // цель выноса - пустое место (DropResult=None): элементы остаются на полке, корзина обязана вернуться
+        bool back = shown > completed;
+        Check("C5 trash is hidden while a stack item is dragged out (Collapsed < completed) and is back after the drag",
+            started >= 0 && hidden >= 0 && completed > hidden && back && log.Contains("DropResult=None"),
+            $"starting={started} collapsed={hidden} completed={completed} visibleAfter={shown} shelf={s.Count}\n" + log);
+
+        // C6: быстрый двойной клик (250 мс между кликами) приходит как DoubleTapped и тоже очищает полку
+        s = ReadShelf();
+        if (s.Count != 3 || !OpenCard(W, H)) { Check("C6 shelf holds 3 and card open", false, Dump(s)); return; }
+        var t6 = TrashPoint(W, H);
+        MoveTo(t6.X, t6.Y, 300); Thread.Sleep(300);
+        Click(); Thread.Sleep(250); Click();
+        s = WaitShelf(x => x.Count == 0, 3000);
+        bool quiet6 = QuietClick(out var why6);
+        Check("C6 fast double click (250 ms) on the trash clears the shelf; log 'shelf cleared n=3'; no drag-out, no fan, card not foreground",
+            s.Count == 0 && AppLog().Contains("shelf cleared n=3") && quiet6, Dump(s) + "\n" + why6);
+
+        // C6b: после двойного клика пустая полка не вооружена заново: один клик по корзине, когда на полке снова лежит файл, его не очищает
+        if (s.Count == 0)
+        {
+            MoveTo(W - 700, H, 200); Thread.Sleep(500);
+            var one = new DataObject();
+            one.SetData(DataFormats.FileDrop, new[] { a });
+            DragToPanel(one, W, H);
+            s = WaitShelf(x => x.Count == 1);
+            if (s.Count != 1 || !OpenCard(W, H)) { Check("C6b one file added and card open", false, Dump(s)); return; }
+            MoveTo(t6.X, t6.Y, 300); Thread.Sleep(300);
+            Click(); Thread.Sleep(800);
+            s = ReadShelf();
+            Check("C6b after the double click cleared the shelf, a single click on a new file only arms it (the file stays)", s.Count == 1 && !AppLog().Contains("shelf cleared"), Dump(s));
+        }
     }
 
     // D3e: отложенное удаление переживает перезапуск: перезапуск внутри окна задержки не удаляет папку, после срока она удаляется
@@ -894,6 +1109,7 @@ sealed class Driver
         if (dropAt is { } at) { MoveTo(at.X, at.Y, 300); Thread.Sleep(400); }
         else { MoveTo(W - (int)((8 + 108) * _scale), H, 300); Thread.Sleep(400); }   // центр карточки
         Mouse(0x0004);                                   // ЛКМ вверх -> drop
+        if (_afterDrop is { } hook) { _afterDrop = null; Thread.Sleep(300); hook(); }   // снимок сразу после drop'а, пока подсказка плитки ещё видна
         Thread.Sleep(1200);
         MoveTo(W - 700, H, 200); Thread.Sleep(500);      // уходим: карточка закроется, следующий drag откроет её заново
         _lastLog = AppLog();

@@ -25,6 +25,11 @@
           <Rectangle x:Name="ShelfDash" Grid.Row="2" RadiusX="4" RadiusY="4" StrokeThickness="1" StrokeDashArray="4 3"/>
           <FontIcon x:Name="ShelfEmptyIcon" Grid.Row="2" Glyph="&#xE8C8;" FontFamily="Segoe Fluent Icons" FontSize="40" Opacity="0.4" Foreground="{ThemeResource TextFillColorPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
           <shelf:StackView x:Name="Stack" Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          <Grid x:Name="ShelfClear" Grid.Row="2" Width="22" Height="22" Margin="0,0,4,4" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                Background="Transparent" Visibility="Collapsed" Tapped="ShelfClear_Tapped" DoubleTapped="ShelfClear_DoubleTapped" PointerEntered="ShelfClear_PointerEntered" PointerExited="ShelfClear_PointerExited">
+            <FontIcon x:Name="ShelfClearIcon" Glyph="&#xE74D;" FontFamily="Segoe Fluent Icons" FontSize="14" Opacity="0.5" Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                      HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
+          </Grid>
         </Grid>
       </Grid>
     </Border>

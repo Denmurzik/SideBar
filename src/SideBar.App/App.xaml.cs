@@ -36,9 +36,26 @@ public partial class App : Application
     FanWindow? _fan;
     Notifications? _notifications;
     ReceiveHost? _receive;
+    readonly StackPause _stack = new();
+    OfficialAppWatcher? _official;
+    IdentityProvider? _identity;
     readonly BumpGate _bump = new();
     readonly AttentionBounce _attention = new();
     readonly ReceiveTileModel _recv = new();
+#if DEBUG
+    Timer? _debugNote;
+    void DebugNote(string kind)
+    {
+        switch (kind)
+        {
+            case "file": _notifications?.Received(["C:/x/photo.jpg"], "Pixel 9"); break;
+            case "unsafe": _notifications?.Received(["C:/x/setup.exe"], "Pixel 9"); break;
+            case "link": _notifications?.SharedText("Pixel 9", SideBar.Nearby.Session.TextKind.Url, "https://example.com/page"); break;
+            case "text": _notifications?.SharedText("Pixel 9", SideBar.Nearby.Session.TextKind.Text, "Привет с телефона"); break;
+            case "cancel": _notifications?.Info("cancelled", Strings.SenderCancelled); break;
+        }
+    }
+#endif
     bool _debugOpen = false;   // DEBUG: SIDEBAR_DEBUG_OPEN=1 держит карточку открытой для скриншотов
     ShareTileModel? _share;
     NearbyService? _nearby;
@@ -62,6 +79,9 @@ public partial class App : Application
         _window = new CardWindow();
         _window.BindShelf(_shelf);
         _window.FanRequested += OnFanRequested;
+        _window.ShelfCleared += () => _fan?.Hide();
+        _identity = new IdentityProvider();   // сертификаты нужны и плитке (метка «своё»), и приёму
+        _identity.Start();
         InitShare();
         _window.Settled += s =>
         {
@@ -91,11 +111,15 @@ public partial class App : Application
             }
             Log.Write("ready");
 #if DEBUG
+            // скриншот глубокой стопки без ввода: SIDEBAR_DEBUG_FILL=<папка> кладёт на полку файлы папки (ссылками)
+            if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_FILL") is { Length: > 0 } fillDir && Directory.Exists(fillDir) && _shelf is not null)
+                foreach (var f in Directory.EnumerateFiles(fillDir).Order()) _shelf.Model.Add(f, SideBar.Core.Shelf.ShelfItemKind.Reference);
             if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_OPEN") == "1")
             {
                 _debugOpen = true;   // автомат мыши отключён, карточка открыта для скриншотов
                 _trimmer.OnShown();
                 _window?.SetState(PanelState.Open);
+                if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_CLEAR") == "armed") _window?.DebugArmClear();   // скриншот корзины в вооружённом виде
             }
 #endif
         });
@@ -105,11 +129,22 @@ public partial class App : Application
         try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
         _messages = new MessageWindow(OnDisplaysChanged);
         _notifications = new Notifications(_ui, _messages.Handle, _recv);
-        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce);
+        _official = new OfficialAppWatcher();
+        _official.RunningChanged += running =>
+        {
+            Log.Write(running ? "official app running" : "official app stopped");
+            _stack.SetOfficialRunning(running);
+        };
+        _official.Poll();   // первое решение приёма уже учитывает процесс
+        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack);
+        _official.Start();
 #if DEBUG
-        if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.ToggleEveryone();   // автотест без клика по меню трея
+        if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.SetMode(SideBar.Core.Nearby.Visibility.Everyone, persist: false);   // автотест без клика по меню трея
+        // скриншоты заметок: каждые 6 с показывает заметку file | unsafe | link | text | cancel (с SIDEBAR_DEBUG_OPEN=1)
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_NOTE") is { Length: > 0 } noteKind)
+            _debugNote = new Timer(_ => _ui?.TryEnqueue(() => DebugNote(noteKind)), null, 3000, 6000);
 #endif
-        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.IsEveryone, _receive.ToggleEveryone);
+        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused);
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) CardHidden(); }), null, 2000, Timeout.Infinite);
@@ -121,7 +156,7 @@ public partial class App : Application
     void InitShare()
     {
         _share = new ShareTileModel();
-        _nearby = new NearbyService(_ui!);
+        _nearby = new NearbyService(_ui!, _identity!, _stack);
         _window!.BindShare(_share, _recv, (id, accept) => _notifications?.Decide(id, accept));
         _window.OwnItemsDropped += OnShareDrop;
         _share.Changed += OnShareChanged;
@@ -198,6 +233,14 @@ public partial class App : Application
     void OnShareDrop(IReadOnlyList<string> paths)
     {
         if (_share is null || _nearby is null) return;
+        if (_stack.IsPaused)
+        {
+            ShareStaging.TakePending();   // копии временных файлов не нужны
+            if (_share.State is ShareTileState.Searching or ShareTileState.Choosing or ShareTileState.Sending)
+                Log.Write("share: drop ignored (paused)");   // идущий сеанс не трогаем
+            _share.ShowOfficialAppRunning(DateTimeOffset.UtcNow);
+            return;
+        }
         _share.BeginShare(paths, DateTimeOffset.UtcNow);
         var staged = ShareStaging.TakePending();   // копии временных файлов делаются в фоне, отправка их дожидается
         if (_share.State == ShareTileState.Searching) _nearby.StartShare(paths, staged);
@@ -218,10 +261,12 @@ public partial class App : Application
     {
         try
         {
+            try { _official?.Dispose(); } catch { }
             try { _nearby?.Dispose(); } catch { }
             try { _hook?.Dispose(); } catch { }
             try { _dropTarget?.Dispose(); } catch { }
             try { _receive?.Dispose(); } catch { }
+            try { _identity?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
             try { _messages?.Dispose(); } catch { }
         }

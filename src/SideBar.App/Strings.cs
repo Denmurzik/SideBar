@@ -7,7 +7,14 @@ static class Strings
     public const string Autostart = "Запускать при входе в Windows";
     public const string Exit = "Выход";
 
-    public const string VisibilityEveryone = "Видимость для всех — 10 мин";
+    public const string VisibilityHidden = "Скрыто";
+    public const string VisibilityOwnDevices = "Свои устройства";
+    public const string VisibilityEveryone = "Все (10 мин)";
+    public const string StackPaused = "Quick Share на паузе — открыт официальный Quick Share";
+    public const string OwnMark = "своё";
+    /// <summary>Имя своего устройства, если в сертификате его нет: имя из рекламы задаёт пир и сюда не попадает.</summary>
+    public const string OwnDevice = "Ваше устройство";
+    public const string CertsUnavailable = "Сертификаты Quick Share недоступны — работает только режим „Все“";
     public const string UnknownDevice = "Устройство";
     public const string Accept = "Принять";
     public const string Decline = "Отклонить";
@@ -32,6 +39,7 @@ static class Strings
     }
 
     public static string Received(int n) => $"Получено: {Files(n)}";
+    public static string ReceivedFrom(string device, int n) => $"{device}: получено {Files(n)}";
 
     public static string SharedLink(string device, string domain) => $"{device} поделился ссылкой · {domain}";
     public static string SharedText(string device) => $"{device} поделился текстом";
@@ -53,6 +61,8 @@ static class Strings
     public const string SendRejected = "Получатель отклонил";
     public const string SendCancelled = "Получатель отменил передачу";
     public static readonly string OnlyFirstFiles = $"Отправлены только первые {Nearby.NearbyService.MaxFiles} файлов";
+    public const string SendUnverified = "Не удалось подтвердить устройство";
     public const string SendTimedOut = "Получатель не ответил";
+    public const string CloseOfficialApp = SideBar.Core.Nearby.ShareTileModel.OfficialAppHint;
     public const string NothingToSend = "Нечего отправлять";
 }

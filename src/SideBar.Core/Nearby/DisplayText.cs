@@ -46,6 +46,13 @@ public static class DisplayText
         return clean.Length == 0 ? fallback : clean;
     }
 
+    /// <summary>
+    /// Name to show for an incoming peer. A verified (own) device is named only by its certificate; without a certificate
+    /// name it is <paramref name="own"/>, never the advertised name, which the peer controls.
+    /// </summary>
+    public static string PeerName(bool verified, string? verifiedName, string? senderName, string own, string unknown) =>
+        verified ? SanitizeName(verifiedName, own) : SanitizeName(senderName, unknown);
+
     /// <summary>First 100 characters on a single line; "…" is appended when the text was longer.</summary>
     public static string Preview(string? value)
     {

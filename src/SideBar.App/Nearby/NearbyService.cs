@@ -3,15 +3,17 @@ using Microsoft.UI.Dispatching;
 using SideBar.Core.Nearby;
 using SideBar.Nearby;
 using SideBar.Nearby.Discovery;
+using SideBar.Nearby.Identity;
 using SideBar.Nearby.Session;
 using SideBar.Nearby.Wire;
+using SideBar.Sharing;
 
 namespace SideBar.Nearby;
 
 /// <summary>
 /// Отправка с плитки Quick Share: поиск устройств (mDNS), TCP-соединение, <see cref="SendSession"/>.
 /// Один общий сеанс за раз; события приходят на UI-поток и только от актуального сеанса (устаревшие отбрасываются).
-/// Отправляет анонимно (режим «Все»); сертификаты придут в M4.
+/// Своим устройствам (сертификат найден по рекламе) отправляет с <see cref="CertificateIdentity"/>, остальным анонимно, с PIN, как в M3.
 /// </summary>
 sealed class NearbyService : IDisposable
 {
@@ -23,6 +25,8 @@ sealed class NearbyService : IDisposable
     static readonly TimeSpan LostGrace = TimeSpan.FromSeconds(2);
 
     readonly DispatcherQueue _ui;
+    readonly IdentityProvider _identity;
+    readonly IStackPause _pause;
     readonly object _gate = new();
     readonly Dictionary<string, DiscoveredEndpoint> _endpoints = new(StringComparer.OrdinalIgnoreCase);
     QuickShareBrowser? _browser;
@@ -37,9 +41,12 @@ sealed class NearbyService : IDisposable
     public event Action<double>? Progress;
     public event Action<bool, string?>? Finished;
 
-    public NearbyService(DispatcherQueue ui)
+    public NearbyService(DispatcherQueue ui, IdentityProvider identity, IStackPause pause)
     {
         _ui = ui;
+        _pause = pause;
+        _identity = identity;
+        _identity.Changed += OnIdentityChanged;
         // белый список: тип кадра, размеры, enum-поля; имена файлов и устройств сюда не попадают
         NearbyLog.Log = e => Log.Write($"nearby {e.Kind}{(e.Size is { } n ? " " + n : "")}{(e.Value is { } v ? " " + v : "")}");
     }
@@ -80,6 +87,14 @@ sealed class NearbyService : IDisposable
         Cancel();
         int epoch;
         Task<(List<string> Files, bool Truncated)> files;
+        if (_pause.IsPaused)
+        {
+            // официальный Quick Share держит порт и рекламу: свой стек молчит
+            Log.Write("share: refused, stack paused");
+            lock (_gate) epoch = ++_epoch;
+            Post(epoch, () => Finished?.Invoke(false, Strings.CloseOfficialApp));
+            return;
+        }
         lock (_gate)
         {
             epoch = ++_epoch;
@@ -134,8 +149,43 @@ sealed class NearbyService : IDisposable
             if (_lostGrace.Remove(endpoint.InstanceName, out var pending)) pending.Dispose();
         }
         Log.Write($"share: device found, kind {endpoint.Kind}");
-        var view = new DeviceView(endpoint.InstanceName, DisplayText.SanitizeName(endpoint.DisplayName, Strings.UnknownDevice), Map(endpoint.Kind));   // имя из mDNS задаёт пир
+        var view = ViewOf(endpoint);
         Post(epoch, () => DeviceFound?.Invoke(view));
+    }
+
+    // своё устройство рекламирует себя без имени: имя берётся из его сертификата; чужое называется по mDNS (имя задаёт пир)
+    DeviceView ViewOf(DiscoveredEndpoint endpoint)
+    {
+        var own = OwnIdentity(endpoint);
+        string name = own is null
+            ? DisplayText.SanitizeName(endpoint.DisplayName, Strings.UnknownDevice)
+            : DisplayText.SanitizeName(own.TryGetPeerName(endpoint.Info), Strings.OwnDevice);
+        return new DeviceView(endpoint.InstanceName, name, Map(endpoint.Kind), own is not null);
+    }
+
+    // сертификаты перечитаны: метка «своё» и имена уже показанных устройств пересчитываются (поток пула)
+    void OnIdentityChanged()
+    {
+        int epoch;
+        List<DiscoveredEndpoint> shown;
+        lock (_gate) { epoch = _epoch; shown = [.. _endpoints.Values]; }
+        foreach (var endpoint in shown)
+        {
+            var view = ViewOf(endpoint);
+            Post(epoch, () => DeviceFound?.Invoke(view));
+        }
+    }
+
+    /// <summary>Текущая идентичность, если сертификат этого устройства среди наших; иначе null. Сбой проверки = не своё.</summary>
+    CertificateIdentity? OwnIdentity(DiscoveredEndpoint endpoint)
+    {
+        var identity = _identity.Current;
+        try { return identity is not null && identity.Identify(endpoint.Info) ? identity : null; }
+        catch (Exception e)
+        {
+            Log.Write("share: identify failed: " + Log.Describe(e));
+            return null;
+        }
     }
 
     void OnLost(int epoch, string name)
@@ -193,6 +243,13 @@ sealed class NearbyService : IDisposable
         {
             if (_cts is not null) return;   // отправка уже идёт
             epoch = _epoch;
+            if (_pause.IsPaused)
+            {
+                // официальное приложение запустили после начала поиска: отправка не начинается
+                Log.Write("share: choose refused, stack paused");
+                Post(epoch, () => Finished?.Invoke(false, Strings.CloseOfficialApp));
+                return;
+            }
             if (!_endpoints.TryGetValue(id, out target))
             {
                 // устройство пропало между кликом и выбором: плитка не должна остаться в «отправке»
@@ -222,13 +279,20 @@ sealed class NearbyService : IDisposable
                 connectCts.CancelAfter(ConnectTimeout);
                 await client.ConnectAsync(target.Address, target.Port, connectCts.Token).ConfigureAwait(false);
             }
-            var options = new SessionOptions(Environment.MachineName, DeviceKind.Laptop, new AnonymousIdentity()) { RemoteEndpointInfo = target.Info };
+            IShareIdentity identity = OwnIdentity(target) ?? (IShareIdentity)new AnonymousIdentity();   // идентичность фиксируется на старте отправки
+            // метка «своё» построена по рекламе, которую можно переиграть: для своих отправка требует проверенного ключа пира
+            var options = new SessionOptions(Environment.MachineName, DeviceKind.Laptop, identity)
+            {
+                RemoteEndpointInfo = target.Info,
+                RequireVerifiedPeer = identity is CertificateIdentity,
+            };
             var observer = new ProgressObserver(f => Post(epoch, () => Progress?.Invoke(f)));
             var result = await SendSession.SendFilesAsync(client.GetStream(), options, files, observer, ct).ConfigureAwait(false);
             Log.Write($"share: result {result.Status}");
             var reason = result.Status switch
             {
                 TransferStatus.Completed => truncated ? Strings.OnlyFirstFiles : null,
+                TransferStatus.Failed when result.Detail == TransferDetails.Unverified => Strings.SendUnverified,
                 TransferStatus.TimedOut => Strings.SendTimedOut,
                 TransferStatus.RejectedByPeer => Strings.SendRejected,
                 TransferStatus.CancelledByPeer => Strings.SendCancelled,
@@ -270,7 +334,11 @@ sealed class NearbyService : IDisposable
         try { browser?.Dispose(); } catch (Exception e) { Log.Write("share: browser dispose failed: " + Log.Describe(e)); }
     }
 
-    public void Dispose() => Cancel();
+    public void Dispose()
+    {
+        _identity.Changed -= OnIdentityChanged;
+        Cancel();
+    }
 
     // событие уходит на UI-поток и там ещё раз сверяется с актуальным сеансом
     void Post(int epoch, Action action) => _ui.TryEnqueue(() =>
