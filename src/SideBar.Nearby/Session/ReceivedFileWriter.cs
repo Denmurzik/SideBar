@@ -105,7 +105,8 @@ public sealed partial class ReceivedFileWriter(string directory)
 
     public static string DownloadsFolder()
     {
-        if (Environment.GetEnvironmentVariable(DownloadsOverrideVariable) is { Length: > 0 } overridden)
+        // действует и в Release (автотесты, e2e); относительные и «полуотносительные» значения игнорируются
+        if (Environment.GetEnvironmentVariable(DownloadsOverrideVariable) is { Length: > 0 } overridden && Path.IsPathFullyQualified(overridden))
             return overridden;
         var fallback = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
         var id = new Guid("374DE290-123F-4565-9164-39C4925E467B");

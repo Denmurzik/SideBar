@@ -60,6 +60,35 @@ public sealed class RobustnessTests : IDisposable
     }
 
     [Fact]
+    public async Task Peer_cancel_after_a_committed_file_still_reports_that_file()
+    {
+        var ct = Token();
+        using var link = await Link.OpenAsync(ct);
+        var saved = new List<string>();
+        var receive = ReceiveSession.ReceiveAsync(link.Server, new SessionOptions("Receiver"), _out, AcceptAll, new SavedRecorder(saved), ct);
+        await using var peer = await FakeSender.ConnectAsync(link.Client, ct);
+        await peer.IntroduceAsync(ct, TestFrames.File(7, 10, "a.bin"), TestFrames.File(8, 1_000_000, "b.bin"));
+        Assert.Equal(Share.ConnectionResponseFrame.Types.Status.Accept, await peer.ReadResponseAsync(ct));
+        await peer.SendOfflineAsync(TestFrames.FileChunk(7, 10, 0, new byte[10], false), ct);
+        await peer.SendOfflineAsync(TestFrames.FileChunk(7, 10, 10, [], true), ct);
+        await peer.SendOfflineAsync(TestFrames.FileChunk(8, 1_000_000, 0, new byte[1000], false), ct);
+        await peer.SendOfflineAsync(TestFrames.Control(8,
+            Conn.PayloadTransferFrame.Types.ControlMessage.Types.EventType.PayloadCanceled), ct);
+
+        var result = await receive;
+        Assert.Equal(TransferStatus.CancelledByPeer, result.Status);
+        var file = Assert.Single(result.Files);
+        Assert.True(File.Exists(file));
+        Assert.Equal(file, Assert.Single(saved));
+        Assert.Single(Directory.EnumerateFileSystemEntries(_out));   // b.bin.part is gone
+    }
+
+    private sealed class SavedRecorder(List<string> saved) : ITransferObserver
+    {
+        void ITransferObserver.FileSaved(string path) => saved.Add(path);
+    }
+
+    [Fact]
     public async Task Control_ack_frames_are_ignored()
     {
         var ct = Token();

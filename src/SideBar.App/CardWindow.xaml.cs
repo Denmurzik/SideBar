@@ -2,12 +2,14 @@ using System.Diagnostics;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Visibility = Microsoft.UI.Xaml.Visibility;   // SideBar.Core.Nearby.Visibility (Hidden/Everyone) конфликтует
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using SideBar.Core;
 using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Core.Motion;
 using SideBar.Core.Nearby;
+using SideBar.Core.Shelf;
 using SideBar.Native;
 using SideBar.Shelf;
 using Windows.Graphics;
@@ -27,6 +29,11 @@ public sealed partial class CardWindow : Window
     EdgeMode _mode;
     PanelState _state = PanelState.Hidden;
     bool _ticking, _raiseOnTick;
+    bool _bouncing, _pulsing;
+    double _pulseStart;
+    double _bounceStart;
+    double _bounceScale;
+    int _bounceLeft;
     bool IsShown { get => _shown; set { _shown = value; ZOrder.Visible = value; } }
     bool _shown;
     AlwaysActiveAcrylicBackdrop? _backdrop;
@@ -53,8 +60,102 @@ public sealed partial class CardWindow : Window
         Root.ActualThemeChanged += (_, _) => { ApplyStrokes(); _backdrop?.SetTheme(Root.ActualTheme); };
     }
 
+    /// <summary>Полка очищена корзиной: App закрывает веер.</summary>
+    public event Action? ShelfCleared;
+
+    ShelfService? _shelfService;
+    readonly ClearConfirm _clear = new();
+    DispatcherTimer? _clearTimer;
+    bool _hasItems, _clearHover, _dragging;
+
+    // корзина видна, пока на полке есть элементы и нет своего drag (_dragging); вооружение сбрасывается при любом изменении
+    void UpdateClear()
+    {
+        var visibility = _hasItems && !_dragging ? Visibility.Visible : Visibility.Collapsed;
+#if DEBUG
+        if (visibility != ShelfClear.Visibility) Log.Write("shelf trash " + visibility);   // хук для DragDriver C5
+#endif
+        ShelfClear.Visibility = visibility;
+        if (ShelfClear.Visibility == Visibility.Collapsed) { _clearHover = false; Disarm(); }   // PointerExited не придёт
+        else RenderClear();
+    }
+
+    void RenderClear()
+    {
+        bool armed = _clear.IsArmed(DateTimeOffset.UtcNow);
+#if DEBUG
+        armed |= _debugArmed;
+#endif
+        ShelfClearIcon.Opacity = armed ? 1 : _clearHover ? 0.9 : 0.5;
+        if (armed) ShelfClearIcon.Foreground = CriticalBrush();
+        else ShelfClearIcon.ClearValue(Microsoft.UI.Xaml.Controls.IconElement.ForegroundProperty);   // обратно к теме
+    }
+
+    static Brush CriticalBrush()
+    {
+        try { return (Brush)Application.Current.Resources["SystemFillColorCriticalBrush"]; }
+        catch (Exception) { return new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0x99, 0xA4)); }
+    }
+
+    void Disarm()
+    {
+        _clear.Reset();
+        _clearTimer?.Stop();
+        RenderClear();
+    }
+
+    void ShelfClear_Tapped(object sender, TappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+        PressClear();
+    }
+
+    // быстрый второй клик WinUI отдаёт как DoubleTapped, а не Tapped: это тоже второе нажатие
+    void ShelfClear_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+        PressClear();
+    }
+
+    void PressClear()
+    {
+        if (_shelfService is null) return;
+        var press = _clear.Press(DateTimeOffset.UtcNow);
+        if (press == ClearPress.Ignored) return;   // второе событие того же быстрого клика
+        if (press == ClearPress.Cleared)
+        {
+            Disarm();
+            try { _shelfService.Clear(); }
+            catch (Exception ex) { Log.Write("shelf clear failed: " + Log.Describe(ex)); }
+            ShelfCleared?.Invoke();
+            return;
+        }
+        _clearTimer ??= new DispatcherTimer { Interval = ClearConfirm.Window };
+        _clearTimer.Tick -= ClearTimerTick;
+        _clearTimer.Tick += ClearTimerTick;
+        _clearTimer.Stop();
+        _clearTimer.Start();
+        RenderClear();
+    }
+
+    void ClearTimerTick(object? sender, object e) => Disarm();
+    void ShelfClear_PointerEntered(object sender, PointerRoutedEventArgs e) { _clearHover = true; RenderClear(); }
+    void ShelfClear_PointerExited(object sender, PointerRoutedEventArgs e) { _clearHover = false; RenderClear(); }
+
+#if DEBUG
+    /// <summary>Скриншоты без ввода: SIDEBAR_DEBUG_CLEAR=armed вооружает корзину.</summary>
+    internal void DebugArmClear() { _debugArmed = true; RenderClear(); }
+    bool _debugArmed;
+#endif
+
     internal void BindShelf(ShelfService shelf)
     {
+        _shelfService = shelf;
+        // DragOut.Start асинхронный: IsActive в DragStarting ещё false, поэтому свой флаг
+        Stack.DragStarting += (_, _) => { _dragging = true; UpdateClear(); };
+        Stack.DropCompleted += (_, _) => { _dragging = false; UpdateClear(); };
+        Settled += state => { if (state == PanelState.Hidden && _dragging) { _dragging = false; UpdateClear(); } };   // потерянный DropCompleted
+        Stack.HasItemsChanged += has => { _hasItems = has; UpdateClear(); };
         Stack.HasItemsChanged += has => ShelfEmptyIcon.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         Stack.FanRequested += () => FanRequested?.Invoke();
         Stack.Bind(shelf);
@@ -80,11 +181,13 @@ public sealed partial class CardWindow : Window
         OwnItemsDropped?.Invoke(paths);
     }
 
-    internal void BindShare(ShareTileModel share)
+    internal void BindShare(ShareTileModel share, ReceiveTileModel recv, Action<int, bool> decide)
     {
         _share = share;
         Share.DeviceChosen += id => ShareDeviceChosen?.Invoke(id);
+        Share.BindReceive(recv, decide, () => SettledOpen);
         share.Changed += RenderShare;
+        recv.Changed += RenderShare;
         RenderShare();
     }
 
@@ -181,8 +284,79 @@ public sealed partial class CardWindow : Window
         });
     }
 
+    /// <summary>
+    /// Прыжок скрытой карточки у края (входящий запрос): три подскока с затуханием, затем снова скрыта. Только Slide и только из Hidden;
+    /// состояние автомата не меняется. false — прыжка не будет. Если курсор дошёл до края, <see cref="SetState"/> передаёт окно пружине с текущей позиции.
+    /// </summary>
+    public bool StartBounce()
+    {
+        if (_mode != EdgeMode.Slide || _state != PanelState.Hidden || _ticking || _bouncing) return false;
+        _bounceScale = _scale;
+        _bounceLeft = _layout.LeftFor(PanelState.Hidden);
+        _bounceStart = Now;
+        _bouncing = true;
+        SetClickThrough(true);
+        PlaceAt(_bounceLeft);
+        Show();
+        StartTicking();
+        return true;
+    }
+
+    /// <summary>Сигнал о запросе: прыжок у края (Slide) или пульс прозрачности на месте (InPlace). false — сигнала не будет.</summary>
+    public bool StartAttention() => _mode == EdgeMode.Slide ? StartBounce() : StartPulse();
+
+    /// <summary>InPlace: карточка на своём месте мигает 0 → 0.85 → 0 дважды, без активации. Из Hidden, состояние автомата не меняется.</summary>
+    bool StartPulse()
+    {
+        if (_mode != EdgeMode.InPlace || _state != PanelState.Hidden || _ticking || _pulsing) return false;
+        _pulsing = true;
+        SetClickThrough(true);
+        _pulseStart = Now;
+        Root.Opacity = 0;
+        PlaceAt(_layout.LeftFor(PanelState.Open));
+        Show();
+        StartTicking();
+        return true;
+    }
+
+    // во время сигнала окно не глотает клики (и XAML-содержимое не принимает нажатий)
+    void SetClickThrough(bool on)
+    {
+        Root.IsHitTestVisible = !on;
+        WindowFrame.SetClickThrough(_hwnd, on);
+    }
+
+    void EndPulse()
+    {
+        _pulsing = false;
+        SetClickThrough(false);
+        Root.Opacity = 0;
+        CompositionTarget.Rendering -= OnTick;
+        _ticking = false;
+        AppWindow.Hide();
+        IsShown = false;
+        Settled?.Invoke(PanelState.Hidden);   // обрезку working set делает App по Settled(Hidden), один раз
+    }
+
+    /// <summary>Карточка открыта и остановилась: только тогда кнопки запроса принимают нажатия.</summary>
+    public bool SettledOpen => _state == PanelState.Open && !_ticking && !_bouncing && !_pulsing;
+
+    void EndBounce()
+    {
+        _bouncing = false;
+        SetClickThrough(false);
+        CompositionTarget.Rendering -= OnTick;
+        _ticking = false;
+        AppWindow.Hide();
+        IsShown = false;
+        Settled?.Invoke(PanelState.Hidden);   // обрезку working set делает App по Settled(Hidden), один раз
+    }
+
     public void Relayout(CardLayout layout, EdgeMode mode, double scale)
     {
+        _bouncing = false;
+        _pulsing = false;
+        SetClickThrough(false);
         if (_ticking)
         {
             CompositionTarget.Rendering -= OnTick;
@@ -212,6 +386,21 @@ public sealed partial class CardWindow : Window
         if (s == prev) return;
         _state = s;
         double now = Now;
+        if (_bouncing)
+        {
+            // обычный автомат главнее прыжка: пружина продолжает с текущей позиции, без скачка
+            _bouncing = false;
+            SetClickThrough(false);
+            _pos.Reset(_bounceLeft);
+        }
+        if (_pulsing)
+        {
+            _pulsing = false;
+            SetClickThrough(false);
+            _fade.Reset(Root.Opacity * FadeScale);   // затухание продолжается с текущей прозрачности
+            _fade.Retarget(0, now);                  // если дальше открытие не последует, окно доугасает и скрывается
+            StartTicking();
+        }
 
         if (_mode == EdgeMode.Slide)
         {
@@ -259,6 +448,28 @@ public sealed partial class CardWindow : Window
 
     void OnTick(object? sender, object e)
     {
+        if (_pulsing)
+        {
+            double t = Now - _pulseStart;
+            if (t >= AttentionPulse.Duration.TotalSeconds) { EndPulse(); return; }
+            Root.Opacity = AttentionPulse.Opacity(t);
+            if (IsShown && _raiseOnTick) ZOrder.RaiseToTop(_hwnd);
+            _raiseOnTick = false;
+            return;
+        }
+        if (_bouncing)
+        {
+            double t = Now - _bounceStart;
+            if (t >= Bounce.Duration.TotalSeconds) { EndBounce(); return; }
+            _bounceLeft = _layout.LeftFor(PanelState.Hidden) - (int)Math.Min(Math.Round(Bounce.OffsetEpx(t) * _bounceScale), _layout.CardWidthPx);
+            WindowFrame.MoveTo(_hwnd, _bounceLeft, _layout.Top);
+#if DEBUG
+            Log.Write($"bounce t={t:F3} offset={_layout.LeftFor(PanelState.Hidden) - _bounceLeft}px");
+#endif
+            if (IsShown && _raiseOnTick) ZOrder.RaiseToTop(_hwnd);
+            _raiseOnTick = false;
+            return;
+        }
         bool slide = _mode == EdgeMode.Slide;
         var spring = slide ? _pos : _fade;
         spring.Step(Now);
@@ -281,6 +492,7 @@ public sealed partial class CardWindow : Window
             IsShown = false;
             WorkingSet.Trim();
         }
+        if (_state == PanelState.Open) Share.NotifyCardMoved();   // кнопки запроса вооружаются заново
         Settled?.Invoke(_state);
     }
 

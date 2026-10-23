@@ -18,6 +18,7 @@ public sealed class QuickShareAdvertiser : IDisposable
     private nint _instance;
     private nint _request;
     private nint _contextHandle;
+    private nint _cancel;   // DNS_SERVICE_CANCEL of the pending DnsServiceRegister; lives as long as the request
     private nint[] _strings = [];
 
     /// <param name="address">LAN address to announce, from <see cref="NetworkInfo.DefaultRouteInterface"/>.</param>
@@ -49,11 +50,17 @@ public sealed class QuickShareAdvertiser : IDisposable
         {
             var result = await completion.WaitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
             if (result != Native.StatusSuccess)
+            {
+                // the callback has run, nothing is pending any more
+                Cleanup();
                 throw new InvalidOperationException($"mDNS registration failed: {result}");
+            }
         }
-        catch (Exception)
+        catch (Exception e) when (e is TimeoutException or OperationCanceledException)
         {
-            Cleanup();
+            // Still pending: cancel it. DNS-SD may call back later with the request, instance and context, so
+            // none of them is freed here; they are abandoned on purpose (a few hundred bytes) and logged.
+            AbandonPending();
             throw;
         }
     }
@@ -89,6 +96,7 @@ public sealed class QuickShareAdvertiser : IDisposable
 
         var tcs = new TaskCompletionSource<uint>(TaskCreationOptions.RunContinuationsAsynchronously);
         _contextHandle = GCHandle.ToIntPtr(GCHandle.Alloc(tcs));
+        _cancel = (nint)NativeMemory.AllocZeroed((nuint)sizeof(Native.ServiceCancel));
         var request = (Native.RegisterRequest*)NativeMemory.AllocZeroed((nuint)sizeof(Native.RegisterRequest));
         _request = (nint)request;
         request->Version = Native.RequestVersion1;
@@ -97,7 +105,7 @@ public sealed class QuickShareAdvertiser : IDisposable
         request->Callback = (nint)(delegate* unmanaged[Stdcall]<uint, nint, nint, void>)&OnRegistered;
         request->Context = _contextHandle;
 
-        status = Native.DnsServiceRegister(request, null);
+        status = Native.DnsServiceRegister(request, (Native.ServiceCancel*)_cancel);
         return tcs.Task;
     }
 
@@ -106,6 +114,24 @@ public sealed class QuickShareAdvertiser : IDisposable
     {
         try { ((TaskCompletionSource<uint>)GCHandle.FromIntPtr(context).Target!).TrySetResult(status); }
         catch (Exception) { }
+    }
+
+    /// <summary>Cancels a pending register and leaves its native state to the OS: it is never freed while a callback can still arrive.</summary>
+    private unsafe void AbandonPending()
+    {
+        uint cancelStatus = 0;
+        if (_cancel != 0)
+        {
+            try { cancelStatus = Native.DnsServiceRegisterCancel((Native.ServiceCancel*)_cancel); }
+            catch (Exception) { cancelStatus = uint.MaxValue; }
+        }
+        NearbyLog.Write(new NearbyLogEvent("advertise.register.abandoned", null, $"cancel={cancelStatus}"));
+        // the memory stays allocated (deliberate leak); only our references are dropped
+        _instance = 0;
+        _request = 0;
+        _contextHandle = 0;
+        _cancel = 0;
+        _strings = [];
     }
 
     private unsafe void Unregister()
@@ -118,7 +144,17 @@ public sealed class QuickShareAdvertiser : IDisposable
             var request = (Native.RegisterRequest*)_request;
             request->Context = GCHandle.ToIntPtr(handle);
             var status = Native.DnsServiceDeRegister(request, null);
-            if (status == Native.StatusRequestPending) done.Task.Wait(TimeSpan.FromSeconds(2));
+            if (status == Native.StatusRequestPending && !done.Task.Wait(TimeSpan.FromSeconds(2)))
+            {
+                // the callback may still arrive and reads the context handle: leave request, instance and handle alone
+                NearbyLog.Write(new NearbyLogEvent("advertise.deregister.abandoned"));
+                _instance = 0;
+                _request = 0;
+                _cancel = 0;
+                _strings = [];
+                if (_contextHandle != 0) { GCHandle.FromIntPtr(_contextHandle).Free(); _contextHandle = 0; }
+                return;
+            }
             handle.Free();
         }
         Cleanup();
@@ -128,6 +164,7 @@ public sealed class QuickShareAdvertiser : IDisposable
     {
         if (_instance != 0) { Native.DnsServiceFreeInstance((Native.ServiceInstance*)_instance); _instance = 0; }
         if (_request != 0) { NativeMemory.Free((void*)_request); _request = 0; }
+        if (_cancel != 0) { NativeMemory.Free((void*)_cancel); _cancel = 0; }
         if (_contextHandle != 0) { GCHandle.FromIntPtr(_contextHandle).Free(); _contextHandle = 0; }
         foreach (var s in _strings) Marshal.FreeHGlobal(s);
         _strings = [];

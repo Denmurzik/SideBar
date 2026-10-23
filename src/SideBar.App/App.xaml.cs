@@ -7,6 +7,7 @@ using SideBar.Core.Nearby;
 using SideBar.Edge;
 using SideBar.Nearby;
 using SideBar.Shelf;
+using SideBar.Sharing;
 using SideBar.Tray;
 using WinRT.Interop;
 
@@ -33,9 +34,32 @@ public partial class App : Application
     ShelfService? _shelf;
     OleDropTarget.DropRegistration? _dropTarget;
     FanWindow? _fan;
+    Notifications? _notifications;
+    ReceiveHost? _receive;
+    readonly StackPause _stack = new();
+    OfficialAppWatcher? _official;
+    IdentityProvider? _identity;
+    readonly BumpGate _bump = new();
+    readonly AttentionBounce _attention = new();
+    readonly ReceiveTileModel _recv = new();
+#if DEBUG
+    Timer? _debugNote;
+    void DebugNote(string kind)
+    {
+        switch (kind)
+        {
+            case "file": _notifications?.Received(["C:/x/photo.jpg"], "Pixel 9"); break;
+            case "unsafe": _notifications?.Received(["C:/x/setup.exe"], "Pixel 9"); break;
+            case "link": _notifications?.SharedText("Pixel 9", SideBar.Nearby.Session.TextKind.Url, "https://example.com/page"); break;
+            case "text": _notifications?.SharedText("Pixel 9", SideBar.Nearby.Session.TextKind.Text, "Привет с телефона"); break;
+            case "cancel": _notifications?.Info("cancelled", Strings.SenderCancelled); break;
+        }
+    }
+#endif
+    bool _debugOpen = false;   // DEBUG: SIDEBAR_DEBUG_OPEN=1 держит карточку открытой для скриншотов
     ShareTileModel? _share;
     NearbyService? _nearby;
-    DispatcherTimer? _shareTimer;
+    DispatcherTimer? _tileTimer;
     volatile bool _shareActive;   // KeepsCardOpen для рабочего потока хука (клик вне карточки отменяет отправку)
     PxRect? _fanZone;   // под _gate: зона веера для проверки клика вне (рабочий поток хука)
 
@@ -49,17 +73,21 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _ui = DispatcherQueue.GetForCurrentThread();
+        ShareStaging.SweepStale();   // остатки аварийно завершённого прошлого запуска
         _shelf = new ShelfService();
         _shelf.Load();
         _window = new CardWindow();
         _window.BindShelf(_shelf);
         _window.FanRequested += OnFanRequested;
+        _window.ShelfCleared += () => _fan?.Hide();
+        _identity = new IdentityProvider();   // сертификаты нужны и плитке (метка «своё»), и приёму
+        _identity.Start();
         InitShare();
         _window.Settled += s =>
         {
-            if (s != PanelState.Hidden) return;
+            if (s != PanelState.Hidden) { RefreshTileHold(); return; }   // карточка показана: заметкам снова нужен таймер
             DragOut.Reset();
-            _trimmer.OnHidden();
+            CardHidden();
         };
 
         var (layout, mode, scale, primary) = Measure();
@@ -69,7 +97,7 @@ public partial class App : Application
         _primary = primary;
         _window.Initialize(layout, mode, scale);
         _machine = new EdgeStateMachine(layout, mode);
-        _trimmer.OnHidden();
+        CardHidden();
         // после первого Show (его ставит в очередь Initialize): к этому времени у окна есть дочерние HWND WinUI
         _ui.TryEnqueue(() =>
         {
@@ -82,23 +110,54 @@ public partial class App : Application
                 Log.Write("drop target registration failed, shelf drop disabled: " + Log.Describe(e));   // только полка отключается, карточка работает
             }
             Log.Write("ready");
+#if DEBUG
+            // скриншот глубокой стопки без ввода: SIDEBAR_DEBUG_FILL=<папка> кладёт на полку файлы папки (ссылками)
+            if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_FILL") is { Length: > 0 } fillDir && Directory.Exists(fillDir) && _shelf is not null)
+                foreach (var f in Directory.EnumerateFiles(fillDir).Order()) _shelf.Model.Add(f, SideBar.Core.Shelf.ShelfItemKind.Reference);
+            if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_OPEN") == "1")
+            {
+                _debugOpen = true;   // автомат мыши отключён, карточка открыта для скриншотов
+                _trimmer.OnShown();
+                _window?.SetState(PanelState.Open);
+                if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_CLEAR") == "armed") _window?.DebugArmClear();   // скриншот корзины в вооружённом виде
+            }
+#endif
         });
         _hook = new MouseHook(OnMouse, OnPrimaryDown);
         string exe = Environment.ProcessPath!;
         var autostart = new Autostart();
         try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
         _messages = new MessageWindow(OnDisplaysChanged);
-        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp));
+        _notifications = new Notifications(_ui, _messages.Handle, _recv);
+        _official = new OfficialAppWatcher();
+        _official.RunningChanged += running =>
+        {
+            Log.Write(running ? "official app running" : "official app stopped");
+            _stack.SetOfficialRunning(running);
+        };
+        _official.Poll();   // первое решение приёма уже учитывает процесс
+        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack);
+        _official.Start();
+#if DEBUG
+        if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.SetMode(SideBar.Core.Nearby.Visibility.Everyone, persist: false);   // автотест без клика по меню трея
+        // скриншоты заметок: каждые 6 с показывает заметку file | unsafe | link | text | cancel (с SIDEBAR_DEBUG_OPEN=1)
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_NOTE") is { Length: > 0 } noteKind)
+            _debugNote = new Timer(_ => _ui?.TryEnqueue(() => DebugNote(noteKind)), null, 3000, 6000);
+#endif
+        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused);
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
-        _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) _trimmer.OnHidden(); }), null, 2000, Timeout.Infinite);
+        _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) CardHidden(); }), null, 2000, Timeout.Infinite);
     }
+
+    // пока карточка открыта (в том числе удерживается запросом), обрезка working set не идёт: OnShown снимает таймер
+    void CardHidden() => _trimmer.OnHidden();
 
     void InitShare()
     {
         _share = new ShareTileModel();
-        _nearby = new NearbyService(_ui!);
-        _window!.BindShare(_share);
+        _nearby = new NearbyService(_ui!, _identity!, _stack);
+        _window!.BindShare(_share, _recv, (id, accept) => _notifications?.Decide(id, accept));
         _window.OwnItemsDropped += OnShareDrop;
         _share.Changed += OnShareChanged;
         _nearby.DeviceFound += _share.DeviceFound;
@@ -110,8 +169,62 @@ public partial class App : Application
             _share.Choose(id);
             if (_share.State == ShareTileState.Sending) _nearby.Choose(id);
         };
-        _shareTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
-        _shareTimer.Tick += (_, _) => _share.Tick(DateTimeOffset.UtcNow);
+        _recv.Changed += OnTileChanged;
+        _tileTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _tileTimer.Tick += (_, _) => OnTileTick();
+    }
+
+    // состояние приёма в плитке изменилось: удержание карточки и таймер
+    void OnTileChanged() => RefreshTileHold();
+
+    void OnTileTick()
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_share is { } share) share.Covered = _recv.HasConsent;   // запрос закрывает плитку: таймаут выбора стоит
+        _share?.Tick(now);
+        _recv.Tick(now, NoteVisible());
+        RefreshTileHold();
+        AttentionTick();
+    }
+
+    // заметка на экране: карточка Open/Peek, плитка показывает именно её
+    bool NoteVisible()
+    {
+        PanelState state;
+        lock (_gate) state = _machine?.State ?? PanelState.Hidden;
+        // Slide: Peek — полоска 10 epx, заметку не прочесть; InPlace: Peek показывает карточку целиком
+        bool shown = _debugOpen || state == PanelState.Open || (_mode == EdgeMode.InPlace && state != PanelState.Hidden);
+        return shown && _recv.Content(_share?.State ?? ShareTileState.Idle) == TileContent.Note;
+    }
+
+    // карточка открыта, пока идёт отправка/показ итога или ждёт запрос (плюс 1.5 с после последнего решения)
+    void RefreshTileHold()
+    {
+        var now = DateTimeOffset.UtcNow;
+        bool hold = (_share?.HoldsCardOpen ?? false) || _recv.HoldsCardOpen(now);
+        lock (_gate) { if (_machine is not null) _machine.HoldOpen = hold; }
+        bool needTick = (_share?.State ?? ShareTileState.Idle) != ShareTileState.Idle || _recv.NeedsTick(now, NoteVisible());
+        if (needTick)
+        {
+            if (_tileTimer is { IsEnabled: false }) { _recv.Resume(now); _tileTimer.Start(); }   // паузу таймера заметкам не засчитываем
+        }
+        else _tileTimer?.Stop();
+    }
+
+    // запрос ждёт решения, карточка спрятана: подпрыгивает сразу и затем раз в 10 с (как привлечение внимания в Dock)
+    void AttentionTick()
+    {
+        var machine = _machine;
+        if (machine is null || _window is null) return;
+        PanelState state;
+        PxRect primary;
+        lock (_gate) { state = machine.State; primary = _primary; }
+        if (!_attention.Due(Environment.TickCount64, _recv.HasConsent, state, () => FullscreenProbe.IsBusy(primary))) return;
+        if (_window.StartAttention())
+        {
+            Log.Write("edge attention cue");
+            _trimmer.OnShown();   // Settled(Hidden) в конце прыжка вернёт обрезку
+        }
     }
 
     bool IsOverShareTile(int x, int y) => _window?.QsTileScreenRect() is { } r && r.Contains(x, y);
@@ -120,19 +233,26 @@ public partial class App : Application
     void OnShareDrop(IReadOnlyList<string> paths)
     {
         if (_share is null || _nearby is null) return;
+        if (_stack.IsPaused)
+        {
+            ShareStaging.TakePending();   // копии временных файлов не нужны
+            if (_share.State is ShareTileState.Searching or ShareTileState.Choosing or ShareTileState.Sending)
+                Log.Write("share: drop ignored (paused)");   // идущий сеанс не трогаем
+            _share.ShowOfficialAppRunning(DateTimeOffset.UtcNow);
+            return;
+        }
         _share.BeginShare(paths, DateTimeOffset.UtcNow);
-        if (_share.State == ShareTileState.Searching) _nearby.StartShare(paths);
+        var staged = ShareStaging.TakePending();   // копии временных файлов делаются в фоне, отправка их дожидается
+        if (_share.State == ShareTileState.Searching) _nearby.StartShare(paths, staged);
     }
 
     void OnShareChanged()
     {
         bool keep = _share!.KeepsCardOpen;
         _shareActive = keep;
-        lock (_gate) { if (_machine is not null) _machine.HoldOpen = _share.HoldsCardOpen; }
-        if (_share.State == ShareTileState.Idle) _shareTimer?.Stop();
-        else _shareTimer?.Start();
+        RefreshTileHold();
         // поиск и соединение больше не нужны ни при итоге, ни при отмене; Cancel идемпотентна
-        if (!keep) _nearby?.Cancel();
+        if (!keep) { _nearby?.Cancel(); ShareStaging.Cleanup(); }   // копии временных файлов больше не нужны
         Log.Write($"share tile {_share.State}");
     }
 
@@ -141,9 +261,12 @@ public partial class App : Application
     {
         try
         {
+            try { _official?.Dispose(); } catch { }
             try { _nearby?.Dispose(); } catch { }
             try { _hook?.Dispose(); } catch { }
             try { _dropTarget?.Dispose(); } catch { }
+            try { _receive?.Dispose(); } catch { }
+            try { _identity?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
             try { _messages?.Dispose(); } catch { }
         }
@@ -170,6 +293,20 @@ public partial class App : Application
             _trimmer.OnShown();
             _window?.SetState(s);
         }
+    }
+
+    /// <summary>Один прыжок скрытой карточки (UI-поток), например по завершении принятой передачи; открытую или выглядывающую не трогаем.</summary>
+    void BounceOnce()
+    {
+        var machine = _machine;
+        if (machine is null || _window is null) return;
+        PxRect primary;
+        lock (_gate) { if (machine.State != PanelState.Hidden) return; primary = _primary; }
+        if (FullscreenProbe.IsBusy(primary)) return;   // то же подавление, что у края
+        if (!_bump.TryBump(Environment.TickCount64)) return;
+        if (!_window.StartAttention()) return;   // карточка уже в движении
+        Log.Write("edge attention cue (incoming)");
+        _trimmer.OnShown();   // Settled(Hidden) в конце прыжка вернёт обрезку working set
     }
 
     /// <summary>Клик по стопке (UI-поток): показать веер слева от открытой карточки.</summary>
@@ -237,10 +374,11 @@ public partial class App : Application
             _machine.Relayout(layout, mode);
         }
         _fan?.Hide();
-        _share?.Cancel();
+        // смена геометрии отменяет только поиск и выбор: идущая отправка доходит до конца (плитка перерисуется после Relayout)
+        if (_share?.State is ShareTileState.Searching or ShareTileState.Choosing) _share.Cancel();
         _window.Relayout(layout, mode, scale);
         _dropTarget?.Refresh();   // WinUI может пересоздать дочерние HWND при смене DPI/дисплея
-        _trimmer.OnHidden();   // Relayout не поднимает Settled
+        CardHidden();   // Relayout не поднимает Settled
     }
 
     (CardLayout layout, EdgeMode mode, double scale, PxRect primary) Measure()
@@ -258,7 +396,7 @@ public partial class App : Application
     {
         var machine = _machine;
         var hook = _hook;
-        if (machine is null) return;
+        if (machine is null || _debugOpen) return;
 
         bool button = PrimaryButton.IsDown();
         PxRect primary;

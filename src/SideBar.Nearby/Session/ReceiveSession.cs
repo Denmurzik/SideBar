@@ -21,6 +21,7 @@ public static class ReceiveSession
         var identity = options.ResolvedIdentity;
         Directory.CreateDirectory(outputDirectory);
         var incoming = new Dictionary<long, IncomingTarget>();
+        var saved = new List<string>();   // survives a failure: files committed before it are still reported
 
         await using var connection = new NearbyConnection(stream, "receive", options);
         // A peer that connects and then stalls must not hold the session: the plaintext handshake has its own deadline.
@@ -58,8 +59,9 @@ public static class ReceiveSession
 
             // 3. Paired key, Introduction, consent, file chunks.
             var accepted = false;
-            var saved = new List<string>();
             var introduced = false;
+            var peerVerified = false;
+            var gotPeerKey = false;
             long totalSize = 0, receivedTotal = 0;
             var texts = new List<Share.TextMetadata>();
             var pendingTexts = new HashSet<long>();
@@ -88,6 +90,7 @@ public static class ReceiveSession
                     target.Path = target.Writer.Commit();
                     target.Done = true;
                     saved.Add(target.Path);
+                    observer.FileSaved(target.Path);
                 }
                 return incoming.Values.All(t => t.Done) && pendingTexts.Count == 0;
             }
@@ -122,6 +125,9 @@ public static class ReceiveSession
                             if (v1.PairedKeyEncryption is null)
                                 throw new InvalidDataException("PairedKeyEncryption frame without a body.");
                             var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Receiver, remoteInfo);
+                            // Only the first key, and only if it arrived before the Introduction, counts; later ones are answered but ignored.
+                            if (!introduced && !gotPeerKey) peerVerified = status == Share.PairedKeyResultFrame.Types.Status.Success;
+                            gotPeerKey = true;
                             await connection.SendSharingAsync(SharingFrames.PairedKeyResult(status), ct);
                             break;
 
@@ -133,6 +139,12 @@ public static class ReceiveSession
                                 throw new InvalidDataException("Duplicate Introduction.");
                             introduced = true;
                             var introduction = v1.Introduction ?? throw new InvalidDataException("Introduction frame without a body.");
+                            if (options.RejectUnverified && !peerVerified)
+                            {
+                                await connection.SendSharingAsync(SharingFrames.Response(
+                                    Share.ConnectionResponseFrame.Types.Status.Reject), ct);
+                                return new TransferResult(TransferStatus.RejectedByPeer, saved, TransferDetails.Unverified);
+                            }
                             var files = introduction.FileMetadata;
                             var announcedTexts = introduction.TextMetadata;
                             var hasWifi = introduction.WifiCredentialsMetadata.Count > 0;
@@ -166,7 +178,7 @@ public static class ReceiveSession
                                     ? Share.ConnectionResponseFrame.Types.Status.Reject
                                     : Share.ConnectionResponseFrame.Types.Status.UnsupportedAttachmentType), ct);
                                 return hasWifi
-                                    ? new TransferResult(TransferStatus.RejectedByPeer, saved, "wifi-unsupported")
+                                    ? new TransferResult(TransferStatus.RejectedByPeer, saved, TransferDetails.WifiUnsupported)
                                     : new TransferResult(TransferStatus.Failed, saved, "Introduction has no files.");
                             }
 
@@ -177,7 +189,7 @@ public static class ReceiveSession
                             {
                                 await connection.SendSharingAsync(SharingFrames.Response(
                                     Share.ConnectionResponseFrame.Types.Status.Reject), ct);
-                                return new TransferResult(TransferStatus.RejectedByPeer, saved, "not-enough-space");
+                                return new TransferResult(TransferStatus.RejectedByPeer, saved, TransferDetails.NotEnoughSpace);
                             }
 
                             var offer = new IncomingTransfer(pin, senderName,
@@ -185,6 +197,8 @@ public static class ReceiveSession
                             {
                                 Texts = announcedTexts.Select(t => new IncomingText(MapKind(t.Type), t.Size)).ToList(),
                                 HasWifiCredentials = hasWifi,
+                                Verified = peerVerified,
+                                VerifiedName = peerVerified && remoteInfo is not null ? identity.TryGetPeerName(remoteInfo) : null,
                             };
                             observer.Status("Waiting for the user's decision...");
                             // Only the wait for the user is bounded; the peer's keep-alives are not read meanwhile.
@@ -234,11 +248,11 @@ public static class ReceiveSession
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return new TransferResult(TransferStatus.TimedOut, [], "Handshake timed out.");
+            return new TransferResult(TransferStatus.TimedOut, saved, "Handshake timed out.");
         }
         catch (Exception e) when (SessionErrors.IsHandled(e))
         {
-            return SessionErrors.ToResult(e);
+            return SessionErrors.ToResult(e, saved);
         }
     }
 

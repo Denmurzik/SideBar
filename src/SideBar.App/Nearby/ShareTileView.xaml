@@ -12,24 +12,28 @@
         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="4">
           <FontIcon x:Name="SlotIcon0" FontFamily="Segoe Fluent Icons" FontSize="32" Foreground="{ThemeResource TextFillColorPrimaryBrush}"/>
           <TextBlock x:Name="SlotName0" FontSize="12" MaxLines="1" MaxWidth="80" TextTrimming="CharacterEllipsis" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+          <TextBlock x:Name="SlotOwn0" FontSize="10" MaxLines="1" TextAlignment="Center" Margin="0,-3,0,0" Visibility="Collapsed" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
         </StackPanel>
       </Grid>
       <Grid x:Name="Slot1" Grid.Row="0" Grid.Column="1" Background="#00FFFFFF" CornerRadius="4" Margin="2" Padding="2,6" Visibility="Collapsed">
         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="4">
           <FontIcon x:Name="SlotIcon1" FontFamily="Segoe Fluent Icons" FontSize="32" Foreground="{ThemeResource TextFillColorPrimaryBrush}"/>
           <TextBlock x:Name="SlotName1" FontSize="12" MaxLines="1" MaxWidth="80" TextTrimming="CharacterEllipsis" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+          <TextBlock x:Name="SlotOwn1" FontSize="10" MaxLines="1" TextAlignment="Center" Margin="0,-3,0,0" Visibility="Collapsed" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
         </StackPanel>
       </Grid>
       <Grid x:Name="Slot2" Grid.Row="1" Grid.Column="0" Background="#00FFFFFF" CornerRadius="4" Margin="2" Padding="2,6" Visibility="Collapsed">
         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="4">
           <FontIcon x:Name="SlotIcon2" FontFamily="Segoe Fluent Icons" FontSize="32" Foreground="{ThemeResource TextFillColorPrimaryBrush}"/>
           <TextBlock x:Name="SlotName2" FontSize="12" MaxLines="1" MaxWidth="80" TextTrimming="CharacterEllipsis" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+          <TextBlock x:Name="SlotOwn2" FontSize="10" MaxLines="1" TextAlignment="Center" Margin="0,-3,0,0" Visibility="Collapsed" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
         </StackPanel>
       </Grid>
       <Grid x:Name="Slot3" Grid.Row="1" Grid.Column="1" Background="#00FFFFFF" CornerRadius="4" Margin="2" Padding="2,6" Visibility="Collapsed">
         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="4">
           <FontIcon x:Name="SlotIcon3" FontFamily="Segoe Fluent Icons" FontSize="32" Foreground="{ThemeResource TextFillColorPrimaryBrush}"/>
           <TextBlock x:Name="SlotName3" FontSize="12" MaxLines="1" MaxWidth="80" TextTrimming="CharacterEllipsis" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+          <TextBlock x:Name="SlotOwn3" FontSize="10" MaxLines="1" TextAlignment="Center" Margin="0,-3,0,0" Visibility="Collapsed" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
         </StackPanel>
       </Grid>
     </Grid>
@@ -42,5 +46,8 @@
       </Grid>
       <TextBlock x:Name="ChosenText" FontSize="12" MaxLines="3" MaxWidth="160" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
     </StackPanel>
+
+    <StackPanel x:Name="ConsentPanel" Margin="8" VerticalAlignment="Center" Spacing="10" Visibility="Collapsed"/>
+    <Grid x:Name="NotePanel" Margin="8" RowDefinitions="*,Auto" RowSpacing="8" Visibility="Collapsed"/>
   </Grid>
 </UserControl>

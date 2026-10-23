@@ -24,6 +24,9 @@ public interface IShareIdentity
     /// <summary>Verifies the peer's PairedKeyEncryption frame and returns the status to send back.</summary>
     PairedKeyResultFrame.Types.Status VerifyPairedKey(
         PairedKeyEncryptionFrame frame, ReadOnlySpan<byte> authString, PairedKeyRole role, EndpointInfo? remote);
+
+    /// <summary>Device name from the certificate of the peer that advertised <paramref name="info"/>; null when unknown.</summary>
+    string? TryGetPeerName(EndpointInfo info) => null;
 }
 
 /// <summary>Our role in the transfer; the signed payload is prefixed with 0x01 (sender) or 0x02 (receiver).</summary>

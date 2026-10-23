@@ -298,4 +298,40 @@ public class ShareTileModelTests
         Assert.Null(machine.Update(new Edge.EdgeInput(100, 100, false, false, 4000)));
         Assert.Equal(PanelState.Hidden, machine.Update(new Edge.EdgeInput(100, 100, false, false, 4300)));
     }
+
+    [Fact]
+    public void Choose_timeout_does_not_run_while_a_consent_covers_the_tile()
+    {
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var m = new ShareTileModel();
+        m.BeginShare(["a"], t0);
+        m.Tick(t0.AddSeconds(30));
+        m.Covered = true;
+        m.Tick(t0.AddSeconds(31));
+        m.Tick(t0.AddSeconds(120));
+        Assert.Equal(ShareTileState.Searching, m.State);
+        m.Covered = false;
+        m.Tick(t0.AddSeconds(121));
+        m.Tick(t0.AddSeconds(149));
+        Assert.Equal(ShareTileState.Searching, m.State);   // 30 s before the cover + 29 s after: 59 of 60 used
+        m.Tick(t0.AddSeconds(151));
+        Assert.Equal(ShareTileState.Failed, m.State);
+    }
+
+    [Fact]
+    public void Tile_marks_own_devices()
+    {
+        var m = new ShareTileModel();
+        m.BeginShare(["a.txt"], T0);
+        m.DeviceFound(new DeviceView("pixel", "Pixel 9", ShareDeviceKind.Phone, IsOwn: true));
+        m.DeviceFound(new DeviceView("stranger", "Pixel 9", ShareDeviceKind.Phone));
+
+        Assert.Equal(2, m.Devices.Count);
+        Assert.True(m.Devices.Single(d => d.Id == "pixel").IsOwn);
+        Assert.False(m.Devices.Single(d => d.Id == "stranger").IsOwn);
+
+        // the same instance re-announced without the mark is no longer own
+        m.DeviceFound(new DeviceView("pixel", "Pixel 9", ShareDeviceKind.Phone));
+        Assert.False(m.Devices.Single(d => d.Id == "pixel").IsOwn);
+    }
 }

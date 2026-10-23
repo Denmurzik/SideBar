@@ -91,6 +91,9 @@ internal static unsafe partial class DnsSdNative
     public static partial uint DnsServiceRegister(RegisterRequest* request, ServiceCancel* cancel);
 
     [LibraryImport("dnsapi.dll")]
+    public static partial uint DnsServiceRegisterCancel(ServiceCancel* cancel);
+
+    [LibraryImport("dnsapi.dll")]
     public static partial uint DnsServiceDeRegister(RegisterRequest* request, ServiceCancel* cancel);
 
     [LibraryImport("dnsapi.dll")]

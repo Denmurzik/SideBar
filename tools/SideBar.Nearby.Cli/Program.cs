@@ -2,14 +2,17 @@ using System.Net;
 using System.Net.Sockets;
 using SideBar.Nearby;
 using SideBar.Nearby.Discovery;
+using SideBar.Nearby.Identity;
 using SideBar.Nearby.Session;
 using SideBar.Nearby.Wire;
 
 const string Usage = """
     nearby discover [--timeout SEC] [--include-local]
-    nearby send <file>... [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local]
+    nearby send <file>... [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local] [--self [--dir SHARING_DIR]]
     nearby send --text "..." [--url] [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local]
     nearby receive [--out DIR] [--yes] [--name DEVICE_NAME] [--reannounce SEC]
+    nearby identity-check [--dir SHARING_DIR]   (read-only summary of the official Quick Share certificates)
+    (--self: sign with the Quick Share certificates of this PC, as an own device; --dir overrides the Sharing directory)
     (--trace: print frame kinds and sizes in both directions, no payload content)
     """;
 
@@ -21,6 +24,13 @@ var options = new CliOptions(rest);
 var deviceName = options.Value("--name") ?? Environment.MachineName;
 
 var session = new SessionOptions(deviceName);
+if (options.Flag("--self"))
+{
+    var dir = options.Value("--dir") ?? OfficialCertificateStore.DefaultSharingDirectory;
+    using var store = new OfficialCertificateStore(dir, () => DateTimeOffset.UtcNow);
+    if (!store.TryLoad(out var identity, out var failure)) return Fail($"--self: certificates unavailable ({failure})");
+    session = session with { Identity = identity };
+}
 if (options.Flag("--trace"))
     NearbyLog.Log = e => Console.WriteLine($"[trace] {e.Kind}{(e.Size is null ? "" : " " + e.Size)}{(e.Value is null ? "" : " " + e.Value)}");
 
@@ -34,6 +44,7 @@ try
         "discover" => await Discover(options, cts.Token),
         "send" => await Send(options, session, cts.Token),
         "receive" => await Receive(options, session, cts.Token),
+        "identity-check" => IdentityCheck(options),
         _ => Fail(Usage),
     };
 }
@@ -41,6 +52,26 @@ catch (OperationCanceledException)
 {
     Console.WriteLine("Cancelled.");
     return 130;
+}
+
+// Prints a summary only: counts, expiry and device names. No keys, tokens, accounts or raw data.
+static int IdentityCheck(CliOptions options)
+{
+    var dir = options.Value("--dir") ?? OfficialCertificateStore.DefaultSharingDirectory;
+    using var store = new OfficialCertificateStore(dir, () => DateTimeOffset.UtcNow);
+    if (!store.TryLoad(out var identity, out var failure))
+    {
+        Console.WriteLine($"identity-check: certificates unavailable ({failure})");
+        return 1;
+    }
+    var s = store.Summary!;
+    Console.WriteLine($"selected visibility: {s.SelectedVisibility}");
+    Console.WriteLine($"private certificates: {s.PrivateCount}, public certificates: {s.PublicCount}");
+    Console.WriteLine($"peers: {s.PeerCount}");
+    Console.WriteLine($"next expiry: {s.NextExpiry.ToUniversalTime():yyyy-MM-dd HH:mm:ss}Z");
+    Console.WriteLine($"self signature check: {(identity!.SelfTestSignature() ? "ok" : "FAILED")}");
+    foreach (var name in s.PeerNames) Console.WriteLine($"  peer device: {name}");
+    return 0;
 }
 
 static int Fail(string message)
@@ -204,7 +235,7 @@ internal sealed class ConsoleObserver : ITransferObserver
 
 internal sealed class CliOptions
 {
-    private static readonly HashSet<string> Flags = ["--yes", "--trace", "--include-local", "--url"];
+    private static readonly HashSet<string> Flags = ["--yes", "--trace", "--include-local", "--url", "--self"];
     private readonly Dictionary<string, string> _values = new();
     private readonly HashSet<string> _flags = [];
     public List<string> Positional { get; } = [];
