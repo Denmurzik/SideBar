@@ -81,6 +81,12 @@ sealed class NearbyService : IDisposable
         return (files, truncated);
     }
 
+    /// <summary>Идёт поиск устройств или отправка.</summary>
+    public bool Busy
+    {
+        get { lock (_gate) return _browser is not null || _cts is not null; }
+    }
+
     /// <summary>Начинает поиск устройств; предыдущий сеанс отменяется. UI-поток.</summary>
     public void StartShare(IReadOnlyList<string> paths, Task<IReadOnlyList<string>>? staged = null)
     {

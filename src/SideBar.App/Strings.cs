@@ -141,4 +141,14 @@ static class Strings
     public const string AboutLicenseValue = "GNU GPLv3";
     public const string AboutRepo = "Репозиторий";
     public const string AboutRepoLink = "github.com/Denmurzik/SideBar";
+
+    public const string RefreshCertsNow = "Обновить сертификаты сейчас";
+    public const string RefreshDone = "Сертификаты обновлены";
+    public const string RefreshNotInstalled = "Quick Share не установлен";
+    public const string RefreshOfficialOpen = "Quick Share уже открыт";
+    public const string RefreshDeferred = "Обновление отложено";
+    public const string RefreshFailed = "Не удалось обновить";
+    public const string CertsStale = "Не удаётся обновить сертификаты Quick Share — откройте официальное приложение Quick Share один раз";
+    public const string OfficialResident = "Официальный Quick Share запущен — SideBar на паузе. Закройте его в трее, чтобы SideBar принимал файлы";
+    public const string OfficialLeftover = "Обновление сертификатов не завершилось — официальный Quick Share остался открытым. Закройте его в трее, чтобы SideBar принимал файлы";
 }

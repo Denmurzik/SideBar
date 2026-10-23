@@ -51,6 +51,9 @@ sealed class IdentityProvider : IDisposable
         _store.StartWatching();
     }
 
+    /// <summary>Перечитать сертификаты (после цикла обновления M5). Блокирует до 0,4 с: звать с потока пула, не с UI.</summary>
+    public void Reload() => OnFilesChanged();
+
     void OnFilesChanged()
     {
         Load();

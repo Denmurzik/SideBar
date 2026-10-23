@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Фиктивный nearby_share.exe для проверок M5: окно класса Google.Windows.NearbyShare, маркер в логе. Окно не показывается, кроме режима show: там оно ненадолго показывается вне экрана (x,y = -32000). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>nearby_share_sim</AssemblyName>
+    <RootNamespace>SideBar.OfficialSim</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+</Project>

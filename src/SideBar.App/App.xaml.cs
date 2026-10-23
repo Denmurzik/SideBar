@@ -45,11 +45,12 @@ public partial class App : Application
     readonly StackPause _stack = new();
     OfficialAppWatcher? _official;
     IdentityProvider? _identity;
+    OfficialRefreshHost? _refresh;
     readonly BumpGate _bump = new();
     readonly AttentionBounce _attention = new();
     readonly ReceiveTileModel _recv = new();
 #if DEBUG
-    Timer? _debugNote;
+    Timer? _debugNote, _debugRefresh;
     void DebugNote(string kind)
     {
         switch (kind)
@@ -146,13 +147,20 @@ public partial class App : Application
         _official.Poll();   // первое решение приёма уже учитывает процесс
         _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack, _settings);
         _official.Start();
+        _refresh = new OfficialRefreshHost(_stack, _identity, _notifications, _official, () => _receive.Busy || (_nearby?.Busy ?? false));   // Settings Task 3: передать AppSettings.OfficialExePath
+        _refresh.Start();
+        SettingsWindow.RefreshCertificatesNow = RefreshCertificatesNow;   // кнопка «Обновить» в настройках
 #if DEBUG
         if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.SetMode(SideBar.Core.Nearby.Visibility.Everyone, persist: false);   // автотест без клика по меню трея
+        // живой цикл M5 без клика по трею: SIDEBAR_DEBUG_REFRESH=1 запускает «Обновить сертификаты сейчас» через 5 с после старта
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_REFRESH") == "1")
+            _debugRefresh = new Timer(_ => _ = _refresh?.RefreshNowAsync(), null, 5000, Timeout.Infinite);
         // скриншоты заметок: каждые 6 с показывает заметку file | unsafe | link | text | cancel (с SIDEBAR_DEBUG_OPEN=1)
         if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_NOTE") is { Length: > 0 } noteKind)
             _debugNote = new Timer(_ => _ui?.TryEnqueue(() => DebugNote(noteKind)), null, 3000, 6000);
 #endif
-        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused) { OpenSettings = () => ShowSettings() };
+        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused,
+            () => _ = _refresh.RefreshNowAsync(), () => _refresh.Busy) { OpenSettings = () => ShowSettings() };
         InitUpdates();
 #if DEBUG
         // скриншоты без ввода: SIDEBAR_DEBUG_SETTINGS=<0..4> открывает окно настроек на нужном разделе
@@ -322,11 +330,15 @@ public partial class App : Application
         Log.Write($"share tile {_share.State}");
     }
 
+    /// <summary>«Обновить сертификаты сейчас» для окна настроек: цикл на пуле, итог — заметкой в плитке.</summary>
+    public Func<Task> RefreshCertificatesNow => () => _refresh?.RefreshNowAsync() ?? Task.CompletedTask;
+
     // порядок важен: сначала снять хук, затем убрать иконку
     void ExitApp()
     {
         try
         {
+            try { _refresh?.Dispose(); } catch { }
             try { _official?.Dispose(); } catch { }
             try { _nearby?.Dispose(); } catch { }
             try { _hook?.Dispose(); } catch { }
