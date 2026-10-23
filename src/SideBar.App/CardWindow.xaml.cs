@@ -27,6 +27,11 @@ public sealed partial class CardWindow : Window
     EdgeMode _mode;
     PanelState _state = PanelState.Hidden;
     bool _ticking, _raiseOnTick;
+    bool _bouncing, _pulsing;
+    double _pulseStart;
+    double _bounceStart;
+    double _bounceScale;
+    int _bounceLeft;
     bool IsShown { get => _shown; set { _shown = value; ZOrder.Visible = value; } }
     bool _shown;
     AlwaysActiveAcrylicBackdrop? _backdrop;
@@ -80,11 +85,13 @@ public sealed partial class CardWindow : Window
         OwnItemsDropped?.Invoke(paths);
     }
 
-    internal void BindShare(ShareTileModel share)
+    internal void BindShare(ShareTileModel share, ReceiveTileModel recv, Action<int, bool> decide)
     {
         _share = share;
         Share.DeviceChosen += id => ShareDeviceChosen?.Invoke(id);
+        Share.BindReceive(recv, decide, () => SettledOpen);
         share.Changed += RenderShare;
+        recv.Changed += RenderShare;
         RenderShare();
     }
 
@@ -181,8 +188,79 @@ public sealed partial class CardWindow : Window
         });
     }
 
+    /// <summary>
+    /// Прыжок скрытой карточки у края (входящий запрос): три подскока с затуханием, затем снова скрыта. Только Slide и только из Hidden;
+    /// состояние автомата не меняется. false — прыжка не будет. Если курсор дошёл до края, <see cref="SetState"/> передаёт окно пружине с текущей позиции.
+    /// </summary>
+    public bool StartBounce()
+    {
+        if (_mode != EdgeMode.Slide || _state != PanelState.Hidden || _ticking || _bouncing) return false;
+        _bounceScale = _scale;
+        _bounceLeft = _layout.LeftFor(PanelState.Hidden);
+        _bounceStart = Now;
+        _bouncing = true;
+        SetClickThrough(true);
+        PlaceAt(_bounceLeft);
+        Show();
+        StartTicking();
+        return true;
+    }
+
+    /// <summary>Сигнал о запросе: прыжок у края (Slide) или пульс прозрачности на месте (InPlace). false — сигнала не будет.</summary>
+    public bool StartAttention() => _mode == EdgeMode.Slide ? StartBounce() : StartPulse();
+
+    /// <summary>InPlace: карточка на своём месте мигает 0 → 0.85 → 0 дважды, без активации. Из Hidden, состояние автомата не меняется.</summary>
+    bool StartPulse()
+    {
+        if (_mode != EdgeMode.InPlace || _state != PanelState.Hidden || _ticking || _pulsing) return false;
+        _pulsing = true;
+        SetClickThrough(true);
+        _pulseStart = Now;
+        Root.Opacity = 0;
+        PlaceAt(_layout.LeftFor(PanelState.Open));
+        Show();
+        StartTicking();
+        return true;
+    }
+
+    // во время сигнала окно не глотает клики (и XAML-содержимое не принимает нажатий)
+    void SetClickThrough(bool on)
+    {
+        Root.IsHitTestVisible = !on;
+        WindowFrame.SetClickThrough(_hwnd, on);
+    }
+
+    void EndPulse()
+    {
+        _pulsing = false;
+        SetClickThrough(false);
+        Root.Opacity = 0;
+        CompositionTarget.Rendering -= OnTick;
+        _ticking = false;
+        AppWindow.Hide();
+        IsShown = false;
+        Settled?.Invoke(PanelState.Hidden);   // обрезку working set делает App по Settled(Hidden), один раз
+    }
+
+    /// <summary>Карточка открыта и остановилась: только тогда кнопки запроса принимают нажатия.</summary>
+    public bool SettledOpen => _state == PanelState.Open && !_ticking && !_bouncing && !_pulsing;
+
+    void EndBounce()
+    {
+        _bouncing = false;
+        SetClickThrough(false);
+        CompositionTarget.Rendering -= OnTick;
+        _ticking = false;
+        AppWindow.Hide();
+        IsShown = false;
+        Settled?.Invoke(PanelState.Hidden);   // обрезку working set делает App по Settled(Hidden), один раз
+    }
+
     public void Relayout(CardLayout layout, EdgeMode mode, double scale)
     {
+        _bouncing = false;
+        _pulsing = false;
+        SetClickThrough(false);
         if (_ticking)
         {
             CompositionTarget.Rendering -= OnTick;
@@ -212,6 +290,21 @@ public sealed partial class CardWindow : Window
         if (s == prev) return;
         _state = s;
         double now = Now;
+        if (_bouncing)
+        {
+            // обычный автомат главнее прыжка: пружина продолжает с текущей позиции, без скачка
+            _bouncing = false;
+            SetClickThrough(false);
+            _pos.Reset(_bounceLeft);
+        }
+        if (_pulsing)
+        {
+            _pulsing = false;
+            SetClickThrough(false);
+            _fade.Reset(Root.Opacity * FadeScale);   // затухание продолжается с текущей прозрачности
+            _fade.Retarget(0, now);                  // если дальше открытие не последует, окно доугасает и скрывается
+            StartTicking();
+        }
 
         if (_mode == EdgeMode.Slide)
         {
@@ -259,6 +352,28 @@ public sealed partial class CardWindow : Window
 
     void OnTick(object? sender, object e)
     {
+        if (_pulsing)
+        {
+            double t = Now - _pulseStart;
+            if (t >= AttentionPulse.Duration.TotalSeconds) { EndPulse(); return; }
+            Root.Opacity = AttentionPulse.Opacity(t);
+            if (IsShown && _raiseOnTick) ZOrder.RaiseToTop(_hwnd);
+            _raiseOnTick = false;
+            return;
+        }
+        if (_bouncing)
+        {
+            double t = Now - _bounceStart;
+            if (t >= Bounce.Duration.TotalSeconds) { EndBounce(); return; }
+            _bounceLeft = _layout.LeftFor(PanelState.Hidden) - (int)Math.Min(Math.Round(Bounce.OffsetEpx(t) * _bounceScale), _layout.CardWidthPx);
+            WindowFrame.MoveTo(_hwnd, _bounceLeft, _layout.Top);
+#if DEBUG
+            Log.Write($"bounce t={t:F3} offset={_layout.LeftFor(PanelState.Hidden) - _bounceLeft}px");
+#endif
+            if (IsShown && _raiseOnTick) ZOrder.RaiseToTop(_hwnd);
+            _raiseOnTick = false;
+            return;
+        }
         bool slide = _mode == EdgeMode.Slide;
         var spring = slide ? _pos : _fade;
         spring.Step(Now);
@@ -281,6 +396,7 @@ public sealed partial class CardWindow : Window
             IsShown = false;
             WorkingSet.Trim();
         }
+        if (_state == PanelState.Open) Share.NotifyCardMoved();   // кнопки запроса вооружаются заново
         Settled?.Invoke(_state);
     }
 

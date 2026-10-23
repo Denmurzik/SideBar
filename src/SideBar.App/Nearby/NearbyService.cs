@@ -75,7 +75,7 @@ sealed class NearbyService : IDisposable
     }
 
     /// <summary>Начинает поиск устройств; предыдущий сеанс отменяется. UI-поток.</summary>
-    public void StartShare(IReadOnlyList<string> paths)
+    public void StartShare(IReadOnlyList<string> paths, Task<IReadOnlyList<string>>? staged = null)
     {
         Cancel();
         int epoch;
@@ -87,7 +87,12 @@ sealed class NearbyService : IDisposable
             _expandCts = new CancellationTokenSource();
             var token = _expandCts.Token;
             // перечисление каталогов может быть долгим: не на UI-потоке, отменяется вместе с сеансом
-            files = _files = Task.Run(() => ExpandFiles(paths, token), token);
+            files = _files = Task.Run(async () =>
+            {
+                // временные файлы копируются в фоне (дескрипторы открыты в момент drop); поиск устройств тем временем идёт
+                var resolved = staged is null ? paths : await staged.WaitAsync(token).ConfigureAwait(false);
+                return ExpandFiles(resolved, token);
+            }, token);
         }
         _ = files.ContinueWith(t =>
         {
@@ -129,7 +134,7 @@ sealed class NearbyService : IDisposable
             if (_lostGrace.Remove(endpoint.InstanceName, out var pending)) pending.Dispose();
         }
         Log.Write($"share: device found, kind {endpoint.Kind}");
-        var view = new DeviceView(endpoint.InstanceName, endpoint.DisplayName, Map(endpoint.Kind));
+        var view = new DeviceView(endpoint.InstanceName, DisplayText.SanitizeName(endpoint.DisplayName, Strings.UnknownDevice), Map(endpoint.Kind));   // имя из mDNS задаёт пир
         Post(epoch, () => DeviceFound?.Invoke(view));
     }
 

@@ -24,6 +24,14 @@ public sealed class VisibilityModel
         Changed?.Invoke();
     }
 
+    public void Disable()
+    {
+        if (Current == Visibility.Hidden) return;
+        Current = Visibility.Hidden;
+        EveryoneUntil = null;
+        Changed?.Invoke();
+    }
+
     public void Tick(DateTimeOffset now)
     {
         if (Current != Visibility.Everyone || EveryoneUntil is not { } until || now < until) return;

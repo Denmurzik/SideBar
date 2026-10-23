@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
+    branches: ['**']
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,6 +25,11 @@ jobs:
 
       - name: Build Nearby tests
         run: dotnet build tests/SideBar.Nearby.Tests -c Release
+
+      - name: Build dev tools (not run)
+        run: |
+          dotnet build tools/SideBar.Nearby.Cli -c Release
+          dotnet build tools/SideBar.DragDriver -c Release
 
       - name: Run tests
         run: tests/SideBar.Core.Tests/bin/Release/net10.0-windows10.0.26100.0/SideBar.Core.Tests.exe
@@ -47,3 +55,119 @@ jobs:
         with:
           name: SideBar-win-x64
           path: artifacts/app
+
+  installer:
+    needs: build
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          ver=$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props | head -n1)
+          if [ -z "$ver" ]; then echo "::error::Version not found"; exit 1; fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: SideBar-win-x64
+          path: artifacts/app
+
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" installer\SideBar.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SideBar-setup
+          path: artifacts/installer/SideBar-${{ steps.ver.outputs.version }}-setup.exe
+          if-no-files-found: error
+
+  smoke:
+    needs: installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SideBar-setup
+          path: dist
+
+      - name: Install, reinstall, uninstall
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist -Filter 'SideBar-*-setup.exe').FullName
+          $dir = Join-Path $env:ProgramFiles 'SideBar'
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          function Rules { @(netsh advfirewall firewall show rule name="SideBar Quick Share" | Select-String '^Rule Name:').Count }
+          function Fail($m) { Write-Host "::error::$m"; Get-Process SideBar -ErrorAction SilentlyContinue | Stop-Process -Force; exit 1 }
+
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Fail "install exit $($p.ExitCode)" }
+          if (-not (Test-Path "$dir\SideBar.exe")) { Fail 'SideBar.exe missing after install' }
+          if ((Rules) -ne 1) { Fail "rules after install: $(Rules)" }
+
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Fail "reinstall exit $($p.ExitCode)" }
+          if ((Rules) -ne 1) { Fail "rules after reinstall: $(Rules)" }
+
+          if (Get-Process SideBar -ErrorAction SilentlyContinue) { Fail 'SideBar was launched in silent mode' }
+
+          New-Item -Path $runKey -Force | Out-Null
+          New-ItemProperty -Path $runKey -Name SideBar -Value "$dir\SideBar.exe" -PropertyType String -Force | Out-Null
+          $p = Start-Process "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Fail "uninstall exit $($p.ExitCode)" }
+          for ($i = 0; $i -lt 20 -and (Test-Path "$dir\SideBar.exe"); $i++) { Start-Sleep 1 }
+          if (Get-ItemProperty -Path $runKey -Name SideBar -ErrorAction SilentlyContinue) { Fail 'Run value still present' }
+          if ((Rules) -ne 0) { Fail "rules after uninstall: $(Rules)" }
+          if (Test-Path "$dir\SideBar.exe") { Fail 'SideBar.exe still present' }
+          Write-Host 'smoke OK'
+          exit 0
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [installer, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches version
+        env:
+          VER: ${{ needs.installer.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_NAME" != "v$VER" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match <Version> $VER"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: SideBar-setup
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.installer.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/SideBar-$VER-setup.exe" \
+            --title "SideBar $VER" \
+            --notes-file docs/release-notes.md

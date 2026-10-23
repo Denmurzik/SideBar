@@ -298,4 +298,23 @@ public class ShareTileModelTests
         Assert.Null(machine.Update(new Edge.EdgeInput(100, 100, false, false, 4000)));
         Assert.Equal(PanelState.Hidden, machine.Update(new Edge.EdgeInput(100, 100, false, false, 4300)));
     }
+
+    [Fact]
+    public void Choose_timeout_does_not_run_while_a_consent_covers_the_tile()
+    {
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var m = new ShareTileModel();
+        m.BeginShare(["a"], t0);
+        m.Tick(t0.AddSeconds(30));
+        m.Covered = true;
+        m.Tick(t0.AddSeconds(31));
+        m.Tick(t0.AddSeconds(120));
+        Assert.Equal(ShareTileState.Searching, m.State);
+        m.Covered = false;
+        m.Tick(t0.AddSeconds(121));
+        m.Tick(t0.AddSeconds(149));
+        Assert.Equal(ShareTileState.Searching, m.State);   // 30 s before the cover + 29 s after: 59 of 60 used
+        m.Tick(t0.AddSeconds(151));
+        Assert.Equal(ShareTileState.Failed, m.State);
+    }
 }

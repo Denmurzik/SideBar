@@ -15,6 +15,23 @@ public class VisibilityModelTests
     }
 
     [Fact]
+    public void Disable_returns_to_hidden_and_notifies_once()
+    {
+        var m = new VisibilityModel();
+        var changes = 0;
+        m.Changed += () => changes++;
+
+        m.Disable();
+        Assert.Equal(0, changes);
+
+        m.EnableEveryone(T0);
+        m.Disable();
+        Assert.Equal(Visibility.Hidden, m.Current);
+        Assert.Null(m.EveryoneUntil);
+        Assert.Equal(2, changes);
+    }
+
+    [Fact]
     public void Everyone_expires_after_10_minutes()
     {
         var m = new VisibilityModel();

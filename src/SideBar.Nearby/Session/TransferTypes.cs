@@ -15,6 +15,13 @@ public enum TransferStatus
     Failed,
 }
 
+/// <summary>Values of <see cref="TransferResult.Detail"/> that callers branch on.</summary>
+public static class TransferDetails
+{
+    public const string NotEnoughSpace = "not-enough-space";
+    public const string WifiUnsupported = "wifi-unsupported";
+}
+
 public sealed record TransferResult(TransferStatus Status, IReadOnlyList<string> Files, string? Detail = null)
 {
     /// <summary>Texts and links received in a completed transfer; their values are never logged or put into <see cref="Detail"/>.</summary>
@@ -41,6 +48,9 @@ public interface ITransferObserver
     void Status(string message) { }
 
     void Progress(TransferProgress progress) { }
+
+    /// <summary>A received file was committed under its final name (receive only).</summary>
+    void FileSaved(string path) { }
 }
 
 public sealed record SessionOptions(

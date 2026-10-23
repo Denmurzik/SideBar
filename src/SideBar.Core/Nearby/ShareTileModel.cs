@@ -41,6 +41,9 @@ public sealed class ShareTileModel
     /// <summary>Карточка не прячется, пока идёт поиск, выбор или передача.</summary>
     public bool KeepsCardOpen => State is ShareTileState.Searching or ShareTileState.Choosing or ShareTileState.Sending;
 
+    /// <summary>A consent covers the tile: the choose timeout does not run meanwhile (the time is given back).</summary>
+    public bool Covered { get; set; }
+
     public event Action? Changed;
 
     public void BeginShare(IReadOnlyList<string> paths, DateTimeOffset now)
@@ -107,7 +110,9 @@ public sealed class ShareTileModel
 
     public void Tick(DateTimeOffset now)
     {
+        var elapsed = now - _clock;
         _clock = now;
+        if (Covered && State is ShareTileState.Searching or ShareTileState.Choosing && elapsed > TimeSpan.Zero) _startedAt += elapsed;
         switch (State)
         {
             case ShareTileState.Searching or ShareTileState.Choosing when now - _startedAt >= ChooseTimeout:

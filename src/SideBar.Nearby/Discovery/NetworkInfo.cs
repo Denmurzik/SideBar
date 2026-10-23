@@ -25,12 +25,16 @@ public static partial class NetworkInfo
             return new AdapterInfo(nic.Id, nic.OperationalStatus, nic.NetworkInterfaceType, props.GetIPv4Properties().Index, v4, hasGateway);
         });
 
-    /// <summary>IPv4 address and index of the interface Windows would use to reach the internet (best metric); null when none.
-    /// Tunnels and virtual adapters without a route are never returned.</summary>
+    /// <summary>IPv4 address and index of the LAN interface Quick Share should use: wired/Wi-Fi with a real gateway,
+    /// Private/Domain networks first, then the best-metric one. VPN tunnels and virtual adapters are never returned; null when none.</summary>
     public static (IPAddress Address, int InterfaceIndex)? DefaultRouteInterface() =>
-        DefaultRouteInterface(SystemAdapters(), BestInterfaceIndex);
+        DefaultRouteInterface(SystemAdapters(), BestInterfaceIndex, CategoryOf);
 
-    internal static (IPAddress Address, int InterfaceIndex)? DefaultRouteInterface(IEnumerable<Func<AdapterInfo>> adapters, Func<int?> bestIndex)
+    internal static (IPAddress Address, int InterfaceIndex)? DefaultRouteInterface(IEnumerable<Func<AdapterInfo>> adapters, Func<int?> bestIndex) =>
+        DefaultRouteInterface(adapters, bestIndex, _ => NetworkCategory.Private);
+
+    internal static (IPAddress Address, int InterfaceIndex)? DefaultRouteInterface(
+        IEnumerable<Func<AdapterInfo>> adapters, Func<int?> bestIndex, Func<int, NetworkCategory> categoryOf)
     {
         var candidates = new List<AdapterInfo>();
         try
@@ -40,8 +44,7 @@ public static partial class NetworkInfo
                 try
                 {
                     var a = describe();
-                    if (a.Status == OperationalStatus.Up && a.Type is not (NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
-                        && a.Index is not null && a.Address is not null)
+                    if (a.Status == OperationalStatus.Up && IsLan(a.Type) && a.HasGateway && a.Index is not null && a.Address is not null)
                         candidates.Add(a);
                 }
                 catch (Exception) { }
@@ -49,11 +52,27 @@ public static partial class NetworkInfo
         }
         catch (NetworkInformationException) { }
 
+        if (candidates.Count == 0) return null;
+
         int? best = null;
         try { best = bestIndex(); } catch (Exception) { }
 
-        var pick = (best is { } i ? candidates.FirstOrDefault(c => c.Index == i) : null) ?? candidates.FirstOrDefault(c => c.HasGateway);
-        return pick is null ? null : (pick.Address!, pick.Index!.Value);
+        // One category lookup per candidate; a failing lookup only demotes that adapter.
+        var preferred = candidates.Where(c => IsHomeCategory(SafeCategory(categoryOf, c.Index!.Value))).ToList();
+        var pool = preferred.Count > 0 ? preferred : candidates;
+        var pick = (best is { } i ? pool.FirstOrDefault(c => c.Index == i) : null) ?? pool[0];
+        return (pick.Address!, pick.Index!.Value);
+    }
+
+    static bool IsLan(NetworkInterfaceType type) => type is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Ethernet3Megabit
+        or NetworkInterfaceType.FastEthernetT or NetworkInterfaceType.FastEthernetFx or NetworkInterfaceType.GigabitEthernet
+        or NetworkInterfaceType.Wireless80211;
+
+    static bool IsHomeCategory(NetworkCategory c) => c is NetworkCategory.Private or NetworkCategory.Domain;
+
+    static NetworkCategory SafeCategory(Func<int, NetworkCategory> categoryOf, int index)
+    {
+        try { return categoryOf(index); } catch (Exception) { return NetworkCategory.Unknown; }
     }
 
     private static unsafe int? BestInterfaceIndex()
@@ -67,16 +86,23 @@ public static partial class NetworkInfo
     /// <summary>Windows network category of the adapter; any failure (COM, no match) yields Unknown, i.e. do not listen.</summary>
     public static NetworkCategory CategoryOf(int interfaceIndex) => CategoryOf(interfaceIndex, SystemAdapters());
 
-    internal static NetworkCategory CategoryOf(int interfaceIndex, IEnumerable<Func<AdapterInfo>> adapters)
+    internal static NetworkCategory CategoryOf(int interfaceIndex, IEnumerable<Func<AdapterInfo>> adapters) =>
+        LookupCategory(interfaceIndex, adapters) ?? NetworkCategory.Unknown;
+
+    /// <summary>Like <see cref="CategoryOf(int)"/>, but a failed lookup (COM or adapter enumeration threw, adapter not found) is null,
+    /// distinct from NLM really reporting Unknown.</summary>
+    public static NetworkCategory? LookupCategory(int interfaceIndex) => LookupCategory(interfaceIndex, SystemAdapters());
+
+    internal static NetworkCategory? LookupCategory(int interfaceIndex, IEnumerable<Func<AdapterInfo>> adapters)
     {
         try
         {
             var adapterId = AdapterGuid(interfaceIndex, adapters);
-            return adapterId is null ? NetworkCategory.Unknown : QueryCategory(adapterId.Value);
+            return adapterId is null ? null : QueryCategory(adapterId.Value);
         }
         catch (Exception)
         {
-            return NetworkCategory.Unknown;
+            return null;
         }
     }
 
@@ -94,7 +120,7 @@ public static partial class NetworkInfo
         return null;
     }
 
-    private static NetworkCategory QueryCategory(Guid adapterId)
+    private static NetworkCategory? QueryCategory(Guid adapterId)
     {
         // S_OK / S_FALSE must be balanced; RPC_E_CHANGED_MODE (thread is already STA) is fine, just do not uninitialize.
         var initialized = CoInitializeEx(0, 0) >= 0;
@@ -102,13 +128,12 @@ public static partial class NetworkInfo
         finally { if (initialized) CoUninitialize(); }
     }
 
-    private static NetworkCategory QueryCategoryCore(Guid adapterId)
+    private static NetworkCategory? QueryCategoryCore(Guid adapterId)
     {
-
         var clsid = new Guid("DCB00C01-570F-4A9B-8D69-199FDBA5723B");
         var iid = new Guid("DCB00000-570F-4A9B-8D69-199FDBA5723B");
         if (CoCreateInstance(in clsid, 0, 1 /* CLSCTX_INPROC_SERVER */ | 4 /* LOCAL_SERVER */, in iid, out var ptr) < 0 || ptr == 0)
-            return NetworkCategory.Unknown;
+            return null;
 
         var manager = (INetworkListManager)new StrategyBasedComWrappers().GetOrCreateObjectForComInstance(ptr, CreateObjectFlags.UniqueInstance);
         Marshal.Release(ptr);
