@@ -4,7 +4,7 @@ namespace SideBar.Edge;
 
 /// <summary>
 /// WH_MOUSE_LL в своём потоке со своим циклом сообщений. Колбэк хука только сохраняет точку и будит рабочий поток;
-/// onMove вызывается на рабочем потоке, так что хук никогда не ждёт UI или I/O.
+/// onMove и onPrimaryDown (нажатие основной кнопки, с координатами) вызываются на рабочем потоке, так что хук никогда не ждёт UI или I/O.
 /// </summary>
 sealed unsafe class MouseHook : IDisposable
 {
@@ -28,15 +28,18 @@ sealed unsafe class MouseHook : IDisposable
     static MouseHook? s_instance;
 
     readonly Action<int, int> _onMove;
+    readonly Action<int, int>? _onPrimaryDown;
+    readonly System.Collections.Concurrent.ConcurrentQueue<long> _downs = new();
     readonly AutoResetEvent _signal = new(false);
     long _lastPt;   // упаковано (x, y)
     uint _hookThreadId;
     volatile bool _stop;
     volatile bool _fastTick;
 
-    public MouseHook(Action<int, int> onMove)
+    public MouseHook(Action<int, int> onMove, Action<int, int>? onPrimaryDown = null)
     {
         _onMove = onMove;
+        _onPrimaryDown = onPrimaryDown;
         GetCursorPos(out var p);
         _lastPt = Pack(p.X, p.Y);
         s_instance = this;
@@ -65,11 +68,19 @@ sealed unsafe class MouseHook : IDisposable
     static nint HookProc(int code, nint wParam, nint lParam)
     {
         var w = s_instance;
-        if (code >= 0 && w != null && (int)wParam == WM_MOUSEMOVE)
+        if (code >= 0 && w != null)
         {
             var h = (MSLLHOOKSTRUCT*)lParam;
-            Interlocked.Exchange(ref w._lastPt, Pack(h->pt.X, h->pt.Y));
-            w._signal.Set();
+            if ((int)wParam == WM_MOUSEMOVE)
+            {
+                Interlocked.Exchange(ref w._lastPt, Pack(h->pt.X, h->pt.Y));
+                w._signal.Set();
+            }
+            else if (w._onPrimaryDown != null && PrimaryButton.IsDownMessage((int)wParam))
+            {
+                w._downs.Enqueue(Pack(h->pt.X, h->pt.Y));
+                w._signal.Set();
+            }
         }
         return CallNextHookEx(0, code, wParam, lParam);
     }
@@ -80,8 +91,16 @@ sealed unsafe class MouseHook : IDisposable
         {
             _signal.WaitOne(_fastTick ? TickMs : -1);
             if (_stop) break;
-            long p = Interlocked.Read(ref _lastPt);
-            try { _onMove((int)(p >> 32), (int)(p & 0xFFFFFFFF)); }
+            try
+            {
+                while (_downs.TryDequeue(out long d)) _onPrimaryDown?.Invoke((int)(d >> 32), (int)(d & 0xFFFFFFFF));
+            }
+            catch { /* сбой клика не должен пропускать onMove */ }
+            try
+            {
+                long p = Interlocked.Read(ref _lastPt);
+                _onMove((int)(p >> 32), (int)(p & 0xFFFFFFFF));
+            }
             catch { /* рабочий поток не должен падать из-за сбоя обработчика */ }
         }
     }

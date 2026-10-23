@@ -207,4 +207,48 @@ public class EdgeStateMachineTests
         Assert.Null(m.Update(At(1900, 285, 2749)));
         Assert.Equal(PanelState.Open, m.Update(At(1900, 285, 2750)));
     }
+
+    [Fact]
+    public void Open_stays_while_cursor_over_extra_keep_open_rect()
+    {
+        var m = Opened();
+        m.SetKeepOpenRect(new PxRect(1400, 400, 1600, 700));
+        Assert.Null(m.Update(At(1500, 540, 1000)));
+        Assert.Null(m.Update(At(1500, 540, 1300)));
+        Assert.Null(m.Update(At(1500, 540, 5000)));
+        Assert.Equal(PanelState.Open, m.State);
+    }
+
+    [Fact]
+    public void Extra_rect_cleared_restores_normal_hide()
+    {
+        var m = Opened();
+        m.SetKeepOpenRect(new PxRect(1400, 400, 1600, 700));
+        Assert.Null(m.Update(At(1500, 540, 1000)));
+        m.SetKeepOpenRect(null);
+        Assert.Null(m.Update(At(1500, 540, 1100)));
+        Assert.Equal(PanelState.Hidden, m.Update(At(1500, 540, 1400)));
+    }
+
+    [Fact]
+    public void Leaving_extra_rect_starts_hide_delay()
+    {
+        var m = Opened();
+        m.SetKeepOpenRect(new PxRect(1400, 400, 1600, 700));
+        Assert.Null(m.Update(At(1500, 540, 1000)));
+        Assert.Null(m.Update(At(1000, 540, 1100)));
+        Assert.Null(m.Update(At(1000, 540, 1399)));
+        Assert.Equal(PanelState.Hidden, m.Update(At(1000, 540, 1400)));
+    }
+
+    [Fact]
+    public void Relayout_clears_extra_rect()
+    {
+        var m = Opened();
+        m.SetKeepOpenRect(new PxRect(1400, 400, 1600, 700));
+        m.Relayout(new CardLayout(Monitor, 1.0), EdgeMode.Slide);
+        Assert.Equal(PanelState.Open, m.Update(At(1919, 540, 0)));
+        Assert.Null(m.Update(At(1500, 540, 100)));
+        Assert.Equal(PanelState.Hidden, m.Update(At(1500, 540, 400)));
+    }
 }

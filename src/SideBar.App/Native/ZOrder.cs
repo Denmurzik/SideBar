@@ -19,19 +19,26 @@ static class ZOrder
 
     const uint ReraiseDelayMs = 150;
 
-    static nint _card, _hook;
+    static nint _card, _hook, _follower;
     static nuint _timer;
     static bool _visible;
 
     /// <summary>Пока карточка видима, смена foreground-окна возвращает её на вершину (иначе позже активированное topmost-окно перекроет статичную карточку).</summary>
     public static bool Visible { set => _visible = value; }
 
+    /// <summary>Окно, которое держится сразу под карточкой (веер): ставит его туда и при каждом подъёме карточки возвращает следом. 0 — отпустить.</summary>
+    public static void Follow(nint hwnd)
+    {
+        _follower = hwnd;
+        if (hwnd != 0 && _card != 0) PlaceBelow(hwnd, _card);
+    }
+
     // OUTOFCONTEXT: колбэк приходит на поток, установивший хук (UI-поток с циклом сообщений).
     [UnmanagedCallersOnly]
     static unsafe void OnForeground(nint hook, uint evt, nint hwnd, int idObject, int idChild, uint thread, uint time)
     {
         if (!_visible || hwnd == _card) return;
-        RaiseToTop(_card);
+        RaiseCard();
         // Событие приходит до того, как активируемое окно закончит собственную перестановку по z-порядку,
         // поэтому повторяем подъём коротким одноразовым таймером.
         if (_timer != 0) KillTimer(0, _timer);
@@ -43,7 +50,13 @@ static class ZOrder
     {
         KillTimer(0, id);
         _timer = 0;
-        if (_visible) RaiseToTop(_card);
+        if (_visible) RaiseCard();
+    }
+
+    static void RaiseCard()
+    {
+        RaiseToTop(_card);
+        if (_follower != 0) PlaceBelow(_follower, _card);
     }
 
     public static unsafe void Watch(nint card)
@@ -61,9 +74,14 @@ static class ZOrder
         if (_hook != 0) UnhookWinEvent(_hook);
         _hook = 0;
         _visible = false;
+        _follower = 0;
     }
 
     /// <summary>Поднять на вершину topmost-полосы, не активируя и не меняя положение/размер/видимость.</summary>
     public static void RaiseToTop(nint hwnd) =>
         SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+    /// <summary>Поставить <paramref name="hwnd"/> сразу под <paramref name="above"/> (оба topmost), не активируя.</summary>
+    public static void PlaceBelow(nint hwnd, nint above) =>
+        SetWindowPos(hwnd, above, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }

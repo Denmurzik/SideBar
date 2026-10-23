@@ -4,14 +4,14 @@ using SideBar.Core;
 using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Edge;
+using SideBar.Shelf;
 using SideBar.Tray;
+using WinRT.Interop;
 
 namespace SideBar;
 
 public partial class App : Application
 {
-    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
-
     CardWindow? _window;
     DispatcherQueue? _ui;
     MouseHook? _hook;
@@ -28,6 +28,10 @@ public partial class App : Application
     Timer? _startupTrim;
     MessageWindow? _messages;
     TrayIcon? _tray;
+    ShelfService? _shelf;
+    OleDropTarget.DropRegistration? _dropTarget;
+    FanWindow? _fan;
+    PxRect? _fanZone;   // под _gate: зона веера для проверки клика вне (рабочий поток хука)
 
     public App()
     {
@@ -39,8 +43,17 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _ui = DispatcherQueue.GetForCurrentThread();
+        _shelf = new ShelfService();
+        _shelf.Load();
         _window = new CardWindow();
-        _window.Settled += s => { if (s == PanelState.Hidden) _trimmer.OnHidden(); };
+        _window.BindShelf(_shelf);
+        _window.FanRequested += OnFanRequested;
+        _window.Settled += s =>
+        {
+            if (s != PanelState.Hidden) return;
+            DragOut.Reset();
+            _trimmer.OnHidden();
+        };
 
         var (layout, mode, scale, primary) = Measure();
         _layout = layout;
@@ -50,7 +63,20 @@ public partial class App : Application
         _window.Initialize(layout, mode, scale);
         _machine = new EdgeStateMachine(layout, mode);
         _trimmer.OnHidden();
-        _hook = new MouseHook(OnMouse);
+        // после первого Show (его ставит в очередь Initialize): к этому времени у окна есть дочерние HWND WinUI
+        _ui.TryEnqueue(() =>
+        {
+            try
+            {
+                _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => DragOut.IsActive, OnForeignDrag);
+            }
+            catch (Exception e)
+            {
+                Log.Write("drop target registration failed, shelf drop disabled: " + Log.Describe(e));   // только полка отключается, карточка работает
+            }
+            Log.Write("ready");
+        });
+        _hook = new MouseHook(OnMouse, OnPrimaryDown);
         string exe = Environment.ProcessPath!;
         var autostart = new Autostart();
         try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
@@ -67,10 +93,80 @@ public partial class App : Application
         try
         {
             try { _hook?.Dispose(); } catch { }
+            try { _dropTarget?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
             try { _messages?.Dispose(); } catch { }
         }
         finally { Environment.Exit(0); }
+    }
+
+    /// <summary>
+    /// Чужой drag над карточкой (UI-поток). Пока кнопка зажата, автомат держит Open сам; из Peek (виден край в 10 epx) —
+    /// имитируем касание края, иначе первый же шаг мыши за полосу вернул бы Hidden.
+    /// </summary>
+    void OnForeignDrag(bool active)
+    {
+        var machine = _machine;
+        if (!active || machine is null) return;
+        PanelState? changed;
+        lock (_gate)
+        {
+            if (machine.State != PanelState.Peek) return;
+            changed = machine.Update(new EdgeInput(_layout.ActivationBand.Right - 1, _layout.CenterY, true, false, Environment.TickCount64));
+        }
+        if (changed is { } s)
+        {
+            Log.Write($"edge {s} (drag)");
+            _trimmer.OnShown();
+            _window?.SetState(s);
+        }
+    }
+
+    /// <summary>Клик по стопке (UI-поток): показать веер слева от открытой карточки.</summary>
+    void OnFanRequested()
+    {
+        if (_shelf is null || _machine is null) return;
+        PxRect card;
+        double scale;
+        lock (_gate)
+        {
+            if (_machine.State != PanelState.Open) return;
+            if (_fanZone is not null) { _ui?.TryEnqueue(() => _fan?.Hide()); return; }   // повторный клик по стопке закрывает веер
+            card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
+            scale = _scale;
+        }
+        if (_fan is null)
+        {
+            _fan = new FanWindow();
+            _fan.Bind(_shelf);
+            _fan.ZoneChanged += OnFanZone;
+        }
+        _fan.ShowNextTo(card, scale);
+    }
+
+    // пока веер открыт, курсор над ним (и над зазором до карточки) не даёт карточке скрыться
+    void OnFanZone(PxRect? zone)
+    {
+        lock (_gate)
+        {
+            _fanZone = zone;
+            _machine?.SetKeepOpenRect(zone);
+        }
+        Log.Write(zone is { } z ? $"fan open {z.Left},{z.Top},{z.Right},{z.Bottom}" : "fan closed");
+    }
+
+    // рабочий поток хука: нажатие основной кнопки вне карточки и веера закрывает веер (активацию окон для этого не используем)
+    void OnPrimaryDown(int x, int y)
+    {
+        PxRect? zone;
+        PxRect card;
+        lock (_gate)
+        {
+            zone = _fanZone;
+            card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
+        }
+        if (zone is not { } z || z.Contains(x, y) || card.Contains(x, y)) return;
+        _ui?.TryEnqueue(() => _fan?.Hide());
     }
 
     /// <summary>Пересчёт по WM_DISPLAYCHANGE / WM_DPICHANGED / WM_SETTINGCHANGE. Только из UI-потока.</summary>
@@ -89,7 +185,9 @@ public partial class App : Application
             _mode = mode;
             _machine.Relayout(layout, mode);
         }
+        _fan?.Hide();
         _window.Relayout(layout, mode, scale);
+        _dropTarget?.Refresh();   // WinUI может пересоздать дочерние HWND при смене DPI/дисплея
         _trimmer.OnHidden();   // Relayout не поднимает Settled
     }
 
@@ -110,7 +208,7 @@ public partial class App : Application
         var hook = _hook;
         if (machine is null) return;
 
-        bool button = (GetAsyncKeyState(0x01) & 0x8000) != 0;
+        bool button = PrimaryButton.IsDown();
         PxRect primary;
         bool hidden;
         lock (_gate) { primary = _primary; hidden = machine.State == PanelState.Hidden; }
@@ -143,7 +241,9 @@ public partial class App : Application
             _ui?.TryEnqueue(() =>
             {
                 lock (_gate) { if (gen != _generation) return; }
+                Log.Write($"edge {s}");
                 if (s != PanelState.Hidden) _trimmer.OnShown();
+                else _fan?.Hide();
                 _window?.SetState(s);
             });
         }

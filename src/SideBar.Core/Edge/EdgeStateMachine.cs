@@ -15,8 +15,12 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
     long _leftCardAt = None;
     long _enteredBandAt = None;
     bool _mustLeaveBand;
+    PxRect? _keepOpen;
 
     public PanelState State { get; private set; } = PanelState.Hidden;
+
+    /// <summary>Пока Open, курсор внутри этого прямоугольника (окно-веер) считается «над карточкой»; null — обычное поведение.</summary>
+    public void SetKeepOpenRect(PxRect? rect) => _keepOpen = rect;
 
     public void Relayout(CardLayout layout, EdgeMode mode)
     {
@@ -26,6 +30,7 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
         _leftCardAt = None;
         _enteredBandAt = None;
         _mustLeaveBand = false;
+        _keepOpen = null;
     }
 
     /// <summary>Возвращает новое состояние, если оно изменилось, иначе null.</summary>
@@ -38,7 +43,8 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
         // Slide: Y — по всей полосе, как при открытии, иначе курсор у края в поле над/под карточкой гоняет Open/Hidden по кругу.
         // InPlace от этого защищает _mustLeaveBand, там «над карточкой» — именно карточка.
         bool inCardY = _mode == EdgeMode.Slide ? inBandY : i.Y >= _layout.Top && i.Y <= _layout.Top + _layout.CardHeightPx;
-        bool overCard = inCardY && i.X >= _layout.LeftFor(PanelState.Open) && i.X < band.Right;
+        bool overCard = (inCardY && i.X >= _layout.LeftFor(PanelState.Open) && i.X < band.Right)
+            || (_keepOpen is { } k && k.Contains(i.X, i.Y));
 
         switch (State)
         {

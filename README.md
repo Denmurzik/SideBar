@@ -5,7 +5,7 @@
 - **Quick Share** — отправка и приём файлов с Android-устройствами (своя реализация протокола);
 - **временная стопка** — промежуточный буфер для drag-and-drop между приложениями.
 
-Статус: M1 (каркас) готов; дальше M2–M7, см. [`docs/PLAN.md`](docs/PLAN.md) и [`HANDOFF.md`](HANDOFF.md).
+Статус: M1 (каркас) и M2 (стопка) готовы; дальше M3–M7, см. [`docs/PLAN.md`](docs/PLAN.md) и [`HANDOFF.md`](HANDOFF.md).
 
 Неофициальный проект, не связан с Google. «Quick Share» — товарный знак Google LLC.
 
