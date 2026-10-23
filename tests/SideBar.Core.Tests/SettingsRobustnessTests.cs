@@ -144,4 +144,27 @@ public sealed class SettingsRobustnessTests : IDisposable
         Assert.Equal(Language.English, new SettingsStore(FilePath).Current.Language);
         Assert.Empty(Directory.GetFiles(_dir, "settings.bad-*.json"));
     }
+
+    [Fact]
+    public void Edits_made_while_file_was_locked_survive_the_reload()
+    {
+        File.WriteAllText(FilePath, """{ "language": "Russian", "pcName": "Файл" }""");
+        SettingsStore store;
+        using (new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            store = new SettingsStore(FilePath);
+            store.Update(s => s with { ShowInFullscreen = true });
+            store.Update(s => s with { EdgeOpenDelay = EdgeOpenDelay.Ms300 });
+            store.Update(s => s with { BounceOnIncoming = false });
+            store.Update(s => s with { BounceOnIncoming = true });   // вернули к значению по умолчанию: всё равно правка пользователя
+        }
+        store.Update(s => s with { CheckForUpdates = false });
+        Assert.Equal(Language.Russian, store.Current.Language);   // из файла
+        Assert.Equal("Файл", store.Current.PcName);
+        Assert.True(store.Current.ShowInFullscreen);              // из памяти, не только последняя правка
+        Assert.Equal(EdgeOpenDelay.Ms300, store.Current.EdgeOpenDelay);
+        Assert.True(store.Current.BounceOnIncoming);
+        Assert.False(store.Current.CheckForUpdates);
+        Assert.Equal(store.Current, new SettingsStore(FilePath).Current);
+    }
 }

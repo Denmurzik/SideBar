@@ -72,7 +72,8 @@ public sealed partial class SettingsWindow : Window
     readonly Action<AppSettings> _onStoreChanged;
     readonly Action _onExternalChange;
     DispatcherTimer? _clearTimer;
-    bool _syncing, _closed, _clearArmed;
+    bool _syncing, _closed, _clearArmed, _recheckPaths;
+    int _certGeneration;
     Button? _clearButton;
     int _page = -1;
 
@@ -105,12 +106,35 @@ public sealed partial class SettingsWindow : Window
         _store.Changed += _onStoreChanged;
         deps.Receive.ModeChanged += _onExternalChange;
         deps.Identity.Changed += _onExternalChange;
-        Activated += (_, _) => SyncAll();   // автозапуск и сертификаты могли измениться снаружи
-        Closed += OnClosed;
+        try
+        {
+            // автозапуск, сертификаты и пути могли измениться снаружи; уход фокуса ничего не проверяет
+            Activated += (_, e) =>
+            {
+                if (e.WindowActivationState == WindowActivationState.Deactivated) return;
+                _recheckPaths = true;
+                try { SyncAll(); }
+                finally { _recheckPaths = false; }
+            };
+            Closed += OnClosed;
 
-        Nav.SelectedItem = NavGeneral;
-        SyncAll();
-        deps.Opened();
+            Nav.SelectedItem = NavGeneral;
+            SyncAll();
+            deps.Opened();
+        }
+        catch
+        {
+            // конструктор упал после подписок: без отписки store держал бы мёртвое окно
+            Unsubscribe();
+            throw;
+        }
+    }
+
+    void Unsubscribe()
+    {
+        _store.Changed -= _onStoreChanged;
+        _deps.Receive.ModeChanged -= _onExternalChange;
+        _deps.Identity.Changed -= _onExternalChange;
     }
 
     // по центру основного монитора, физические px
@@ -125,8 +149,9 @@ public sealed partial class SettingsWindow : Window
         AppWindow.MoveAndResize(new RectInt32(x, y, w, h));
         if (AppWindow.Presenter is OverlappedPresenter p)
         {
-            p.PreferredMinimumWidth = (int)MinWidth;
-            p.PreferredMinimumHeight = (int)MinHeight;
+            // PreferredMinimum* не документированы как epx: считаем физическими пикселями (на 100% совпадает)
+            p.PreferredMinimumWidth = (int)(MinWidth * scale);
+            p.PreferredMinimumHeight = (int)(MinHeight * scale);
         }
     }
 
@@ -142,9 +167,7 @@ public sealed partial class SettingsWindow : Window
     void OnClosed(object sender, WindowEventArgs e)
     {
         _closed = true;
-        _store.Changed -= _onStoreChanged;
-        _deps.Receive.ModeChanged -= _onExternalChange;
-        _deps.Identity.Changed -= _onExternalChange;
+        Unsubscribe();
         _clearTimer?.Stop();
         _clearTimer = null;
         _syncs.Clear();
@@ -307,6 +330,7 @@ public sealed partial class SettingsWindow : Window
             if (_syncing) return;
             var v = SettingsStore.SanitizePcName(name.Text);
             _store.Update(s => s with { PcName = v });
+            if (name.Text != (v ?? "")) name.Text = v ?? "";   // показываем то, что реально сохранено (санитизация, обрезка)
             SyncAll();
         }
         name.LostFocus += (_, _) => CommitName();
@@ -334,19 +358,28 @@ public sealed partial class SettingsWindow : Window
             catch (Exception e) { Log.Write("folder picker failed: " + Log.Describe(e)); }
         };
         folderReset.Click += (_, _) => _store.Update(s => s with { ReceiveFolder = null });
+        string? checkedFolder = null;
+        var folderChecked = false;
         _syncs.Add(() =>
         {
             var f = _store.Current.ReceiveFolder;
             folderCard.Description = f ?? Strings.DownloadsName;
             folderReset.Visibility = f is null ? Visibility.Collapsed : Visibility.Visible;
+            if (folderChecked && f == checkedFolder && !_recheckPaths) return;   // значение то же: фоновая проверка не нужна
+            folderChecked = true;
+            checkedFolder = f;
             folderCard.Warning = null;
             if (f is not null)
-                Background(() => Directory.Exists(f), ok => { if (_store.Current.ReceiveFolder == f) folderCard.Warning = ok ? null : Strings.ReceiveFolderMissing; });
+                Background(() => SideBar.Settings.PathProbe.DirectoryExists(f), ok => { if (_store.Current.ReceiveFolder == f) folderCard.Warning = ok ? null : Strings.ReceiveFolderMissing; });
         });
 
         // сертификаты
         var certsCard = Card(Strings.CertsTitle, Strings.CertsLoading);
-        _syncs.Add(() => Background(CertStatus, text => certsCard.Description = text));
+        _syncs.Add(() =>
+        {
+            var gen = ++_certGeneration;   // устаревший ответ не затирает более новый
+            Background(CertStatus, text => { if (gen == _certGeneration) certsCard.Description = text; });
+        });
         var refresh = new Button { Content = Strings.Refresh };
         var refreshCard = Card(Strings.CertsRefreshTitle, null, refresh);
         void RenderRefresh()
@@ -382,14 +415,17 @@ public sealed partial class SettingsWindow : Window
             catch (Exception e) { Log.Write("exe picker failed: " + Log.Describe(e)); }
         };
         exeReset.Click += (_, _) => _store.Update(s => s with { OfficialExePath = null });
+        string? checkedExe = null;
         _syncs.Add(() =>
         {
             var p = _store.Current.OfficialExePath;
             var effective = p ?? DefaultOfficialPath;
             exeCard.Description = effective;
             exeReset.Visibility = p is null ? Visibility.Collapsed : Visibility.Visible;
+            if (checkedExe == effective && !_recheckPaths) return;
+            checkedExe = effective;
             exeCard.Warning = null;
-            Background(() => File.Exists(effective),
+            Background(() => Path.IsPathFullyQualified(effective) && SideBar.Settings.PathProbe.FileExists(effective),
                 ok => { if ((_store.Current.OfficialExePath ?? DefaultOfficialPath) == effective) exeCard.Warning = ok ? null : Strings.OfficialPathMissing; });
         });
 

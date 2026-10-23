@@ -117,11 +117,10 @@ static class Strings
     public const string Refresh = "Обновить";
     public const string OfficialPathTitle = "Путь к официальному Quick Share";
     public const string OfficialPathMissing = "Файл не найден — официальное приложение не будет запускаться";
-    public const string ExeFilter = "Приложение";
 
     public const string EdgeDelayTitle = "Задержка открытия у края";
     public const string EdgeDelayDesc = "Сколько курсор держится у края, прежде чем карточка откроется";
-    public static string Ms(int n) => n == 0 ? "Сразу" : $"{n} мс";
+    public static string Ms(int n) => $"{n} мс";
     public const string BounceTitle = "Подпрыгивать при входящих";
     public const string BounceDesc = "Скрытая карточка привлекает внимание, когда приходит запрос или файл";
     public const string FullscreenTitle = "Показывать в полноэкранных приложениях";
@@ -136,7 +135,6 @@ static class Strings
     public const string Clear = "Очистить";
     public const string ClearSure = "Точно очистить?";
 
-    public const string AboutVersion = "Версия";
     public const string AboutLicense = "Лицензия";
     public const string AboutLicenseValue = "GNU GPLv3";
     public const string AboutRepo = "Репозиторий";

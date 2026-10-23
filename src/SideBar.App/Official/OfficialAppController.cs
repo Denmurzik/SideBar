@@ -51,9 +51,27 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
 #if DEBUG
         return FromEnvironment(log, exePathOverride);
 #else
-        return new(exePathOverride is { Length: > 0 } ? exePathOverride : DefaultExe, DefaultSharingDir, log);
+        return new(ExeFor(exePathOverride), DefaultSharingDir, log);
 #endif
     }
+
+    // путь из настроек (null — по умолчанию); SIDEBAR_OFFICIAL_EXE (симулятор, автотест) — только в Debug
+    static string ExeFor(string? settingsPath)
+    {
+        var chosen = settingsPath is { Length: > 0 } ? settingsPath : DefaultExe;
+#if DEBUG
+        return Env("SIDEBAR_OFFICIAL_EXE") ?? chosen;
+#else
+        return chosen;
+#endif
+    }
+
+    volatile string _exe = exePath;
+
+    /// <summary>Настройка «Путь к официальному Quick Share» изменилась: действует на следующую проверку и следующий цикл. Имя процесса пользователя не меняется.</summary>
+    public void UseSettingsPath(string? settingsPath) => _exe = ExeFor(settingsPath);
+
+    public string ExePath => _exe;
 
     static string DefaultExe => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Google", "NearbyShare", "nearby_share.exe");
     static string DefaultSharingDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google", "Nearby", "Sharing");
@@ -61,9 +79,10 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
     static string? Env(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } v ? v : null;
 
     public string LogDir => Path.Combine(sharingDir, "Logs");
-    public string ProcessName => Path.GetFileNameWithoutExtension(exePath);
+    public string ProcessName => Path.GetFileNameWithoutExtension(_exe);
 
-    public bool IsInstalled => File.Exists(exePath);
+    /// <summary>Файл существует. Относительный путь не считается установленным (рабочий каталог процесса случаен).</summary>
+    public bool IsInstalled => Path.IsPathFullyQualified(_exe) && File.Exists(_exe);
 
     /// <summary>Любой экземпляр (в том числе пользовательский) этого приложения.</summary>
     public bool IsRunning() =>
@@ -85,8 +104,9 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
             dwFlags = Native.STARTF_USESHOWWINDOW,
             wShowWindow = Native.SW_HIDE,
         };
-        var cmd = ("\"" + exePath + "\"\0").ToCharArray();   // CreateProcessW может менять буфер командной строки
-        var cwd = (Path.GetDirectoryName(exePath) ?? ".") + "\0";
+        var exe = _exe;
+        var cmd = ("\"" + exe + "\"\0").ToCharArray();   // CreateProcessW может менять буфер командной строки
+        var cwd = (Path.GetDirectoryName(exe) ?? ".") + "\0";
         Native.PROCESS_INFORMATION pi;
         int ok;
         fixed (char* c = cmd)

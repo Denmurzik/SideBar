@@ -22,6 +22,24 @@ public sealed class SettingsStore
     volatile AppSettings _current;
     volatile bool _lastSaveFailed;
     Visibility _persistedVisibility;
+    readonly bool[] _dirty = new bool[Fields.Length];   // поля, изменённые, пока файл не читался: после чтения накладываются поверх файла
+
+    // Копирование поля без рефлексии (AOT): геттер для сравнения, перенос значения из одного набора в другой.
+    sealed record Field(Func<AppSettings, object?> Get, Func<AppSettings, AppSettings, AppSettings> Copy);
+
+    static readonly Field[] Fields =
+    [
+        new(s => s.Language, (f, t) => t with { Language = f.Language }),
+        new(s => s.CheckForUpdates, (f, t) => t with { CheckForUpdates = f.CheckForUpdates }),
+        new(s => s.Visibility, (f, t) => t with { Visibility = f.Visibility }),
+        new(s => s.PcName, (f, t) => t with { PcName = f.PcName }),
+        new(s => s.ReceiveFolder, (f, t) => t with { ReceiveFolder = f.ReceiveFolder }),
+        new(s => s.OfficialExePath, (f, t) => t with { OfficialExePath = f.OfficialExePath }),
+        new(s => s.EdgeOpenDelay, (f, t) => t with { EdgeOpenDelay = f.EdgeOpenDelay }),
+        new(s => s.BounceOnIncoming, (f, t) => t with { BounceOnIncoming = f.BounceOnIncoming }),
+        new(s => s.ShowInFullscreen, (f, t) => t with { ShowInFullscreen = f.ShowInFullscreen }),
+        new(s => s.ShelfRetention, (f, t) => t with { ShelfRetention = f.ShelfRetention }),
+    ];
 
     public SettingsStore(string path)
     {
@@ -62,11 +80,19 @@ public sealed class SettingsStore
             if (_writesSuppressed && TryLoad(0, out var reloaded))
             {
                 _writesSuppressed = false;
-                _current = reloaded;
-                _persistedVisibility = reloaded.Visibility;
+                // правки, сделанные пока файл был занят, не теряются: поля, которые менялись в памяти, ложатся поверх прочитанного файла
+                var merged = reloaded;
+                for (var k = 0; k < Fields.Length; k++)
+                    if (_dirty[k]) merged = Fields[k].Copy(_current, merged);
+                Array.Clear(_dirty);
+                _current = Normalize(merged);
+                _persistedVisibility = _current.Visibility == Visibility.Everyone ? reloaded.Visibility : _current.Visibility;
             }
             var next = Normalize(change(_current) ?? _current);
             if (next == old) return;
+            if (_writesSuppressed)
+                for (var k = 0; k < Fields.Length; k++)
+                    if (!Equals(Fields[k].Get(old), Fields[k].Get(next))) _dirty[k] = true;
             _current = next;
             if (next.Visibility != Visibility.Everyone) _persistedVisibility = next.Visibility;
             if (_writesSuppressed) saveFailed = true;

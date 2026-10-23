@@ -464,6 +464,38 @@ public sealed class RefreshServiceSimTests : IDisposable
     }
 
     [Fact]
+    public async Task Official_path_missing_is_not_installed()
+    {
+        var oldExe = Environment.GetEnvironmentVariable("SIDEBAR_OFFICIAL_EXE");   // другие тесты оставляют его в процессе; в Debug он приоритетнее настройки
+        Environment.SetEnvironmentVariable("SIDEBAR_OFFICIAL_EXE", null);
+        try { await OfficialPathMissingScenario(); }
+        finally { Environment.SetEnvironmentVariable("SIDEBAR_OFFICIAL_EXE", oldExe); }
+    }
+
+    async Task OfficialPathMissingScenario()
+    {
+        var present = Path.Combine(_dir, "nearby_share.exe");
+        File.WriteAllText(present, "x");
+        var missing = Path.Combine(_dir, "gone", "nearby_share.exe");
+
+        var app = OfficialAppController.FromEnvironment(s => _log.Add(s), present, NeverRuns);
+        Assert.True(app.IsInstalled);
+        app.UseSettingsPath(missing);   // настройка сменилась на ходу
+        Assert.False(app.IsInstalled);
+        Assert.Equal(missing, app.ExePath);
+        app.UseSettingsPath(@"nearby_share.exe");   // относительный путь не считается установленным
+        Assert.False(app.IsInstalled);
+        app.UseSettingsPath(present);
+        Assert.True(app.IsInstalled);
+        Assert.Equal("nearby_share", OfficialAppController.UserProcessName);   // процесс пользователя не зависит от пути
+
+        var svc = Make("normal", exe: missing);
+        Assert.Equal(RefreshOutcome.NotInstalled, await svc.RunOnceAsync());
+        Assert.Empty(_hooks);
+        Assert.Empty(SimProcesses());   // ничего не запускалось
+    }
+
+    [Fact]
     public async Task Tick_runs_cycle_when_never_refreshed_and_skips_when_fresh()
     {
         var svc = Make("normal");
