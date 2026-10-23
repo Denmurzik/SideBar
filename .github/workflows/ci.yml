@@ -132,6 +132,7 @@ jobs:
           if ((Rules) -ne 0) { Fail "rules after uninstall: $(Rules)" }
           if (Test-Path "$dir\SideBar.exe") { Fail 'SideBar.exe still present' }
           Write-Host 'smoke OK'
+          exit 0
 
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
