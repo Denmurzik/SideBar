@@ -97,7 +97,8 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
         if (windows.Any(w => w.Visible)) { proc.SawVisible = true; return QuitResult.WindowsVisible; }
         var threads = windows.Where(w => w.ClassName == WindowClass).Select(w => w.ThreadId).Distinct().ToList();
         if (threads.Count == 0) return QuitResult.NoWindow;
-        foreach (var t in threads) Native.PostQuitToThread(t, proc.Pid);
-        return QuitResult.Posted;
+        var posted = false;
+        foreach (var t in threads) posted |= Native.PostQuitToThread(t, proc.Pid);
+        return posted ? QuitResult.Posted : QuitResult.NoWindow;
     }
 }

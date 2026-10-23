@@ -201,6 +201,16 @@ public sealed class RefreshServiceSimTests : IDisposable
     }
 
     [Fact]
+    public async Task Saved_warning_survives_restart_and_is_not_repeated()
+    {
+        new AppStateStore(StatePath).Save(new AppState { FirstSeen = T0, LastWarned = T0.AddHours(73) });
+        _now = T0.AddHours(80);
+        var svc = Make("normal", exe: Path.Combine(_dir, "missing", "nearby_share.exe"));   // новый экземпляр сервиса = перезапуск SideBar
+        await svc.TickAsync();
+        Assert.Empty(_hooks);
+    }
+
+    [Fact]
     public async Task Marker_from_before_launch_is_not_success()
     {
         var logs = Path.Combine(SharingDir, "Logs");

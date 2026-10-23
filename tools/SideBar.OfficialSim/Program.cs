@@ -8,7 +8,7 @@ namespace SideBar.OfficialSim;
 //   user    — после маркера пишет "Received WM_COPYDATA" (пользователь «открыл» приложение)
 //   rotate  — до маркера начинает новый nearby_share_<ts>.log и пишет маркер уже в него
 //   silent  — маркер не пишет
-//   show    — после маркера на ~600 мс показывает окно (SW_SHOWNOACTIVATE) и снова прячет
+//   show    — ДО маркера на ~600 мс показывает окно (SW_SHOWNOACTIVATE, вне экрана) и снова прячет
 // Каталог данных — SIDEBAR_SHARING_DIR (обязателен: настоящие данные Google не трогаем). Жизнь ограничена SIDEBAR_SIM_LIFETIME_SEC (по умолчанию 90).
 static unsafe class Program
 {
@@ -74,7 +74,7 @@ static unsafe class Program
             };
             if (RegisterClassExW(ref wc) == 0) return 3;
             // Обычное окно верхнего уровня, но без ShowWindow: невидимо, как у настоящего приложения при SW_HIDE.
-            if ((_hwnd = CreateWindowExW(0, cls, title, 0x00CF0000, 0, 0, 100, 100, 0, 0, 0, 0)) == 0) return 4;
+            if ((_hwnd = CreateWindowExW(0, cls, title, 0x00CF0000, -32000, -32000, 100, 100, 0, 0, 0, 0)) == 0) return 4;
         }
 
         var lifetime = int.TryParse(Environment.GetEnvironmentVariable("SIDEBAR_SIM_LIFETIME_SEC"), out var s) ? s : 90;
@@ -105,15 +105,15 @@ static unsafe class Program
 
     static void Script(int lifetimeSec)
     {
-        Thread.Sleep(300);
-        if (_mode == "rotate") StartLog();
-        if (_mode != "silent") Write("pub.cc:1] operator(): PublishDevice succeeded. contact_removed: false");
         if (_mode == "show")
         {
-            ShowWindow(_hwnd, 4);
+            ShowWindow(_hwnd, 4);   // IsWindowVisible == true, но окно за пределами экрана
             Thread.Sleep(600);
             ShowWindow(_hwnd, 0);
         }
+        Thread.Sleep(300);
+        if (_mode == "rotate") StartLog();
+        if (_mode != "silent") Write("pub.cc:1] operator(): PublishDevice succeeded. contact_removed: false");
         if (_mode == "user")
         {
             Thread.Sleep(100);

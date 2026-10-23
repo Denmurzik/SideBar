@@ -98,7 +98,7 @@ internal sealed class RefreshService : IDisposable
 
             // Без успехов опорой служит первое наблюдение: иначе при отсутствии приложения предупреждения не будет никогда.
             var anchor = state.LastSuccess ?? state.FirstSeen;
-            var warned = state.LastWarned > _lastWarned ? state.LastWarned : _lastWarned;   // и в памяти: сбой Save не должен повторять уведомление каждые 5 мин
+            var warned = (state.LastWarned, _lastWarned) switch { ({ } x, { } y) => x > y ? x : y, var (x, y) => x ?? y };   // и в памяти: сбой Save не должен повторять уведомление каждые 5 мин
             if (_scheduler.ShouldWarn(now, anchor, warned))
             {
                 _lastWarned = now;
