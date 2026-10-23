@@ -65,7 +65,7 @@ public partial class App : Application
         InitShare();
         _window.Settled += s =>
         {
-            if (s != PanelState.Hidden) return;
+            if (s != PanelState.Hidden) { RefreshTileHold(); return; }   // карточка показана: заметкам снова нужен таймер
             DragOut.Reset();
             CardHidden();
         };
@@ -157,7 +157,8 @@ public partial class App : Application
     {
         PanelState state;
         lock (_gate) state = _machine?.State ?? PanelState.Hidden;
-        bool shown = _debugOpen || state != PanelState.Hidden;
+        // Slide: Peek — полоска 10 epx, заметку не прочесть; InPlace: Peek показывает карточку целиком
+        bool shown = _debugOpen || state == PanelState.Open || (_mode == EdgeMode.InPlace && state != PanelState.Hidden);
         return shown && _recv.Content(_share?.State ?? ShareTileState.Idle) == TileContent.Note;
     }
 
@@ -167,8 +168,12 @@ public partial class App : Application
         var now = DateTimeOffset.UtcNow;
         bool hold = (_share?.HoldsCardOpen ?? false) || _recv.HoldsCardOpen(now);
         lock (_gate) { if (_machine is not null) _machine.HoldOpen = hold; }
-        bool needTick = (_share?.State ?? ShareTileState.Idle) != ShareTileState.Idle || _recv.NeedsTick(now);
-        if (needTick) _tileTimer?.Start(); else _tileTimer?.Stop();
+        bool needTick = (_share?.State ?? ShareTileState.Idle) != ShareTileState.Idle || _recv.NeedsTick(now, NoteVisible());
+        if (needTick)
+        {
+            if (_tileTimer is { IsEnabled: false }) { _recv.Resume(now); _tileTimer.Start(); }   // паузу таймера заметкам не засчитываем
+        }
+        else _tileTimer?.Stop();
     }
 
     // запрос ждёт решения, карточка спрятана: подпрыгивает сразу и затем раз в 10 с (как привлечение внимания в Dock)

@@ -25,6 +25,8 @@ public sealed class ReceiveTileModel
     /// <summary>Time left for a note after the pointer leaves it.</summary>
     public static readonly TimeSpan NoteAfterHover = TimeSpan.FromSeconds(3);
     /// <summary>The card stays open this long after the last consent was decided.</summary>
+    /// <summary>One tick never counts for more than this: a long gap (the timer was stopped) must not eat a fresh note.</summary>
+    public static readonly TimeSpan MaxTickStep = TimeSpan.FromSeconds(1);
     public static readonly TimeSpan HoldAfterDecision = TimeSpan.FromSeconds(1.5);
 
     readonly List<ConsentItem> _consents = [];
@@ -82,6 +84,7 @@ public sealed class ReceiveTileModel
     {
         int id = ++_seq;
         _notes.Add((new NoteItem(id, lines, buttons), NoteDuration));
+        _lastTick = now;   // the countdown of the new note starts here, not at the last tick of a stopped timer
         if (_notes.Count > MaxNotes) _notes.RemoveAt(0);
         Changed?.Invoke();
         return id;
@@ -113,6 +116,7 @@ public sealed class ReceiveTileModel
         var dt = _lastTick is { } last ? now - last : TimeSpan.Zero;
         _lastTick = now;
         if (dt < TimeSpan.Zero) dt = TimeSpan.Zero;
+        if (dt > MaxTickStep) dt = MaxTickStep;
         if (_notes.Count == 0 || !noteVisible || _hovered) return;
         var top = _notes[^1];
         var left = top.Remaining - dt;
@@ -128,7 +132,11 @@ public sealed class ReceiveTileModel
     public bool HoldsCardOpen(DateTimeOffset now) => HasConsent || now < _holdUntil;
 
     /// <summary>The tile needs ticks (notes expire, the hold ends, attention bounces repeat).</summary>
-    public bool NeedsTick(DateTimeOffset now) => HasConsent || _notes.Count > 0 || now < _holdUntil;
+    /// <param name="noteVisible">Unseen notes do not need the timer: it is restarted when the card shows them.</param>
+    public bool NeedsTick(DateTimeOffset now, bool noteVisible) => HasConsent || (_notes.Count > 0 && noteVisible) || now < _holdUntil;
+
+    /// <summary>The tile timer was just restarted: the pause before it is not counted.</summary>
+    public void Resume(DateTimeOffset now) => _lastTick = now;
 
     public TileContent Content(ShareTileState send) => Priority(HasConsent, send, _notes.Count > 0);
 

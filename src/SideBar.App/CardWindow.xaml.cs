@@ -199,6 +199,7 @@ public sealed partial class CardWindow : Window
         _bounceLeft = _layout.LeftFor(PanelState.Hidden);
         _bounceStart = Now;
         _bouncing = true;
+        SetClickThrough(true);
         PlaceAt(_bounceLeft);
         Show();
         StartTicking();
@@ -213,6 +214,7 @@ public sealed partial class CardWindow : Window
     {
         if (_mode != EdgeMode.InPlace || _state != PanelState.Hidden || _ticking || _pulsing) return false;
         _pulsing = true;
+        SetClickThrough(true);
         _pulseStart = Now;
         Root.Opacity = 0;
         PlaceAt(_layout.LeftFor(PanelState.Open));
@@ -221,9 +223,17 @@ public sealed partial class CardWindow : Window
         return true;
     }
 
+    // во время сигнала окно не глотает клики (и XAML-содержимое не принимает нажатий)
+    void SetClickThrough(bool on)
+    {
+        Root.IsHitTestVisible = !on;
+        WindowFrame.SetClickThrough(_hwnd, on);
+    }
+
     void EndPulse()
     {
         _pulsing = false;
+        SetClickThrough(false);
         Root.Opacity = 0;
         CompositionTarget.Rendering -= OnTick;
         _ticking = false;
@@ -238,6 +248,7 @@ public sealed partial class CardWindow : Window
     void EndBounce()
     {
         _bouncing = false;
+        SetClickThrough(false);
         CompositionTarget.Rendering -= OnTick;
         _ticking = false;
         AppWindow.Hide();
@@ -249,6 +260,7 @@ public sealed partial class CardWindow : Window
     {
         _bouncing = false;
         _pulsing = false;
+        SetClickThrough(false);
         if (_ticking)
         {
             CompositionTarget.Rendering -= OnTick;
@@ -282,11 +294,13 @@ public sealed partial class CardWindow : Window
         {
             // обычный автомат главнее прыжка: пружина продолжает с текущей позиции, без скачка
             _bouncing = false;
+            SetClickThrough(false);
             _pos.Reset(_bounceLeft);
         }
         if (_pulsing)
         {
             _pulsing = false;
+            SetClickThrough(false);
             _fade.Reset(Root.Opacity * FadeScale);   // затухание продолжается с текущей прозрачности
             _fade.Retarget(0, now);                  // если дальше открытие не последует, окно доугасает и скрывается
             StartTicking();

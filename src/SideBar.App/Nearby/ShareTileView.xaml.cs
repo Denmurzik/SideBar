@@ -36,7 +36,15 @@ public sealed partial class ShareTileView : UserControl
         {
             int k = i;
             var slot = _slots[i];
-            slot.Tapped += (_, _) => { Log.Write($"share: slot {k} tapped"); if (_slotIds[k] is { } id) DeviceChosen?.Invoke(id); };
+            // нажатие на иконку засчитывается так же, как у кнопок запроса: сразу после смены содержимого плитки оно может попасть в чужую иконку
+            bool armed = false;
+            slot.PointerPressed += (_, _) => armed = CanPress();
+            slot.Tapped += (_, _) =>
+            {
+                if (!armed) { Log.Write("tile tap ignored (not armed)"); return; }
+                Log.Write($"share: slot {k} tapped");
+                if (_slotIds[k] is { } id) DeviceChosen?.Invoke(id);
+            };
             slot.PointerEntered += (_, _) => slot.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x20, 0xFF, 0xFF, 0xFF));
             slot.PointerExited += (_, _) => slot.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF));
         }
@@ -46,7 +54,7 @@ public sealed partial class ShareTileView : UserControl
     Action<int, bool>? _decide;
     Func<bool> _settledOpen = () => false;
     readonly ConsentArming _arming = new();
-    string _consentSignature = "", _noteSignature = "";
+    string _consentSignature = "", _noteSignature = "", _contentKey = "";
 
     /// <summary>Приём внутри плитки: модель запросов и заметок и обработчик «Принять»/«Отклонить» (UI-поток).</summary>
     public void BindReceive(ReceiveTileModel recv, Action<int, bool> decide, Func<bool> settledOpen)
@@ -61,6 +69,8 @@ public sealed partial class ShareTileView : UserControl
     /// <summary>Возвращает true, если плитка занята (логотип надо скрыть). Приоритет: запрос > отправка > заметка > покой.</summary>
     public bool Render(ShareTileModel m)
     {
+        string key = m.State + "|" + string.Join(',', m.Devices.Select(d => d.Id)) + "|" + (_recv?.HasConsent ?? false) + "|" + (_recv?.CurrentNote?.Id ?? 0);
+        if (key != _contentKey) { _contentKey = key; _arming.Placed(DateTimeOffset.UtcNow); }   // под курсором могла оказаться другая кнопка
         var content = _recv?.Content(m.State) ?? (m.State == ShareTileState.Idle ? TileContent.Idle : TileContent.Send);
         bool send = content == TileContent.Send;   // отправка под запросом не прерывается, просто не видна
         SearchPanel.Visibility = send && m.State == ShareTileState.Searching ? Visibility.Visible : Visibility.Collapsed;
@@ -184,7 +194,7 @@ public sealed partial class ShareTileView : UserControl
                 try { button.Act(); }
                 catch (Exception e) { Log.Write("note action failed: " + Log.Describe(e)); }
                 r.RemoveNote(note.Id);
-            }, accent: false));
+            }, accent: false, gate: CanPress));
         }
     }
 
@@ -202,7 +212,7 @@ public sealed partial class ShareTileView : UserControl
         var border = new Border { CornerRadius = new CornerRadius(4), Padding = new Thickness(narrow ? 10 : 6, 5, narrow ? 10 : 6, 5), Background = normal, Child = text };
         border.PointerEntered += (_, _) => border.Background = hover;
         border.PointerExited += (_, _) => border.Background = normal;
-        bool armed = true;
+        bool armed = gate is null;
         border.PointerPressed += (_, _) => armed = gate is null || gate();
         border.Tapped += (_, e) =>
         {

@@ -64,8 +64,8 @@ public class ReceiveTileModelTests
         m.RemoveConsent(id, T0);
         Assert.True(m.HoldsCardOpen(T0.AddSeconds(1.4)));
         Assert.False(m.HoldsCardOpen(T0.AddSeconds(1.6)));
-        Assert.True(m.NeedsTick(T0.AddSeconds(1)));
-        Assert.False(m.NeedsTick(T0.AddSeconds(2)));
+        Assert.True(m.NeedsTick(T0.AddSeconds(1), false));
+        Assert.False(m.NeedsTick(T0.AddSeconds(2), false));
     }
 
     [Fact]
@@ -79,15 +79,20 @@ public class ReceiveTileModelTests
         Assert.False(m.HoldsCardOpen(T0.AddMinutes(1).AddSeconds(2)));
     }
 
+    // 0.5 s ticks, like the 250 ms timer but cheaper; one tick never counts for more than a second
+    static void Run(ReceiveTileModel m, double fromSec, double toSec, bool visible)
+    {
+        for (double t = fromSec; t <= toSec + 1e-9; t += 0.5) m.Tick(T0.AddSeconds(t), visible);
+    }
+
     [Fact]
     public void Visible_note_hides_after_eight_seconds()
     {
         var m = new ReceiveTileModel();
         m.AddNote(["x"], [], T0);
-        m.Tick(T0, true);
-        m.Tick(T0.AddSeconds(7.9), true);
+        Run(m, 0, 7.5, true);
         Assert.NotNull(m.CurrentNote);
-        m.Tick(T0.AddSeconds(8.1), true);
+        Run(m, 8, 8.5, true);
         Assert.Null(m.CurrentNote);
     }
 
@@ -96,13 +101,42 @@ public class ReceiveTileModelTests
     {
         var m = new ReceiveTileModel();
         m.AddNote(["x"], [], T0);
-        m.Tick(T0, false);
-        m.Tick(T0.AddMinutes(5), false);
+        Run(m, 0, 300, false);
         Assert.NotNull(m.CurrentNote);
-        m.Tick(T0.AddMinutes(5).AddSeconds(7), true);
+        Run(m, 300.5, 307, true);
         Assert.NotNull(m.CurrentNote);
-        m.Tick(T0.AddMinutes(5).AddSeconds(8.5), true);
+        Run(m, 307.5, 309, true);
         Assert.Null(m.CurrentNote);
+    }
+
+    [Fact]
+    public void A_note_added_after_a_long_gap_survives_the_first_tick()
+    {
+        var m = new ReceiveTileModel();
+        m.Tick(T0, true);                                   // the timer stops here
+        var later = T0.AddMinutes(10);
+        m.AddNote(["x"], [], later);
+        m.Tick(later.AddMilliseconds(250), true);
+        Assert.NotNull(m.CurrentNote);
+    }
+
+    [Fact]
+    public void One_tick_never_counts_for_more_than_a_second()
+    {
+        var m = new ReceiveTileModel();
+        m.AddNote(["x"], [], T0);
+        m.Tick(T0, true);
+        m.Tick(T0.AddMinutes(10), true);   // a stall: only one second is taken off
+        Assert.NotNull(m.CurrentNote);
+    }
+
+    [Fact]
+    public void Unseen_notes_do_not_need_the_timer()
+    {
+        var m = new ReceiveTileModel();
+        m.AddNote(["x"], [], T0);
+        Assert.False(m.NeedsTick(T0, noteVisible: false));
+        Assert.True(m.NeedsTick(T0, noteVisible: true));
     }
 
     [Fact]
@@ -110,12 +144,11 @@ public class ReceiveTileModelTests
     {
         var m = new ReceiveTileModel();
         m.AddNote(["x"], [], T0);
-        m.Tick(T0, true);
-        m.Tick(T0.AddSeconds(5), true);
-        m.Tick(T0.AddSeconds(60), false);   // hidden for a minute
-        m.Tick(T0.AddSeconds(62), true);
-        Assert.NotNull(m.CurrentNote);      // 5 + 2 s seen
-        m.Tick(T0.AddSeconds(65), true);
+        Run(m, 0, 5, true);
+        Run(m, 5.5, 60, false);   // hidden for a minute
+        Run(m, 60.5, 62, true);
+        Assert.NotNull(m.CurrentNote);      // about 5 + 2 s seen
+        Run(m, 62.5, 66, true);
         Assert.Null(m.CurrentNote);
     }
 
@@ -134,15 +167,14 @@ public class ReceiveTileModelTests
     {
         var m = new ReceiveTileModel();
         m.AddNote(["x"], [], T0);
-        m.Tick(T0, true);
-        m.Tick(T0.AddSeconds(6), true);   // 2 s left
+        Run(m, 0, 6, true);               // about 2 s left
         m.SetHovered(true, T0.AddSeconds(6));
-        m.Tick(T0.AddSeconds(60), true);
+        Run(m, 6.5, 60, true);
         Assert.NotNull(m.CurrentNote);
-        m.SetHovered(false, T0.AddSeconds(60));
-        m.Tick(T0.AddSeconds(62), true);
+        m.SetHovered(false, T0.AddSeconds(60));   // at least 3 s from now
+        Run(m, 60.5, 62, true);
         Assert.NotNull(m.CurrentNote);
-        m.Tick(T0.AddSeconds(63.1), true);
+        Run(m, 62.5, 64, true);
         Assert.Null(m.CurrentNote);
     }
 

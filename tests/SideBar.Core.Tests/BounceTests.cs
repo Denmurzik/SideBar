@@ -80,15 +80,15 @@ public class ConsentArmingTests
         => Assert.False(new ConsentArming().CanAccept(T0, true));
 
     [Fact]
-    public void A_press_counts_only_after_600ms_from_the_last_placement()
+    public void A_press_counts_only_after_350ms_from_the_last_placement()
     {
         var a = new ConsentArming();
         a.Placed(T0);
-        Assert.False(a.CanAccept(T0.AddMilliseconds(599), true));
-        Assert.True(a.CanAccept(T0.AddMilliseconds(600), true));
+        Assert.False(a.CanAccept(T0.AddMilliseconds(349), true));
+        Assert.True(a.CanAccept(T0.AddMilliseconds(350), true));
         a.Placed(T0.AddSeconds(5));   // next consent slid under the cursor
-        Assert.False(a.CanAccept(T0.AddSeconds(5.3), true));
-        Assert.True(a.CanAccept(T0.AddSeconds(5.7), true));
+        Assert.False(a.CanAccept(T0.AddSeconds(5.2), true));
+        Assert.True(a.CanAccept(T0.AddSeconds(5.4), true));
     }
 
     [Fact]
