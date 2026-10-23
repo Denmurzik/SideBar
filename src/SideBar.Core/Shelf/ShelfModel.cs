@@ -35,6 +35,15 @@ public sealed class ShelfModel
         return true;
     }
 
+    /// <summary>Снимает элементы по Id одним уведомлением Changed. Возвращает число снятых.</summary>
+    public int RemoveRange(IEnumerable<Guid> ids)
+    {
+        var set = ids.ToHashSet();
+        var n = _items.RemoveAll(i => set.Contains(i.Id));
+        if (n > 0) Changed?.Invoke();
+        return n;
+    }
+
     /// <summary>Убирает элементы, чей файл исчез. Возвращает число убранных.</summary>
     public int PruneMissing(Func<string, bool> exists)
     {

@@ -35,7 +35,7 @@ public sealed class ShelfStore(string filePath)
                 items = ShelfModel.Sanitize(parsed);
                 return true;
             }
-            catch (IOException) when (attempt < LoadRetries)
+            catch (IOException e) when (attempt < LoadRetries && e is not (FileNotFoundException or DirectoryNotFoundException))
             {
                 Thread.Sleep(LoadRetryDelayMs);   // антивирус/индексатор держит файл коротко: не принимаем его за битый
             }

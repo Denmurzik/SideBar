@@ -177,11 +177,16 @@ sealed partial class ShelfService
     }
 
     /// <summary>Снимает элемент после успешного выноса; Owned-файл удаляется через 30 с (приёмник может копировать асинхронно), только внутри Shelf\.</summary>
-    public void RemoveAfterDragOut(Guid id)
+    public void RemoveAfterDragOut(IReadOnlyCollection<Guid> ids)
     {
-        var item = Model.Items.FirstOrDefault(i => i.Id == id);
-        if (item is null || !Model.Remove(id)) return;
-        if (item.Kind == ShelfItemKind.Owned && IsStrictlyInsideShelf(item.Path)) ScheduleDelete(item.Path);
+        var items = Model.Items.Where(i => ids.Contains(i.Id)).ToList();
+        if (items.Count == 0) return;
+        _batch = true;
+        try { Model.RemoveRange(items.Select(i => i.Id)); }
+        finally { _batch = false; }
+        Persist();
+        foreach (var item in items)
+            if (item.Kind == ShelfItemKind.Owned && IsStrictlyInsideShelf(item.Path)) ScheduleDelete(item.Path);
     }
 
     DropPayload ReadPayload(nint dobj, out List<VirtualDescriptor> descriptors)

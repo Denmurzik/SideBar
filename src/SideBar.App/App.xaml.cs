@@ -45,7 +45,12 @@ public partial class App : Application
         _shelf.Load();
         _window = new CardWindow();
         _window.BindShelf(_shelf);
-        _window.Settled += s => { if (s == PanelState.Hidden) _trimmer.OnHidden(); };
+        _window.Settled += s =>
+        {
+            if (s != PanelState.Hidden) return;
+            DragOut.Reset();
+            _trimmer.OnHidden();
+        };
 
         var (layout, mode, scale, primary) = Measure();
         _layout = layout;

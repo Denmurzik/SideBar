@@ -391,8 +391,17 @@ sealed class Driver
         var two = new DataObject();
         two.SetData(DataFormats.FileDrop, new[] { refFile });
         DragToPanel(two, W, H);
-        s = WaitShelf(x => x.Count == 4);
-        Check("D0 shelf prepared: file ref, folder ref, owned, file ref", s.Count == 4 && s.Count(x => x.Kind == Owned) == 1, Dump(s));
+        var png = Path.Combine(_srcDir, "picture.png");
+        using (var bmp = new Bitmap(200, 120))
+        {
+            using (var g = Graphics.FromImage(bmp)) g.FillRectangle(new System.Drawing.Drawing2D.LinearGradientBrush(new Rectangle(0, 0, 200, 120), Color.OrangeRed, Color.RoyalBlue, 45f), 0, 0, 200, 120);
+            bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+        }
+        var pngDrop = new DataObject();
+        pngDrop.SetData(DataFormats.FileDrop, new[] { png });
+        DragToPanel(pngDrop, W, H);
+        s = WaitShelf(x => x.Count == 5);
+        Check("D0 shelf prepared: file ref, folder ref, owned, file ref, png ref", s.Count == 5 && s.Count(x => x.Kind == Owned) == 1, Dump(s));
         if (OpenCard(W, H)) Shot("3-stack", W, H);
         MoveTo(W - 700, H, 200); Thread.Sleep(500);
         var ids = s.Select(x => x.Id).ToList();
@@ -433,7 +442,7 @@ sealed class Driver
             var got = _received;
             bool names = got.Any(p => p.EndsWith("a.txt")) && got.Any(p => p.EndsWith("ref-original.txt")) && got.Any(p => p.EndsWith("owned-out.bin"))
                 && got.Any(p => p.TrimEnd('\\').EndsWith("folder1"));
-            Check("D3 drag-out onto accepting window -> Copy, all 4 items received (files + folder), shelf emptied, reference originals intact",
+            Check("D3 drag-out onto accepting window -> Copy, all 5 items received (files + folder), shelf emptied, reference originals intact",
                 _otherEffect == "Copy" && names && s.Count == 0 && File.Exists(a) && File.Exists(refFile) && Directory.Exists(folder)
                 && AppLog().Contains("DropResult=Copy"), $"effect={_otherEffect} received=[{string.Join("; ", got)}]\n" + Dump(s));
             Thread.Sleep(2000);

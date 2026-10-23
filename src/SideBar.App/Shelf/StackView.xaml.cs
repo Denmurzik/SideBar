@@ -22,7 +22,10 @@ public sealed partial class StackView : UserControl
 
     ShelfService? _shelf;
     ShelfModel? _model;
-    readonly Dictionary<Guid, ImageSource?> _thumbs = [];   // null — миниатюры нет, показывается глиф
+    readonly Dictionary<Guid, Thumb?> _thumbs = [];   // null — миниатюры нет, показывается глиф
+
+    /// <summary>IsIcon — значок оболочки (прозрачный, без рамки); иначе картинка (скругление и рамка). Aspect = ширина/высота.</summary>
+    sealed record Thumb(ImageSource Source, bool IsIcon, double Aspect);
     readonly HashSet<Guid> _loading = [];
 
     public event Action? FanRequested;
@@ -90,32 +93,39 @@ public sealed partial class StackView : UserControl
                 },
             },
         };
-        var frame = new Border
+        // подложки нет: под акрилом непрозрачный квадрат читался бы чёрной плиткой
+        holder.Opacity = depth switch { 0 => 1.0, 1 => 0.85, _ => 0.7 };
+        _thumbs.TryGetValue(item.Id, out var thumb);
+        FrameworkElement visual;
+        if (thumb is { IsIcon: false } pic)
         {
-            CornerRadius = new CornerRadius(6),
-            Background = (Brush)Application.Current.Resources["SolidBackgroundFillColorSecondaryBrush"],
-            BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
-            BorderThickness = new Thickness(1),
-        };
-        if (_thumbs.TryGetValue(item.Id, out var src) && src != null)
-            frame.Child = new Image { Source = src, Stretch = Stretch.Uniform, Margin = new Thickness(4) };
-        else
-            frame.Child = new FontIcon
+            double w = pic.Aspect >= 1 ? PreviewSize : PreviewSize * pic.Aspect, h = pic.Aspect >= 1 ? PreviewSize / pic.Aspect : PreviewSize;
+            double scale = XamlRoot?.RasterizationScale ?? 1;
+            bool dark = ActualTheme != ElementTheme.Light;
+            visual = new Border
             {
-                Glyph = DocumentGlyph,
-                FontFamily = new FontFamily("Segoe Fluent Icons"),
-                FontSize = 40,
-                Opacity = 0.6,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
+                Width = w,
+                Height = h,
+                CornerRadius = new CornerRadius(4),
+                BorderThickness = new Thickness(1 / scale),
+                BorderBrush = new SolidColorBrush(dark ? Windows.UI.Color.FromArgb(0x70, 0x8C, 0x8C, 0x8C) : Windows.UI.Color.FromArgb(0x50, 0x40, 0x40, 0x40)),
+                Child = new Image { Source = pic.Source, Stretch = Stretch.UniformToFill },
             };
+        }
+        else if (thumb != null)
+            visual = new Image { Source = thumb.Source, Stretch = Stretch.Uniform };
+        else
+            visual = new FontIcon { Glyph = DocumentGlyph, FontFamily = new FontFamily("Segoe Fluent Icons"), FontSize = 40, Opacity = 0.6 };
+        visual.HorizontalAlignment = HorizontalAlignment.Center;
+        visual.VerticalAlignment = VerticalAlignment.Center;
+        var frame = visual;
         holder.Children.Add(frame);
         return holder;
     }
 
     async Task LoadThumbnail(ShelfItem item)
     {
-        ImageSource? result = null;
+        Thumb? result = null;
         try
         {
             IStorageItemProperties? props = Directory.Exists(item.Path)
@@ -126,7 +136,7 @@ public sealed partial class StackView : UserControl
             {
                 var bmp = new BitmapImage();
                 await bmp.SetSourceAsync(thumb);
-                result = bmp;
+                result = new Thumb(bmp, thumb.Type == ThumbnailType.Icon, bmp.PixelHeight > 0 ? (double)bmp.PixelWidth / bmp.PixelHeight : 1);
             }
         }
         catch (Exception ex) { Log.Write("thumbnail failed: " + Log.Describe(ex)); }

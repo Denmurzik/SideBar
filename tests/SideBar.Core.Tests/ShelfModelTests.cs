@@ -102,4 +102,20 @@ public class ShelfModelTests
         Assert.Equal("file", m.Add(@"C:\", ShelfItemKind.Reference)!.DisplayName);
         Assert.Equal("dir", m.Add(@"C:\x\dir\", ShelfItemKind.Reference)!.DisplayName);
     }
+
+    [Fact]
+    public void RemoveRange_removes_by_id_with_a_single_Changed()
+    {
+        var m = new ShelfModel();
+        var a = m.Add(@"C:\x\a.txt", ShelfItemKind.Reference)!;
+        var b = m.Add(@"C:\x\b.txt", ShelfItemKind.Reference)!;
+        var c = m.Add(@"C:\x\c.txt", ShelfItemKind.Reference)!;
+        int changed = 0;
+        m.Changed += () => changed++;
+        Assert.Equal(2, m.RemoveRange([a.Id, c.Id, Guid.NewGuid()]));
+        Assert.Equal(1, changed);
+        Assert.Equal([b.Id], m.Items.Select(i => i.Id));
+        Assert.Equal(0, m.RemoveRange([a.Id]));
+        Assert.Equal(1, changed);
+    }
 }

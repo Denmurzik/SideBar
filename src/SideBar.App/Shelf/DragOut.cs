@@ -20,6 +20,7 @@ static class DragOut
     /// <summary>Заполняет DataPackage (StorageFile для файлов, StorageFolder для каталогов); недоступные элементы пропускает. Нечего нести — Cancel.</summary>
     public static async void Start(DragStartingEventArgs e, IReadOnlyList<ShelfItem> items)
     {
+        Reset();   // потерянный DropCompleted не должен оставить все внешние drop'ы отклонёнными
         var deferral = e.GetDeferral();
         try
         {
@@ -60,7 +61,14 @@ static class DragOut
         IsActive = false;
         Log.Write($"drag-out completed: DropResult={e.DropResult}");
         if (e.DropResult == DataPackageOperation.None) return;
-        foreach (var item in carried) shelf.RemoveAfterDragOut(item.Id);
+        shelf.RemoveAfterDragOut(carried.Select(i => i.Id).ToList());
+    }
+
+    /// <summary>Сбрасывает состояние выноса (начало нового drag, скрытие карточки).</summary>
+    public static void Reset()
+    {
+        s_items = [];
+        IsActive = false;
     }
 
     static async Task<IStorageItem?> Resolve(ShelfItem item)
