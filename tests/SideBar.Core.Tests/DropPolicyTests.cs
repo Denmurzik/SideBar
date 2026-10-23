@@ -16,6 +16,16 @@ public class DropPolicyTests
         DropPolicy.Decide(p, existing.Contains, Roots);
 
     [Fact]
+    public void IsTempPath_matches_only_paths_under_the_roots()
+    {
+        Assert.True(DropPolicy.IsTempPath(Tmp, Roots));
+        Assert.True(DropPolicy.IsTempPath(@"c:\users\U\appdata\local\temp\7zO1234\a.txt", Roots));
+        Assert.False(DropPolicy.IsTempPath(Doc, Roots));
+        Assert.False(DropPolicy.IsTempPath(@"C:\Users\u\AppData\Local\Temp2\a.txt", Roots));
+        Assert.False(DropPolicy.IsTempPath("", Roots));
+    }
+
+    [Fact]
     public void Explorer_paths_win_over_virtual()
     {
         var d = Decide(P([Doc], [Virt]), Doc);

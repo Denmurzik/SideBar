@@ -17,11 +17,22 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Build tests
+      - name: Build Core tests
         run: dotnet build tests/SideBar.Core.Tests -c Release
+
+      - name: Build Nearby tests
+        run: dotnet build tests/SideBar.Nearby.Tests -c Release
+
+      - name: Build dev tools (not run)
+        run: |
+          dotnet build tools/SideBar.Nearby.Cli -c Release
+          dotnet build tools/SideBar.DragDriver -c Release
 
       - name: Run tests
         run: tests/SideBar.Core.Tests/bin/Release/net10.0-windows10.0.26100.0/SideBar.Core.Tests.exe
+
+      - name: Run Nearby tests
+        run: tests/SideBar.Nearby.Tests/bin/Release/net10.0-windows10.0.26100.0/SideBar.Nearby.Tests.exe
 
       - name: Publish (NativeAOT)
         shell: bash

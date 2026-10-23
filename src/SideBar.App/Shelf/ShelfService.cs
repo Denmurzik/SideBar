@@ -28,6 +28,8 @@ sealed partial class ShelfService
     readonly ShelfStore _store;
     readonly object _pendingGate = new();
     readonly HashSet<Timer> _pending = [];
+    // снятые с полки Owned-папки, которые нельзя удалять раньше срока; переживают перезапуск (shelf.json)
+    readonly Dictionary<Guid, DateTimeOffset> _pendingDeletes = [];
     bool _batch;
 
     public ShelfService(string? dataDir = null)
@@ -53,12 +55,15 @@ sealed partial class ShelfService
         int pruned = 0, recovered = 0;
         try
         {
-            bool readable = _store.TryLoad(out var items);
+            bool readable = _store.TryLoad(out var items, out var pendingDeletes);
             if (readable)
             {
                 model = new ShelfModel(items);
                 pruned = model.PruneMissing(Exists);
+                var due = AdoptPendingDeletes(model, pendingDeletes, out bool pendingChanged);
                 SweepOrphans(model);
+                if (pendingChanged) pruned++;   // тот же признак «надо пересохранить»
+                RearmPendingDeletes(due);
             }
             else
             {
@@ -79,6 +84,68 @@ sealed partial class ShelfService
         if (pruned > 0 || recovered > 0) Persist();
         model.Changed += OnChanged;
         Log.Write($"shelf loaded: {model.Items.Count} item(s), pruned {pruned}");
+    }
+
+    /// <summary>
+    /// Принимает отложенные удаления из shelf.json: записи без папки (уже удалена) и записи папок, на которые ссылается элемент, отбрасываются.
+    /// Возвращает принятые (guid, срок). <paramref name="changed"/> — список отличается от сохранённого.
+    /// </summary>
+    List<KeyValuePair<Guid, DateTimeOffset>> AdoptPendingDeletes(ShelfModel model, IReadOnlyList<PendingDelete> saved, out bool changed)
+    {
+        var referenced = ReferencedDirs(model);
+        var now = DateTimeOffset.UtcNow;
+        changed = false;
+        lock (_pendingGate)
+        {
+            _pendingDeletes.Clear();
+            foreach (var p in saved)
+            {
+                var dir = FindGuidDir(p.Guid);
+                if (dir == null || referenced.Contains(NormalizeDir(dir))) continue;
+                var capped = PendingDeletePolicy.Cap(p.DeleteAfterUtc, now, TimeSpan.FromMilliseconds(_ownedDeleteDelayMs));
+                if (capped != p.DeleteAfterUtc) changed = true;
+                _pendingDeletes[p.Guid] = capped;
+            }
+            changed |= _pendingDeletes.Count != saved.Count;
+            return [.. _pendingDeletes];
+        }
+    }
+
+    /// <summary>Для каждой записи заводит таймер на срок; если срок уже прошёл — проверка «не открыт ли файл» выполняется сразу (не слепое удаление).</summary>
+    void RearmPendingDeletes(List<KeyValuePair<Guid, DateTimeOffset>> due)
+    {
+        foreach (var (guid, when) in due)
+        {
+            var ms = (when - DateTimeOffset.UtcNow).TotalMilliseconds;
+            ScheduleDelete(guid, ms <= 0 ? 0 : (int)Math.Min(ms, int.MaxValue));
+        }
+    }
+
+    /// <summary>Папка элемента по разобранному Guid (имя может быть в любом формате Guid, как в SweepOrphans); null — нет или это reparse point.</summary>
+    string? FindGuidDir(Guid guid)
+    {
+        try
+        {
+            if (!Directory.Exists(ShelfRoot)) return null;
+            foreach (var dir in Directory.EnumerateDirectories(ShelfRoot))
+                if (Guid.TryParse(Path.GetFileName(dir), out var g) && g == guid
+                    && (File.GetAttributes(dir) & FileAttributes.ReparsePoint) == 0) return dir;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return null;
+    }
+
+    static string NormalizeDir(string dir) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir));
+
+    static HashSet<string> ReferencedDirs(ShelfModel model)
+    {
+        var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in model.Items)
+        {
+            var parent = Path.GetDirectoryName(item.Path);
+            if (!string.IsNullOrEmpty(parent)) referenced.Add(NormalizeDir(parent));
+        }
+        return referenced;
     }
 
     /// <summary>
@@ -194,9 +261,18 @@ sealed partial class ShelfService
         _batch = true;
         try { Model.RemoveRange(items.Select(i => i.Id)); }
         finally { _batch = false; }
-        Persist();
+        var toDelete = new List<Guid>();
+        var deleteAfter = DateTimeOffset.UtcNow.AddMilliseconds(_ownedDeleteDelayMs);
         foreach (var item in items)
-            if (item.Kind == ShelfItemKind.Owned && IsStrictlyInsideShelf(item.Path)) ScheduleDelete(item.Path);
+        {
+            if (item.Kind != ShelfItemKind.Owned || !IsStrictlyInsideShelf(item.Path)) continue;
+            var dir = Path.GetDirectoryName(item.Path);
+            if (dir == null || !IsStrictlyInsideShelf(dir) || !Guid.TryParse(Path.GetFileName(dir), out var guid)) continue;
+            lock (_pendingGate) _pendingDeletes[guid] = deleteAfter;
+            toDelete.Add(guid);
+        }
+        Persist();   // срок записывается до таймера: перезапуск внутри окна не должен его потерять
+        foreach (var guid in toDelete) ScheduleDelete(guid, _ownedDeleteDelayMs);
     }
 
     DropPayload ReadPayload(nint dobj, out List<VirtualDescriptor> descriptors)
@@ -306,7 +382,12 @@ sealed partial class ShelfService
 
     void Persist()
     {
-        try { _store.Save(Model.Items); }
+        try
+        {
+            PendingDelete[] pending;
+            lock (_pendingGate) pending = [.. _pendingDeletes.Select(p => new PendingDelete(p.Key, p.Value))];
+            _store.Save(Model.Items, pending);
+        }
         catch (Exception e) { Log.Write("shelf save failed: " + Log.Describe(e)); }
     }
 
@@ -316,17 +397,15 @@ sealed partial class ShelfService
         try
         {
             if (!Directory.Exists(ShelfRoot)) return;
-            var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var item in model.Items)
-            {
-                var parent = Path.GetDirectoryName(item.Path);
-                if (!string.IsNullOrEmpty(parent)) referenced.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(parent)));
-            }
+            var referenced = ReferencedDirs(model);
+            HashSet<Guid> pending;
+            lock (_pendingGate) pending = [.. _pendingDeletes.Keys];
             foreach (var dir in Directory.EnumerateDirectories(ShelfRoot))
             {
-                if (!Guid.TryParse(Path.GetFileName(dir), out _)) continue;
+                if (!Guid.TryParse(Path.GetFileName(dir), out var guid)) continue;
                 if ((File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0) continue;
-                if (referenced.Contains(Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir)))) continue;
+                if (pending.Contains(guid)) continue;   // ждёт своего срока (RearmPendingDeletes), не раньше
+                if (referenced.Contains(NormalizeDir(dir))) continue;
                 Materializer.TryDeleteDir(dir);
             }
         }
@@ -367,29 +446,37 @@ sealed partial class ShelfService
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
-    /// <summary>Через задержку (≥ 10 мин по умолчанию) удаляет файл, если он не занят; занят — повтор раз в 2 мин до часа, дальше уберёт очистка при старте.</summary>
-    void ScheduleDelete(string path, int delayMs = -1, int waitedSec = 0)
+    /// <summary>Все файлы папки не открыты никем (пустая/отсутствующая папка — свободна).</summary>
+    static bool IsDirFree(string dir)
+    {
+        try { return !Directory.Exists(dir) || Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories).All(IsFree); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>
+    /// Через задержку (≥ 10 мин по умолчанию) удаляет папку Shelf\&lt;guid&gt;, если в ней нет открытых файлов; занята — повтор раз в 2 мин до часа,
+    /// дальше срок остаётся в shelf.json, и при следующем старте действует то же правило. Срок хранится в <c>_pendingDeletes</c> и в shelf.json.
+    /// </summary>
+    void ScheduleDelete(Guid guid, int delayMs, int waitedSec = 0)
     {
         Timer? timer = null;
+        var retrying = false;
         timer = new Timer(state =>
         {
             try
             {
-                if (!IsFree(path))
+                var dir = FindGuidDir(guid);
+                if (dir == null || !IsStrictlyInsideShelf(dir)) return;
+                if (!IsDirFree(dir))
                 {
                     if (waitedSec + BusyRetrySec <= BusyGiveUpSec)
                     {
-                        ScheduleDelete(path, BusyRetrySec * 1000, waitedSec + BusyRetrySec);
+                        retrying = true;
+                        ScheduleDelete(guid, BusyRetrySec * 1000, waitedSec + BusyRetrySec);
                     }
-                    else Log.Write("owned file still busy, left to the startup sweep");
+                    else Log.Write("owned file still busy, left to the next startup");
                 }
-                else
-                {
-                    File.Delete(path);
-                    var dir = Path.GetDirectoryName(path)!;
-                    if (IsStrictlyInsideShelf(dir) && Guid.TryParse(Path.GetFileName(dir), out _) && !Directory.EnumerateFileSystemEntries(dir).Any())
-                        Directory.Delete(dir);
-                }
+                else Materializer.TryDeleteDir(dir);
             }
             catch (Exception e)
             {
@@ -397,10 +484,15 @@ sealed partial class ShelfService
             }
             finally
             {
-                lock (_pendingGate) _pending.Remove(timer!);
+                // запись снимается, только когда папки больше нет; shelf.json дозапишется при ближайшем Persist (устаревшая запись при загрузке отбрасывается)
+                lock (_pendingGate)
+                {
+                    _pending.Remove(timer!);
+                    if (!retrying && FindGuidDir(guid) == null) _pendingDeletes.Remove(guid);
+                }
                 timer!.Dispose();
             }
-        }, null, delayMs < 0 ? _ownedDeleteDelayMs : delayMs, Timeout.Infinite);
+        }, null, delayMs, Timeout.Infinite);
         lock (_pendingGate) _pending.Add(timer);
     }
 

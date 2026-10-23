@@ -6,7 +6,8 @@ static class WindowFrame
 {
     const int GWL_EXSTYLE = -20;
     const nint WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
-    const uint WM_NCCALCSIZE = 0x83, WM_MOUSEACTIVATE = 0x21;
+    const uint WM_NCCALCSIZE = 0x83, WM_MOUSEACTIVATE = 0x21, WM_NCHITTEST = 0x84;
+    const nint HTTRANSPARENT = -1;
     const nint MA_NOACTIVATE = 3;
     const uint SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOZORDER = 4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20;
 
@@ -18,6 +19,13 @@ static class WindowFrame
     [DllImport("comctl32.dll")] static extern nint DefSubclassProc(nint hwnd, uint msg, nint w, nint l);
 
     static readonly HashSet<nint> _stripped = [];
+    static readonly HashSet<nint> _clickThrough = [];   // UI-поток; NcProc читает его на том же потоке
+
+    /// <summary>Окно не перехватывает мышь (WM_NCHITTEST -> HTTRANSPARENT): на время сигнала о запросе.</summary>
+    public static void SetClickThrough(nint hwnd, bool on)
+    {
+        if (on) _clickThrough.Add(hwnd); else _clickThrough.Remove(hwnd);
+    }
 
     public static uint GetDpi(nint hwnd) => GetDpiForWindow(hwnd);
 
@@ -34,6 +42,7 @@ static class WindowFrame
     {
         if (msg == WM_NCCALCSIZE && w != 0) return 0;
         if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+        if (msg == WM_NCHITTEST && _clickThrough.Contains(h)) return HTTRANSPARENT;
         return DefSubclassProc(h, msg, w, l);
     }
 

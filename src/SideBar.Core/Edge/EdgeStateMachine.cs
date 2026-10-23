@@ -22,6 +22,9 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
     /// <summary>Пока Open, курсор внутри этого прямоугольника (окно-веер) считается «над карточкой»; null — обычное поведение.</summary>
     public void SetKeepOpenRect(PxRect? rect) => _keepOpen = rect;
 
+    /// <summary>Пока true, Open не скрывается по уходу курсора (поиск устройств и передача из плитки Quick Share).</summary>
+    public bool HoldOpen { get; set; }
+
     public void Relayout(CardLayout layout, EdgeMode mode)
     {
         _layout = layout;
@@ -59,7 +62,7 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
                 return null;
             default:
                 // ЛКМ зажата — идёт перетаскивание (возможно, из карточки): остаёмся открытыми до его конца
-                if (overCard || i.LeftButton) _leftCardAt = None;
+                if (overCard || i.LeftButton || HoldOpen) _leftCardAt = None;
                 else if (_leftCardAt == None) _leftCardAt = i.NowMs;
                 else if (i.NowMs - _leftCardAt >= HideDelayMs) return Go(PanelState.Hidden, i);
                 return null;

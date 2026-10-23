@@ -44,6 +44,13 @@ public static class DropPolicy
         Environment.GetFolderPath(Environment.SpecialFolder.InternetCache),
     ];
 
+    /// <summary>True when the path lies under one of the temp roots: its owner (7-Zip, WinRAR, a mail client) may delete it at any moment.</summary>
+    public static bool IsTempPath(string path, IReadOnlyList<string> tempRoots)
+    {
+        try { return IsInside(path, tempRoots.Select(NormalizeRoot).OfType<string>().ToList()); }
+        catch { return false; }
+    }
+
     private static bool Exists(string path, Func<string, bool> exists)
     {
         try { return exists(path); }

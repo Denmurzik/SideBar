@@ -1,6 +1,8 @@
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
 
+using SideBar.Sharing;
+
 namespace SideBar.Shelf;
 
 [StructLayout(LayoutKind.Sequential)]
@@ -15,12 +17,17 @@ internal partial interface IDropTarget
     [PreserveSig] int Drop(nint dataObj, int keyState, POINTL pt, ref int effect);
 }
 
-/// <summary>Один IDropTarget на все окна карточки (верхнее и дочерние окна WinUI). Колбэки приходят на UI-поток.</summary>
+/// <summary>
+/// Один IDropTarget на все окна карточки (верхнее и дочерние окна WinUI). Колбэки приходят на UI-поток.
+/// Под курсором плитка Quick Share: файлы (и свой drag стопки) отправляются; иначе — приём в стопку, свой drag отклоняется.
+/// </summary>
 [GeneratedComClass]
-internal sealed partial class ShelfDropTarget(ShelfService shelf, Func<bool> isOwnDragActive, Action<bool> onDragActive) : IDropTarget
+internal sealed partial class ShelfDropTarget(
+    ShelfService shelf, Func<bool> isOwnDragActive, Action<bool> onDragActive,
+    Func<int, int, bool> isOverShareTile, Func<bool> canShare, Action<IReadOnlyList<string>> onShareDrop) : IDropTarget
 {
     const int Copy = ShelfService.DropEffectCopy;
-    bool _accepts;
+    bool _accepts, _hasFiles;
 
     public int DragEnter(nint dataObj, int keyState, POINTL pt, ref int effect)
     {
@@ -28,24 +35,38 @@ internal sealed partial class ShelfDropTarget(ShelfService shelf, Func<bool> isO
         {
             onDragActive(true);
             _accepts = !isOwnDragActive() && OleData.HasDroppable(dataObj);
+            _hasFiles = OleData.HasFiles(dataObj);
+            Log.Write($"drop enter: own={isOwnDragActive()} files={_hasFiles} accepts={_accepts} effect={effect}");
         }
-        catch (Exception e) { _accepts = false; Log.Write("DragEnter failed: " + Log.Describe(e)); }
-        effect = _accepts ? effect & Copy : 0;
+        catch (Exception e) { _accepts = _hasFiles = false; Log.Write("DragEnter failed: " + Log.Describe(e)); }
+        effect = Effect(pt, effect);
         return 0;
     }
 
     public int DragOver(int keyState, POINTL pt, ref int effect)
     {
-        bool own = false;
-        try { own = isOwnDragActive(); }
-        catch (Exception e) { Log.Write("DragOver failed: " + Log.Describe(e)); }
-        effect = _accepts && !own ? effect & Copy : 0;
+        effect = Effect(pt, effect);
         return 0;
+    }
+
+    int Effect(POINTL pt, int offered)
+    {
+        try
+        {
+            bool own = isOwnDragActive();
+            if (isOverShareTile(pt.X, pt.Y)) return canShare() && (own || _hasFiles) ? offered & Copy : 0;   // идёт отправка: новую не начинаем
+            return _accepts && !own ? offered & Copy : 0;
+        }
+        catch (Exception e)
+        {
+            Log.Write("DragOver failed: " + Log.Describe(e));
+            return 0;
+        }
     }
 
     public int DragLeave()
     {
-        _accepts = false;
+        _accepts = _hasFiles = false;
         try { onDragActive(false); }
         catch (Exception e) { Log.Write("DragLeave failed: " + Log.Describe(e)); }
         return 0;
@@ -56,10 +77,26 @@ internal sealed partial class ShelfDropTarget(ShelfService shelf, Func<bool> isO
         int result = ShelfService.DropEffectNone;
         try
         {
-            if (_accepts && !isOwnDragActive() && (effect & Copy) != 0) result = shelf.AcceptDrop(dataObj);
+            bool own = isOwnDragActive();
+            Log.Write($"drop: own={own} overShare={isOverShareTile(pt.X, pt.Y)} effect={effect}");
+            if ((effect & Copy) != 0)
+            {
+                if (isOverShareTile(pt.X, pt.Y))
+                {
+                    // временные файлы копируются сейчас: источник удалит их после drop
+                    var paths = canShare() ? (own ? DragOut.CarriedPaths : ShareStaging.Stage(OleData.ReadHDrop(dataObj))) : [];
+                    if (paths.Count > 0)
+                    {
+                        if (own) DragOut.KeepItemsAfterDrop();   // отправка не уносит элементы из стопки
+                        onShareDrop(paths);
+                        result = Copy;
+                    }
+                }
+                else if (_accepts && !own) result = shelf.AcceptDrop(dataObj);
+            }
         }
         catch (Exception e) { Log.Write("Drop failed: " + Log.Describe(e)); }
-        _accepts = false;
+        _accepts = _hasFiles = false;
         try { onDragActive(false); }
         catch (Exception e) { Log.Write("Drop failed: " + Log.Describe(e)); }
         effect = result;
@@ -81,11 +118,12 @@ static unsafe partial class OleDropTarget
     /// Регистрирует IDropTarget на верхнем окне и всех его дочерних окнах (WinUI сама регистрирует свои цели на дочерних,
     /// мы их заменяем: карточке нужен только наш приём). Вызывать на UI-потоке после создания содержимого окна.
     /// </summary>
-    public static DropRegistration Register(nint topHwnd, ShelfService shelf, Func<bool> isOwnDragActive, Action<bool> onDragActive)
+    public static DropRegistration Register(nint topHwnd, ShelfService shelf, Func<bool> isOwnDragActive, Action<bool> onDragActive,
+        Func<int, int, bool> isOverShareTile, Func<bool> canShare, Action<IReadOnlyList<string>> onShareDrop)
     {
         int hrInit = OleInitialize(0);   // S_OK / S_FALSE (уже инициализировано) — оба годятся
         var wrappers = new StrategyBasedComWrappers();
-        var target = new ShelfDropTarget(shelf, isOwnDragActive, onDragActive);
+        var target = new ShelfDropTarget(shelf, isOwnDragActive, onDragActive, isOverShareTile, canShare, onShareDrop);
         nint unk = wrappers.GetOrCreateComInterfaceForObject(target, CreateComInterfaceFlags.None);
         Marshal.QueryInterface(unk, in IID_IDropTarget, out nint dt);
         var reg = new DropRegistration(topHwnd, unk, dt, target);
