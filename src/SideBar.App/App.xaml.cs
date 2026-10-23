@@ -66,7 +66,14 @@ public partial class App : Application
         // после первого Show (его ставит в очередь Initialize): к этому времени у окна есть дочерние HWND WinUI
         _ui.TryEnqueue(() =>
         {
-            _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => DragOut.IsActive, OnForeignDrag);
+            try
+            {
+                _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => DragOut.IsActive, OnForeignDrag);
+            }
+            catch (Exception e)
+            {
+                Log.Write("drop target registration failed, shelf drop disabled: " + Log.Describe(e));   // только полка отключается, карточка работает
+            }
             Log.Write("ready");
         });
         _hook = new MouseHook(OnMouse, OnPrimaryDown);
@@ -124,6 +131,7 @@ public partial class App : Application
         lock (_gate)
         {
             if (_machine.State != PanelState.Open) return;
+            if (_fanZone is not null) { _ui?.TryEnqueue(() => _fan?.Hide()); return; }   // повторный клик по стопке закрывает веер
             card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
             scale = _scale;
         }

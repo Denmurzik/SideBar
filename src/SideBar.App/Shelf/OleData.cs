@@ -259,6 +259,10 @@ static unsafe partial class OleData
         // IStream vtable: 3 Read
         nint s = m.pData;
         var read = (delegate* unmanaged[Stdcall]<nint, byte*, uint, uint*, int>)(*(nint**)s)[3];
+        // IStream vtable: 5 Seek — источник мог уже читать поток (позиция не в начале); сбой Seek игнорируем
+        var seek = (delegate* unmanaged[Stdcall]<nint, long, uint, ulong*, int>)(*(nint**)s)[5];
+        ulong newPos;
+        _ = seek(s, 0, 0 /* STREAM_SEEK_SET */, &newPos);
         var buf = new byte[Chunk];
         long total = 0;
         fixed (byte* b = buf)
