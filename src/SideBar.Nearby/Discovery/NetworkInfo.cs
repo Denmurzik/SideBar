@@ -25,12 +25,16 @@ public static partial class NetworkInfo
             return new AdapterInfo(nic.Id, nic.OperationalStatus, nic.NetworkInterfaceType, props.GetIPv4Properties().Index, v4, hasGateway);
         });
 
-    /// <summary>IPv4 address and index of the interface Windows would use to reach the internet (best metric); null when none.
-    /// Tunnels and virtual adapters without a route are never returned.</summary>
+    /// <summary>IPv4 address and index of the LAN interface Quick Share should use: wired/Wi-Fi with a real gateway,
+    /// Private/Domain networks first, then the best-metric one. VPN tunnels and virtual adapters are never returned; null when none.</summary>
     public static (IPAddress Address, int InterfaceIndex)? DefaultRouteInterface() =>
-        DefaultRouteInterface(SystemAdapters(), BestInterfaceIndex);
+        DefaultRouteInterface(SystemAdapters(), BestInterfaceIndex, CategoryOf);
 
-    internal static (IPAddress Address, int InterfaceIndex)? DefaultRouteInterface(IEnumerable<Func<AdapterInfo>> adapters, Func<int?> bestIndex)
+    internal static (IPAddress Address, int InterfaceIndex)? DefaultRouteInterface(IEnumerable<Func<AdapterInfo>> adapters, Func<int?> bestIndex) =>
+        DefaultRouteInterface(adapters, bestIndex, _ => NetworkCategory.Private);
+
+    internal static (IPAddress Address, int InterfaceIndex)? DefaultRouteInterface(
+        IEnumerable<Func<AdapterInfo>> adapters, Func<int?> bestIndex, Func<int, NetworkCategory> categoryOf)
     {
         var candidates = new List<AdapterInfo>();
         try
@@ -40,8 +44,7 @@ public static partial class NetworkInfo
                 try
                 {
                     var a = describe();
-                    if (a.Status == OperationalStatus.Up && a.Type is not (NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
-                        && a.Index is not null && a.Address is not null)
+                    if (a.Status == OperationalStatus.Up && IsLan(a.Type) && a.HasGateway && a.Index is not null && a.Address is not null)
                         candidates.Add(a);
                 }
                 catch (Exception) { }
@@ -49,11 +52,27 @@ public static partial class NetworkInfo
         }
         catch (NetworkInformationException) { }
 
+        if (candidates.Count == 0) return null;
+
         int? best = null;
         try { best = bestIndex(); } catch (Exception) { }
 
-        var pick = (best is { } i ? candidates.FirstOrDefault(c => c.Index == i) : null) ?? candidates.FirstOrDefault(c => c.HasGateway);
-        return pick is null ? null : (pick.Address!, pick.Index!.Value);
+        // One category lookup per candidate; a failing lookup only demotes that adapter.
+        var preferred = candidates.Where(c => IsHomeCategory(SafeCategory(categoryOf, c.Index!.Value))).ToList();
+        var pool = preferred.Count > 0 ? preferred : candidates;
+        var pick = (best is { } i ? pool.FirstOrDefault(c => c.Index == i) : null) ?? pool[0];
+        return (pick.Address!, pick.Index!.Value);
+    }
+
+    static bool IsLan(NetworkInterfaceType type) => type is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Ethernet3Megabit
+        or NetworkInterfaceType.FastEthernetT or NetworkInterfaceType.FastEthernetFx or NetworkInterfaceType.GigabitEthernet
+        or NetworkInterfaceType.Wireless80211;
+
+    static bool IsHomeCategory(NetworkCategory c) => c is NetworkCategory.Private or NetworkCategory.Domain;
+
+    static NetworkCategory SafeCategory(Func<int, NetworkCategory> categoryOf, int index)
+    {
+        try { return categoryOf(index); } catch (Exception) { return NetworkCategory.Unknown; }
     }
 
     private static unsafe int? BestInterfaceIndex()
