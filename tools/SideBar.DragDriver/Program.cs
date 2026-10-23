@@ -274,18 +274,29 @@ sealed class Driver
             !Directory.Exists(orphan) && Directory.Exists(foreign), $"orphanExists={Directory.Exists(orphan)} foreignExists={Directory.Exists(foreign)}");
         MoveTo(W - 700, H, 200); Thread.Sleep(500);
 
-        // T12: битый shelf.json -> Shelf\<guid> не чистятся (там часто единственные копии), файл уходит в shelf.bad.json
+        // T12: битый shelf.json -> Shelf\<guid> не чистятся, файл уходит в shelf.bad.json, Owned-элементы восстановлены из папок
         var ownedBefore = ReadShelf().Where(x => x.Kind == Owned).Select(x => x.Path).ToList();
         int dirsBeforeBad = ShelfDirs();
         StopApp();
         File.WriteAllText(_shelfJson, "{ not json [[[");
         bool restarted2 = StartApp();
         var bad = Path.Combine(_dataDir, "shelf.bad.json");
-        Check("T12 corrupt shelf.json -> Shelf folders and owned files survive, bad file kept as shelf.bad.json, shelf starts empty",
-            restarted2 && ownedBefore.Count > 0 && ownedBefore.All(File.Exists) && ShelfDirs() == dirsBeforeBad
-            && File.Exists(bad) && File.ReadAllText(bad).Contains("not json") && !File.Exists(_shelfJson),
-            $"owned={ownedBefore.Count} dirs={ShelfDirs()}/{dirsBeforeBad} bad={File.Exists(bad)} json={File.Exists(_shelfJson)}");
+        var rec = ReadShelf();
+        bool recovered = RecoveredOk(rec, ownedBefore);
+        Check("T12 corrupt shelf.json -> bad file kept as shelf.bad.json, Shelf folders intact, owned items recovered (Id = folder guid)",
+            restarted2 && ownedBefore.Count > 0 && ShelfDirs() == dirsBeforeBad && File.Exists(bad) && File.ReadAllText(bad).Contains("not json") && recovered,
+            $"owned={ownedBefore.Count} dirs={ShelfDirs()}/{dirsBeforeBad} bad={File.Exists(bad)}" + "\n" + Dump(rec));
+        StopApp();
+        bool restarted3 = StartApp();
+        var rec2 = ReadShelf();
+        Check("T12b second restart keeps the recovered items (same Ids)",
+            restarted3 && RecoveredOk(rec2, ownedBefore) && rec2.Select(x => x.Id).SequenceEqual(rec.Select(x => x.Id)) && ShelfDirs() == dirsBeforeBad, Dump(rec2));
     }
+
+    bool RecoveredOk(List<ShelfEntry> items, List<string> ownedPaths) =>
+        items.Count == ownedPaths.Count && items.All(x => x.Kind == Owned && File.Exists(x.Path)
+            && Guid.TryParse(Path.GetFileName(Path.GetDirectoryName(x.Path)), out var g) && g == x.Id)
+        && Same(items.Select(x => x.Path), [.. ownedPaths]);
 
     // ---- проверки состояния ----
     List<ShelfEntry> ReadShelf()

@@ -40,21 +40,24 @@ sealed partial class ShelfService
     public void Load()
     {
         ShelfModel model;
-        int pruned = 0;
+        int pruned = 0, recovered = 0;
         try
         {
             bool readable = _store.TryLoad(out var items);
-            model = new ShelfModel(items);
             if (readable)
             {
+                model = new ShelfModel(items);
                 pruned = model.PruneMissing(Exists);
                 SweepOrphans(model);
             }
             else
             {
-                // пустой список ссылок удалил бы все Shelf\<guid>, а они часто единственные копии: не чистим, файл откладываем
-                Log.Write("shelf.json unreadable: keeping Shelf folders, moving the file aside");
+                // пустой список ссылок удалил бы все Shelf\<guid>, а они часто единственные копии: не чистим,
+                // файл откладываем, а Owned-элементы восстанавливаем из самих папок
+                Log.Write("shelf.json unreadable: moving the file aside, recovering owned items from Shelf folders");
                 QuarantineStateFile();
+                model = new ShelfModel(RecoverOwned());
+                recovered = model.Items.Count;
             }
         }
         catch (Exception e)
@@ -63,9 +66,36 @@ sealed partial class ShelfService
             model = new ShelfModel();
         }
         Model = model;
-        if (pruned > 0) Persist();
+        if (pruned > 0 || recovered > 0) Persist();
         model.Changed += OnChanged;
         Log.Write($"shelf loaded: {model.Items.Count} item(s), pruned {pruned}");
+    }
+
+    /// <summary>
+    /// Owned-элементы по папкам Shelf\<guid> с ровно одним обычным файлом (*.part не считаются): Id = guid папки, AddedAt = время создания.
+    /// Остальные папки не трогаем. Старейшие сверх лимита отбрасываются из списка (папки остаются).
+    /// </summary>
+    List<ShelfItem> RecoverOwned()
+    {
+        var result = new List<ShelfItem>();
+        try
+        {
+            if (!Directory.Exists(ShelfRoot)) return result;
+            foreach (var dir in Directory.EnumerateDirectories(ShelfRoot))
+            {
+                if (!Guid.TryParse(Path.GetFileName(dir), out var id) || id == Guid.Empty) continue;
+                if ((File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0) continue;
+                var entries = Directory.EnumerateFileSystemEntries(dir)
+                    .Where(e => !e.EndsWith(".part", StringComparison.OrdinalIgnoreCase)).ToList();
+                if (entries.Count != 1 || Directory.Exists(entries[0])) continue;
+                if ((File.GetAttributes(entries[0]) & FileAttributes.ReparsePoint) != 0) continue;
+                result.Add(new ShelfItem(id, Path.GetFileName(entries[0]), entries[0], ShelfItemKind.Owned,
+                    new DateTimeOffset(Directory.GetCreationTime(dir))));
+            }
+        }
+        catch (Exception e) { Log.Write("owned recovery failed: " + Log.Describe(e)); }
+        result.Sort((a, b) => a.AddedAt.CompareTo(b.AddedAt));
+        return result.Count > ShelfModel.MaxItems ? result[^ShelfModel.MaxItems..] : result;
     }
 
     void QuarantineStateFile()
