@@ -203,17 +203,86 @@ public class OfficialCertificateStoreTests : IDisposable
     }
 
     [Fact]
-    public void TryLoad_reads_files_in_place_and_leaves_no_copies()
+    public void TryLoad_succeeds_while_the_official_app_holds_the_files_open_for_writing()
     {
         var pc = NewDevice("PC");
         WriteSharingDir(Dir, [pc.Private], [pc.Public]);
-        var before = Directory.GetFiles(Path.GetTempPath(), "sidebar-certs-*").Length;
+        var prefs = Path.Combine(Dir, "preferences.json");
+        var log = Path.Combine(Dir, "NearbySharePublicCertificateDatabase", "000003.log");
+        // The way the official app holds them: open for write, others may read, write and delete.
+        using var prefsHandle = new FileStream(prefs, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+        using var logHandle = new FileStream(log, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+        var sleeps = 0;
+        using var store = NewStore(_ => sleeps++);
+
+        Assert.True(store.TryLoad(out var identity, out var failure));
+
+        Assert.NotNull(identity);
+        Assert.Null(failure);
+        Assert.Equal(0, sleeps);
+    }
+
+    [Fact]
+    public void TryLoad_broken_key_pair_is_FormatChanged_not_a_partial_identity()
+    {
+        var pc = NewDevice("PC");
+        pc.Private.KeyPairPkcs8 = RandomNumberGenerator.GetBytes(40);
+        WriteSharingDir(Dir, [pc.Private], [pc.Public]);
         using var store = NewStore();
 
-        Assert.True(store.TryLoad(out _, out _));
+        Assert.False(store.TryLoad(out var identity, out var failure));
 
-        Assert.Equal(before, Directory.GetFiles(Path.GetTempPath(), "sidebar-certs-*").Length);
-        Assert.Equal(before, Directory.GetDirectories(Path.GetTempPath(), "sidebar-certs-*").Length);
+        Assert.Null(identity);
+        Assert.Equal(CertLoadFailure.FormatChanged, failure);
+        Assert.Null(store.Summary);
+    }
+
+    [Fact]
+    public void TryLoad_wrong_length_secret_key_is_FormatChanged()
+    {
+        var pc = NewDevice("PC");
+        pc.Private.SecretKey = RandomNumberGenerator.GetBytes(16);
+        WriteSharingDir(Dir, [pc.Private], [pc.Public]);
+        using var store = NewStore();
+
+        Assert.False(store.TryLoad(out var identity, out var failure));
+
+        Assert.Null(identity);
+        Assert.Equal(CertLoadFailure.FormatChanged, failure);
+    }
+
+    [Fact]
+    public void TryLoad_skips_a_broken_certificate_and_takes_the_next_valid_one()
+    {
+        var broken = NewDevice("PC", lifetime: TimeSpan.FromHours(3));
+        broken.Private.MetadataEncryptionKey = RandomNumberGenerator.GetBytes(5);
+        var good = NewDevice("PC", lifetime: TimeSpan.FromHours(30));
+        WriteSharingDir(Dir, [broken.Private, good.Private], []);
+        using var store = NewStore();
+
+        Assert.True(store.TryLoad(out var identity, out _));
+
+        Assert.True(identity!.SelfTestSignature());
+        Assert.Equal(good.Private.NotAfter, store.NextExpiry); // the broken one does not count
+        _ = identity.CreateEndpointInfo("PC", DeviceKind.Laptop).Encode(); // no exception
+    }
+
+    [Fact]
+    public void TryLoad_certificate_without_optional_fields_still_loads()
+    {
+        var pc = NewDevice("PC");
+        WriteSharingDir(Dir, [pc.Private], [pc.Public]);
+        var prefs = Path.Combine(Dir, "preferences.json");
+        var text = File.ReadAllText(prefs);
+        text = System.Text.RegularExpressions.Regex.Replace(text, "\"unencrypted_metadata\":\"[^\"]*\",?", "");
+        text = System.Text.RegularExpressions.Regex.Replace(text, ",?\"consumed_salts\":\"[^\"]*\"", "");
+        Assert.DoesNotContain("consumed_salts", text);
+        Assert.DoesNotContain("unencrypted_metadata", text);
+        File.WriteAllText(prefs, text);
+        using var store = NewStore();
+
+        Assert.True(store.TryLoad(out var identity, out var failure), failure?.ToString());
+        Assert.NotNull(identity);
     }
 
     [Fact]
@@ -294,7 +363,7 @@ public class OfficialCertificateStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task Debounce_collapses_a_burst_of_file_changes_into_one_event()
+    public void Debounce_collapses_a_burst_of_file_changes_into_one_event()
     {
         var pc = NewDevice("PC");
         WriteSharingDir(Dir, [pc.Private], [pc.Public]);
@@ -312,7 +381,6 @@ public class OfficialCertificateStoreTests : IDisposable
         Assert.Equal(0, raised);
         debounce.Fire();
         Assert.Equal(1, raised);
-        await Task.CompletedTask;
     }
 
     [Fact]
@@ -332,9 +400,9 @@ public class OfficialCertificateStoreTests : IDisposable
     }
 
     [Fact]
-    public void Expiry_timer_targets_the_selected_certificate_and_reload_switches_to_the_next_one()
+    public void Expiry_tick_is_capped_at_ten_minutes_and_reload_switches_to_the_next_cert_after_expiry()
     {
-        // The current self-share certificate lapses in 5 hours; its successor is already valid from then on.
+        // The current self-share certificate lapses in 4 hours; its successor is valid from then on.
         var current = NewDevice("PC", lifetime: TimeSpan.FromHours(5));
         var next = NewDevice("PC", offset: TimeSpan.FromHours(5), lifetime: TimeSpan.FromHours(72));
         WriteSharingDir(Dir, [current.Private, next.Private], []);
@@ -345,17 +413,58 @@ public class OfficialCertificateStoreTests : IDisposable
         var expiry = _timers.Timers[1];
 
         Assert.True(store.TryLoad(out var first, out _));
-        Assert.Equal(current.Private.NotAfter - _now, expiry.Due);
+        Assert.Equal(TimeSpan.FromMinutes(10), expiry.Due);
         Assert.Equal(current.Private.NotAfter, store.NextExpiry);
 
-        _now = current.Private.NotAfter; // the clock reaches not_after: the timer fires, SideBar reloads
+        _now = current.Private.NotAfter;
         expiry.Fire();
         Assert.Equal(1, raised);
 
         Assert.True(store.TryLoad(out var second, out _));
         Assert.NotSame(first, second);
         Assert.Equal(next.Private.NotAfter, store.NextExpiry);
-        Assert.Equal(next.Private.NotAfter - _now, expiry.Due);
+        Assert.Equal(TimeSpan.FromMinutes(10), expiry.Due);
+    }
+
+    [Fact]
+    public void Expiry_tick_before_the_deadline_re_arms_without_raising_and_after_it_raises_once()
+    {
+        var current = NewDevice("PC", lifetime: TimeSpan.FromHours(5));
+        WriteSharingDir(Dir, [current.Private], []);
+        using var store = NewStore();
+        var raised = 0;
+        store.FilesChanged += () => Interlocked.Increment(ref raised);
+        store.StartWatching();
+        var expiry = _timers.Timers[1];
+        Assert.True(store.TryLoad(out _, out _));
+
+        // Ten minutes of timer time passed, but the clock says the deadline is still ahead.
+        _now += TimeSpan.FromMinutes(10);
+        expiry.Due = Timeout.InfiniteTimeSpan;
+        expiry.Fire();
+        Assert.Equal(0, raised);
+        Assert.Equal(TimeSpan.FromMinutes(10), expiry.Due);
+
+        // The PC slept through the deadline: the next tick notices at once.
+        _now = current.Private.NotAfter + TimeSpan.FromHours(8);
+        expiry.Fire();
+        Assert.Equal(1, raised);
+        expiry.Fire();
+        Assert.Equal(1, raised); // once per loaded certificate
+    }
+
+    [Fact]
+    public void Close_to_the_deadline_the_tick_waits_only_until_it()
+    {
+        var current = NewDevice("PC", lifetime: TimeSpan.FromHours(5));
+        WriteSharingDir(Dir, [current.Private], []);
+        using var store = NewStore();
+        store.StartWatching();
+        _now = current.Private.NotAfter - TimeSpan.FromMinutes(3);
+
+        Assert.True(store.TryLoad(out _, out _));
+
+        Assert.Equal(TimeSpan.FromMinutes(3), _timers.Timers[1].Due);
     }
 
     [Fact]
@@ -365,7 +474,6 @@ public class OfficialCertificateStoreTests : IDisposable
         WriteSharingDir(Dir, [current.Private], []);
         using var store = NewStore();
         store.StartWatching();
-        var expiry = _timers.Timers[1];
         Assert.True(store.TryLoad(out _, out _));
 
         _now = current.Private.NotAfter;
@@ -373,7 +481,41 @@ public class OfficialCertificateStoreTests : IDisposable
         Assert.False(store.TryLoad(out var identity, out var failure));
         Assert.Null(identity);
         Assert.Equal(CertLoadFailure.NoValidCertificate, failure);
-        Assert.Equal(Timeout.InfiniteTimeSpan, expiry.Due);
+        Assert.Null(store.NextExpiry);
+        Assert.Equal(TimeSpan.FromMinutes(10), _timers.Timers[1].Due); // keeps ticking (watcher retry)
+    }
+
+    [Fact]
+    public void Missing_directory_at_start_is_retried_on_the_tick_and_picked_up_later()
+    {
+        using var store = NewStore();
+        store.StartWatching(); // the Sharing directory does not exist yet
+        var debounce = _timers.Timers[0];
+
+        var pc = NewDevice("PC");
+        WriteSharingDir(Dir, [pc.Private], [pc.Public]); // Quick Share gets installed
+        _timers.Timers[1].Fire(); // 10-minute tick creates the watcher
+        File.AppendAllText(Path.Combine(Dir, "preferences.json"), " ");
+
+        SpinWait.SpinUntil(() => debounce.Due == TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10));
+        Assert.Equal(TimeSpan.FromSeconds(2), debounce.Due);
+    }
+
+    [Fact]
+    public void Events_after_Dispose_are_not_raised()
+    {
+        var pc = NewDevice("PC");
+        WriteSharingDir(Dir, [pc.Private], [pc.Public]);
+        var store = NewStore();
+        var raised = 0;
+        store.FilesChanged += () => Interlocked.Increment(ref raised);
+        store.StartWatching();
+        store.Dispose();
+
+        _timers.Timers[0].Fire();
+        _timers.Timers[1].Fire();
+
+        Assert.Equal(0, raised);
     }
 
     [Fact]

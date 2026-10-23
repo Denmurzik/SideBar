@@ -26,8 +26,8 @@ internal sealed class PrivateCertificate
         SecretKey = B64Url(e.GetProperty("secret_key").GetString()!),
         MetadataEncryptionKey = B64Url(e.GetProperty("metadata_encryption_key").GetString()!),
         Id = B64Url(e.GetProperty("id").GetString()!),
-        UnencryptedMetadata = B64Url(e.GetProperty("unencrypted_metadata").GetString()!),
-        ConsumedSalts = Salts(e.GetProperty("consumed_salts").GetString()!),
+        UnencryptedMetadata = e.TryGetProperty("unencrypted_metadata", out var um) && um.GetString() is { } umText ? B64Url(umText) : [],
+        ConsumedSalts = e.TryGetProperty("consumed_salts", out var cs) && cs.GetString() is { } csText ? Salts(csText) : [],
     };
 
     static DateTimeOffset FromUnixNanos(long ns) => DateTimeOffset.FromUnixTimeMilliseconds(ns / 1_000_000);
@@ -44,13 +44,6 @@ internal sealed class PrivateCertificate
         s = s.Replace('-', '+').Replace('_', '/');
         s = s.PadRight((s.Length + 3) / 4 * 4, '=');
         return Convert.FromBase64String(s);
-    }
-
-    public byte[] PublicKeySpki()
-    {
-        using var ec = ECDsa.Create();
-        ec.ImportPkcs8PrivateKey(KeyPairPkcs8, out _);
-        return ec.ExportSubjectPublicKeyInfo();
     }
 }
 
@@ -81,33 +74,6 @@ internal sealed class PublicCertificate
     public bool IsStructurallyValid =>
         StartSeconds < EndSeconds && PublicKey.Length > 0 && SecretKey.Length == 32 && SecretId.Length == 32 &&
         EncryptedMetadata.Length > 0 && KeyTag.Length == 32;
-
-    // Receiver side: encrypted metadata key (salt + 14 bytes from the advertisement) -> metadata key,
-    // verified against the key tag. Returns null when this certificate is not the sender's.
-    public byte[]? TryDecryptMetadataKey(byte[] salt, byte[] encryptedKey)
-    {
-        if (!IsStructurallyValid) return null;
-        var key = NearbyCrypto.Ctr(SecretKey, salt, encryptedKey);
-        var tag = HMACSHA256.HashData(new byte[32], key);
-        return CryptographicOperations.FixedTimeEquals(tag, KeyTag) ? key : null;
-    }
-
-    public byte[]? DecryptMetadata(byte[] metadataKey)
-    {
-        var aesKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, metadataKey, 32, salt: [], info: []);
-        var nonce = HKDF.DeriveKey(HashAlgorithmName.SHA256, SecretKey, 12, salt: [], info: []);
-        if (EncryptedMetadata.Length < 16) return null;
-        var ct = EncryptedMetadata.AsSpan(0, EncryptedMetadata.Length - 16);
-        var tag = EncryptedMetadata.AsSpan(EncryptedMetadata.Length - 16);
-        var pt = new byte[ct.Length];
-        try
-        {
-            using var gcm = new AesGcm(aesKey, 16);
-            gcm.Decrypt(nonce, ct, tag, pt);
-            return pt;
-        }
-        catch (CryptographicException) { return null; }
-    }
 }
 
 internal static class NearbyCrypto

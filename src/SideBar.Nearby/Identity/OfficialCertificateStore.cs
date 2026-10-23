@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using SideBar.Nearby.Certs;
 
@@ -48,11 +49,15 @@ public sealed class OfficialCertificateStore(
     private static readonly TimeSpan DebounceDelay = TimeSpan.FromSeconds(2);
     // google/nearby accepts public certificates 30 minutes outside their window.
     private static readonly TimeSpan PublicTolerance = TimeSpan.FromMinutes(30);
-    // Timer due times are limited (about 49 days); a longer wait just re-arms through an earlier reload.
-    private static readonly TimeSpan MaxTimerWait = TimeSpan.FromDays(20);
+    // .NET timers do not advance while the PC sleeps, so the wait is capped and the clock is re-checked on every tick.
+    private static readonly TimeSpan MaxTimerWait = TimeSpan.FromMinutes(10);
 
     private readonly TimeProvider _timers = timers ?? TimeProvider.System;
     private readonly Lock _gate = new();
+    private readonly Lock _loadGate = new();
+    private DateTimeOffset? _nextExpiry;
+    private CertificateSummary? _summary;
+    private bool _expiryRaised;
     private FileSystemWatcher? _watcher;
     private ITimer? _debounce;
     private ITimer? _expiry;
@@ -63,12 +68,21 @@ public sealed class OfficialCertificateStore(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google", "Nearby", "Sharing");
 
     /// <summary>Earliest not_after of the valid SELF_SHARE private certificates of the last successful load.</summary>
-    public DateTimeOffset? NextExpiry { get; private set; }
+    public DateTimeOffset? NextExpiry
+    {
+        get { lock (_gate) return _nextExpiry; }
+    }
 
     /// <summary>Summary of the last successful load (null before one).</summary>
-    public CertificateSummary? Summary { get; private set; }
+    public CertificateSummary? Summary
+    {
+        get { lock (_gate) return _summary; }
+    }
 
-    /// <summary>Raised on a thread-pool thread: files changed (after 2 s of quiet) or the selected certificate expired.</summary>
+    /// <summary>
+    /// Raised on a thread-pool thread: files changed (after 2 s of quiet) or the selected certificate expired.
+    /// Both need <see cref="StartWatching"/>: without it nothing is watched and no expiry timer runs.
+    /// </summary>
     public event Action? FilesChanged;
 
     /// <summary>
@@ -77,6 +91,12 @@ public sealed class OfficialCertificateStore(
     /// blocks the caller for up to 400 ms in the worst case.
     /// </summary>
     public bool TryLoad(out CertificateIdentity? identity, out CertLoadFailure? failure)
+    {
+        // Serialized: an older result never overwrites a newer one.
+        lock (_loadGate) return TryLoadCore(out identity, out failure);
+    }
+
+    private bool TryLoadCore(out CertificateIdentity? identity, out CertLoadFailure? failure)
     {
         identity = null;
         failure = CertLoadFailure.Unreadable;
@@ -89,9 +109,10 @@ public sealed class OfficialCertificateStore(
                 failure = null;
                 lock (_gate)
                 {
-                    NextExpiry = result.Summary!.NextExpiry;
-                    Summary = result.Summary;
-                    ArmExpiry();
+                    _nextExpiry = result.Summary!.NextExpiry;
+                    _summary = result.Summary;
+                    _expiryRaised = false;
+                    ArmTick();
                 }
                 return true;
             }
@@ -102,14 +123,18 @@ public sealed class OfficialCertificateStore(
         }
         lock (_gate)
         {
-            NextExpiry = null;
-            Summary = null;
-            _expiry?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _nextExpiry = null;
+            _summary = null;
+            _expiryRaised = false;
+            ArmTick();
         }
         return false;
     }
 
-    /// <summary>Starts watching preferences.json and the leveldb directory, and arms the expiry timer.</summary>
+    /// <summary>
+    /// Starts watching preferences.json and the leveldb directory, and starts the expiry tick (every 10 minutes at
+    /// most; it also retries creating the watcher when the Sharing directory did not exist yet).
+    /// </summary>
     public void StartWatching()
     {
         lock (_gate)
@@ -117,27 +142,34 @@ public sealed class OfficialCertificateStore(
             if (_disposed || _started) return;
             _started = true;
             _debounce = _timers.CreateTimer(_ => Raise(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-            _expiry = _timers.CreateTimer(_ => Raise(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
-            ArmExpiry();
-            try
+            _expiry = _timers.CreateTimer(_ => Tick(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            TryCreateWatcher();
+            ArmTick();
+        }
+    }
+
+    // Caller holds _gate.
+    private void TryCreateWatcher()
+    {
+        if (_watcher is not null) return;
+        try
+        {
+            var watcher = new FileSystemWatcher(sharingDir)
             {
-                var watcher = new FileSystemWatcher(sharingDir)
-                {
-                    IncludeSubdirectories = true,
-                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
-                };
-                watcher.Changed += OnFileEvent;
-                watcher.Created += OnFileEvent;
-                watcher.Deleted += OnFileEvent;
-                watcher.Renamed += (s, e) => OnFileEvent(s, e);
-                watcher.Error += (_, _) => NotifyFilesChanged();
-                watcher.EnableRaisingEvents = true;
-                _watcher = watcher;
-            }
-            catch (Exception e) when (e is ArgumentException or IOException or UnauthorizedAccessException)
-            {
-                // Directory missing: nothing to watch; the caller's own retry or the expiry timer covers it.
-            }
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+            };
+            watcher.Changed += OnFileEvent;
+            watcher.Created += OnFileEvent;
+            watcher.Deleted += OnFileEvent;
+            watcher.Renamed += (s, e) => OnFileEvent(s, e);
+            watcher.Error += (_, _) => NotifyFilesChanged();
+            watcher.EnableRaisingEvents = true;
+            _watcher = watcher;
+        }
+        catch (Exception e) when (e is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            // The Sharing directory does not exist yet (Quick Share not installed): the next tick tries again.
         }
     }
 
@@ -174,15 +206,41 @@ public sealed class OfficialCertificateStore(
             NotifyFilesChanged();
     }
 
-    private void Raise() => FilesChanged?.Invoke();
-
-    // Caller holds _gate.
-    private void ArmExpiry()
+    private void Raise()
     {
-        if (_expiry is null || NextExpiry is not { } expiry) return;
-        var wait = expiry - now();
-        if (wait < TimeSpan.Zero) wait = TimeSpan.Zero;
-        if (wait > MaxTimerWait) wait = MaxTimerWait;
+        lock (_gate) if (_disposed) return;
+        FilesChanged?.Invoke();
+    }
+
+    // Expiry tick: re-check the wall clock (timers stop during sleep), raise once when the selected certificate has
+    // expired, retry the watcher if it could not be created.
+    private void Tick()
+    {
+        var raise = false;
+        lock (_gate)
+        {
+            if (_disposed) return;
+            if (_watcher is null) TryCreateWatcher();
+            if (_nextExpiry is { } expiry && now() >= expiry && !_expiryRaised)
+            {
+                _expiryRaised = true;
+                raise = true;
+            }
+            ArmTick();
+        }
+        if (raise) FilesChanged?.Invoke();
+    }
+
+    // Caller holds _gate. Waits until the expiry, but never longer than MaxTimerWait.
+    private void ArmTick()
+    {
+        if (_expiry is null) return;
+        var wait = MaxTimerWait;
+        if (_nextExpiry is { } expiry && !_expiryRaised)
+        {
+            var left = expiry - now();
+            if (left < wait) wait = left < TimeSpan.Zero ? TimeSpan.Zero : left;
+        }
         _expiry.Change(wait, Timeout.InfiniteTimeSpan);
     }
 
@@ -221,9 +279,13 @@ public sealed class OfficialCertificateStore(
     private static LoadResult Build(
         IReadOnlyList<PrivateCertificate> privates, IReadOnlyList<PublicCertificate> publics, DateTimeOffset at)
     {
-        var validSelf = privates
+        var inWindow = privates
             .Where(c => c.Visibility == SelfShareVisibility && at >= c.NotBefore && at < c.NotAfter).ToList();
-        if (validSelf.Count == 0) return new(null, null, CertLoadFailure.NoValidCertificate);
+        if (inWindow.Count == 0) return new(null, null, CertLoadFailure.NoValidCertificate);
+        // A certificate with broken key material must never become a half-working identity: skip it, and if
+        // nothing usable is left the format is not what we know.
+        var validSelf = inWindow.Where(IsUsable).ToList();
+        if (validSelf.Count == 0) return new(null, null, CertLoadFailure.FormatChanged);
         var self = validSelf[0];
         var nextExpiry = validSelf.Min(c => c.NotAfter);
 
@@ -245,6 +307,19 @@ public sealed class OfficialCertificateStore(
         var summary = new CertificateSummary(
             "SELF_SHARE", privates.Count, publics.Count, peers.Count, nextExpiry, names);
         return new(identity, summary, default);
+    }
+
+    private static bool IsUsable(PrivateCertificate c)
+    {
+        if (c.SecretKey.Length != 32 || c.MetadataEncryptionKey.Length != 14) return false;
+        try
+        {
+            using var ec = ECDsa.Create();
+            ec.ImportPkcs8PrivateKey(c.KeyPairPkcs8, out _);
+            _ = ec.SignData([0], HashAlgorithmName.SHA256);
+            return true;
+        }
+        catch (CryptographicException) { return false; }
     }
 
     // Self-share certificates carry the metadata key in field 7, which lets us name a peer without an advertisement.

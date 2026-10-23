@@ -33,6 +33,12 @@ public sealed class CertificateIdentity(
     private const byte ReceiverPrefix = 0x02;
 
     /// <summary>
+    /// Own-devices advertisements carry no name (matches the official app: the receiver reads the name from the
+    /// certificate metadata). Single switch to fall back to the named form if a phone does not list the PC.
+    /// </summary>
+    internal const bool HiddenEndpointInfo = true;
+
+    /// <summary>
     /// Endpoint info without a name (<see cref="EndpointInfo.Hidden"/>): the receiver takes the name from our
     /// certificate metadata. The salt is fresh on every call and never one of the consumed salts.
     /// </summary>
@@ -40,7 +46,7 @@ public sealed class CertificateIdentity(
     {
         var salt = NewSalt();
         var encrypted = NearbyCrypto.Ctr(own.SecretKey, salt, own.MetadataEncryptionKey);
-        return new EndpointInfo { Kind = kind, Hidden = true, Metadata = [.. salt, .. encrypted] };
+        return new EndpointInfo { Kind = kind, Hidden = HiddenEndpointInfo, Name = HiddenEndpointInfo ? null : deviceName, Metadata = [.. salt, .. encrypted] };
     }
 
     private byte[] NewSalt()
