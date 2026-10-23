@@ -213,6 +213,9 @@ public sealed class RefreshServiceSimTests : IDisposable
         var svc = Make("hung", new RefreshTimings { MarkerTimeout = TimeSpan.FromSeconds(10), Settle = TimeSpan.FromMilliseconds(100), ExitWait = TimeSpan.FromMilliseconds(300), RetryDelay = TimeSpan.FromMilliseconds(300) });
         Assert.Equal(RefreshOutcome.DidNotExit, await svc.RunOnceAsync());
         Assert.True(svc.OurLeftoverAlive());
+        CloseSims();   // оставшийся процесс вышел
+        Assert.True(WaitFor(() => !svc.OurLeftoverAlive()));
+        Assert.False(svc.OurLeftoverAlive());
     }
 
     [Fact]

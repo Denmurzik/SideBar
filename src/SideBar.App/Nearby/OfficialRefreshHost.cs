@@ -50,7 +50,11 @@ sealed class OfficialRefreshHost : IDisposable
     public void Start()
     {
         _service.Start();
-        _residentTimer = new Timer(_ => CheckResident(), null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+        _residentTimer = new Timer(_ =>
+        {
+            try { CheckResident(); }
+            catch (Exception e) { Log.Write("official: resident check failed, " + Log.Describe(e)); }   // исключение из таймера уронило бы приложение
+        }, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
     }
 
     /// <summary>«Обновить сертификаты сейчас»: цикл на потоке пула, итог — заметкой в плитке.</summary>

@@ -47,7 +47,8 @@ internal sealed class RefreshService : IDisposable
     Task? _loop;
     int _busy;
     readonly object _stateGate = new();
-    int _leftoverPid;   // pid нашего запущенного процесса, оставшегося после DidNotExit/UserTookOver (0 — нет)
+    readonly object _leftoverGate = new();
+    LaunchedProcess? _leftover;   // наш процесс, оставшийся после DidNotExit/UserTookOver; дескриптор открыт, поэтому PID не переиспользуется
     DateTimeOffset? _lastWarned;
 
     public RefreshService(OfficialAppController app, AppStateStore store, RefreshHooks hooks, Action<string> log,
@@ -66,6 +67,7 @@ internal sealed class RefreshService : IDisposable
 
     public void Dispose()
     {
+        lock (_leftoverGate) { _leftover?.Dispose(); _leftover = null; }
         _cts.Cancel();   // идущий цикл (в том числе по пункту трея) тоже получает отмену; _cts не освобождаем: поздний вызов не должен падать на disposed
         try { _loop?.Wait(TimeSpan.FromSeconds(5)); } catch (AggregateException) { }
     }
@@ -154,7 +156,7 @@ internal sealed class RefreshService : IDisposable
             ct.ThrowIfCancellationRequested();   // отмена за время паузы: приложение не запускаем
             proc = _app.Launch();
             if (proc is null) return RefreshOutcome.NotInstalled;
-            Volatile.Write(ref _leftoverPid, 0);
+            SetLeftover(null);
 
             var markerSeen = false;
             var sw = Stopwatch.StartNew();
@@ -171,7 +173,7 @@ internal sealed class RefreshService : IDisposable
 
             await Task.Delay(_t.Settle, ct);
             var closed = await CloseAsync(proc, scanner, snapshot, ct);
-            if (closed != CloseResult.Exited) Volatile.Write(ref _leftoverPid, proc.Pid);
+            if (closed != CloseResult.Exited) SetLeftover(proc);
             return closed switch
             {
                 CloseResult.UserTookOver => RefreshOutcome.UserTookOver,
@@ -181,7 +183,7 @@ internal sealed class RefreshService : IDisposable
         }
         finally
         {
-            proc?.Dispose();
+            lock (_leftoverGate) { if (proc is not null && !ReferenceEquals(proc, _leftover)) proc.Dispose(); }
             // Сертификаты могли измениться, даже если цикл не дошёл до конца. Любая отмена пропускает перезагрузку; стек возвращаем всегда,
             // кроме остановки сервиса (приложение закрывается). Отмена только токеном вызова стек всё равно возобновляет.
             if (!ct.IsCancellationRequested && proc is not null) Hook(_hooks.ReloadCertificates, "reload");
@@ -191,24 +193,30 @@ internal sealed class RefreshService : IDisposable
 
     RefreshOutcome Leftover(LaunchedProcess proc, RefreshOutcome outcome)
     {
-        Volatile.Write(ref _leftoverPid, proc.Pid);
+        SetLeftover(proc);
         return outcome;
     }
 
-    /// <summary>Жив ли оставшийся после неудачного цикла процесс, запущенный именно нами (по pid и имени процесса).</summary>
+    void SetLeftover(LaunchedProcess? proc)
+    {
+        lock (_leftoverGate)
+        {
+            if (!ReferenceEquals(_leftover, proc)) _leftover?.Dispose();
+            _leftover = proc;
+        }
+    }
+
+    /// <summary>Жив ли оставшийся после неудачного цикла процесс, запущенный именно нами (по открытому дескриптору: PID не переиспользуется).</summary>
     public bool OurLeftoverAlive()
     {
-        var pid = Volatile.Read(ref _leftoverPid);
-        if (pid == 0) return false;
-        try
+        lock (_leftoverGate)
         {
-            using var p = Process.GetProcessById(pid);
-            if (!p.HasExited && string.Equals(p.ProcessName, _app.ProcessName, StringComparison.OrdinalIgnoreCase)) return true;
+            if (_leftover is null) return false;
+            if (!_leftover.HasExited) return true;
+            _leftover.Dispose();
+            _leftover = null;
+            return false;
         }
-        catch (ArgumentException) { }
-        catch (InvalidOperationException) { }
-        Volatile.Write(ref _leftoverPid, 0);
-        return false;
     }
 
     enum CloseResult { Exited, UserTookOver, DidNotExit }

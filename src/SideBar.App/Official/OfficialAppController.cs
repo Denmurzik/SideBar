@@ -21,7 +21,11 @@ internal sealed class LaunchedProcess(nint handle, int pid) : IDisposable
     public bool HasExited => Native.HasExited(handle);
     /// <summary>Хоть раз видели видимое окно процесса: им уже пользуются (защёлка, скрытие обратно не отменяет).</summary>
     public bool SawVisible { get; set; }
-    public void Dispose() => Native.CloseHandle(handle);
+    int _disposed;
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0) Native.CloseHandle(handle);   // повторный Dispose безопасен
+    }
 }
 
 /// <summary>
