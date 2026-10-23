@@ -63,6 +63,9 @@ static unsafe partial class OleData
     public static bool HasDroppable(nint dobj) =>
         Query(dobj, CF_HDROP) || Query(dobj, CF_FILEDESCRIPTORW) || ImageFormat(dobj) != null;
 
+    /// <summary>Есть ли настоящие файлы (CF_HDROP): только их можно отправить с плитки Quick Share.</summary>
+    public static bool HasFiles(nint dobj) => Query(dobj, CF_HDROP);
+
     public static bool HasFormat(nint dobj, string name) => Query(dobj, RegisterClipboardFormat(name));
 
     /// <summary>Формат картинки без файлов: png | jpeg | webp | dib (null — нет).</summary>

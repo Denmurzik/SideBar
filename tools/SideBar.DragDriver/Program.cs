@@ -143,6 +143,8 @@ sealed class Driver
         try { File.Delete(_appLog); } catch { }
         var psi = new ProcessStartInfo(_exe) { UseShellExecute = false };
         psi.Environment["SIDEBAR_DATA_DIR"] = _dataDir;
+        psi.Environment["SIDEBAR_NEARBY_ONLY_NAME"] = "SidebarE2E";   // Debug: в плитке только устройство e2e, настоящий телефон не виден
+        psi.Environment["SIDEBAR_NEARBY_INCLUDE_LOCAL"] = "1";   // только Debug-сборка: loopback e2e видит сервисы этой машины; Release игнорирует
         if (defaultDeleteDelay) psi.Environment.Remove("SIDEBAR_OWNED_DELETE_DELAY_SEC");
         else psi.Environment["SIDEBAR_OWNED_DELETE_DELAY_SEC"] = deleteDelaySec.ToString();
         _app = Process.Start(psi)!;
@@ -172,6 +174,15 @@ sealed class Driver
         var refFile = F("ref-original.txt", "original must survive");
         if (Path.GetFullPath(_srcDir).StartsWith(Path.GetFullPath(tmpDir), StringComparison.OrdinalIgnoreCase))
         { Rep("FAIL source files must be outside %TEMP% (they would count as temporary)"); _fail++; return; }
+
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1")   // быстрый прогон: только вынос стопки и отправка с плитки
+        {
+            var quickFolder = Path.Combine(_srcDir, "folder1");
+            Directory.CreateDirectory(quickFolder);
+            File.WriteAllText(Path.Combine(quickFolder, "inside.txt"), "x");
+            DragOutScenarios(W, H, a, refFile, quickFolder);
+            return;
+        }
 
         // T2: несколько обычных файлов одним drop'ом -> ссылки
         var files = new DataObject();
@@ -309,6 +320,89 @@ sealed class Driver
         Check("T12b second restart keeps the recovered items (same Ids)",
             restarted3 && RecoveredOk(rec2, ownedBefore) && rec2.Select(x => x.Id).SequenceEqual(rec.Select(x => x.Id)) && ShelfDirs() == dirsBeforeBad, Dump(rec2));
         DragOutScenarios(W, H, a, refFile, folder);
+        ShareScenarios(W, H, a);
+    }
+
+    // ---- отправка из плитки Quick Share (M3 Task 5) ----
+    bool WaitLog(string needle, int ms)
+    {
+        for (int t = 0; t < ms && !AppLog().Contains(needle); t += 100) Thread.Sleep(100);
+        return AppLog().Contains(needle);
+    }
+
+    void ShareScenarios(int W, int H, string a)
+    {
+        var before = ReadShelf();
+        var files = new DataObject();
+        files.SetData(DataFormats.FileDrop, new[] { a });
+        bool dropped = DragToPanel(files, W, H, QsTile(W, H));
+        var log = _lastLog;
+        Rep("INFO Q1 log: " + log.Replace("\n", " | "));
+        Check("Q1 foreign file drop on the Quick Share tile -> tile Searching, send starts, shelf untouched",
+            dropped && log.Contains("share tile Searching") && log.Contains("share: searching, 1 file(s)") && ReadShelf().Select(x => x.Id).SequenceEqual(before.Select(x => x.Id)), log);
+        MoveTo(_other.Left + 150, _other.Top + 75, 400); Thread.Sleep(2500);   // карточка держится открытой: поиск идёт
+        Check("Q1a card stays open while searching (no 'edge Hidden')", !AppLog().Contains("edge Hidden"), "");
+        Click();
+        Check("Q1b click outside the card -> tile Idle", WaitLog("share tile Idle", 2500), "");
+
+        var text = new DataObject();
+        text.SetData(DataFormats.UnicodeText, "just text");
+        bool textDropped = DragToPanel(text, W, H, QsTile(W, H));
+        Check("Q2 text drop on the Quick Share tile -> rejected, no search", textDropped && !_lastLog.Contains("share tile Searching") && _lastEffect == "None", _lastLog + " effect=" + _lastEffect);
+
+        var cli = Environment.GetEnvironmentVariable("SIDEBAR_E2E_CLI");
+        if (string.IsNullOrEmpty(cli)) { Rep("SKIP Q3 loopback e2e (set SIDEBAR_E2E_CLI to SideBar.Nearby.Cli.exe and run a Debug app)"); return; }
+        if (!_exe.Contains(Path.DirectorySeparatorChar + "Debug" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        { Rep("SKIP Q3 loopback e2e needs a Debug app (name filter)"); return; }
+        LoopbackE2E(W, H, cli);
+    }
+
+    void LoopbackE2E(int W, int H, string cliExe)
+    {
+        var outDir = Path.Combine(_work, "recv");
+        try { Directory.Delete(outDir, true); } catch { }
+        Directory.CreateDirectory(outDir);
+        var payload = new byte[3 << 20];
+        new Random(42).NextBytes(payload);
+        var src = Path.Combine(_srcDir, "e2e.bin");
+        File.WriteAllBytes(src, payload);
+
+        var psi = new ProcessStartInfo(cliExe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        psi.ArgumentList.Add("receive"); psi.ArgumentList.Add("--out"); psi.ArgumentList.Add(outDir);
+        psi.ArgumentList.Add("--yes"); psi.ArgumentList.Add("--name"); psi.ArgumentList.Add("SidebarE2E"); psi.ArgumentList.Add("--reannounce"); psi.ArgumentList.Add("0");   // повторное объявление даёт Lost/Found и мигание плитки
+        var output = new System.Text.StringBuilder();
+        using var proc = Process.Start(psi)!;
+        proc.OutputDataReceived += (_, e) => { lock (output) output.AppendLine(e.Data); };
+        proc.ErrorDataReceived += (_, e) => { lock (output) output.AppendLine(e.Data); };
+        proc.BeginOutputReadLine(); proc.BeginErrorReadLine();
+        try
+        {
+            Thread.Sleep(3000);
+            var files = new DataObject();
+            files.SetData(DataFormats.FileDrop, new[] { src });
+            bool dropped = DragToPanel(files, W, H, QsTile(W, H));
+            bool found = dropped && (_lastLog.Contains("share tile Choosing") || WaitLog("share tile Choosing", 30000));   // DragToPanel стирает лог после drop: устройство могло найтись раньше
+            Check("Q3 loopback: Cli receiver appears in the tile as a device (tile Choosing)", found, output.ToString());
+            if (!found) return;
+            Thread.Sleep(500);
+            var slot0 = new Point(QsTile(W, H).X - (int)(48 * _scale), QsTile(W, H).Y - (int)(52 * _scale));
+            MoveTo(slot0.X, slot0.Y, 400); Thread.Sleep(300);
+            Shot("6-choosing", W, H);
+            // Имена устройств в лог не пишутся, поэтому опора - фильтр SIDEBAR_NEARBY_ONLY_NAME, который есть только в Debug-сборке:
+            // с Release-приложением в плитке мог бы оказаться настоящий телефон, и клик по первой иконке ушёл бы на него.
+            if (!_exe.Contains(Path.DirectorySeparatorChar + "Debug" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            { Rep("SKIP Q3b not a Debug app: the name filter is unavailable, not clicking (a real phone could be in the tile)"); return; }
+            Click();
+            bool sending = WaitLog("share tile Sending", 3000);
+            bool done = sending && WaitLog("share tile Done", 40000);
+            Thread.Sleep(2000);
+            var got = Path.Combine(outDir, "e2e.bin");
+            bool same = File.Exists(got) && File.ReadAllBytes(got).AsSpan().SequenceEqual(payload);
+            Check("Q3b click on the device -> Sending -> Done, file received byte for byte", sending && done && same, output.ToString());
+            Thread.Sleep(2000);
+            Check("Q3c tile returns to Idle 1.5 s after Done", AppLog().Contains("share tile Idle"), "");
+        }
+        finally { try { proc.Kill(true); } catch { } }
     }
 
     // ---- вынос стопки (Task 4) ----
@@ -429,14 +523,21 @@ sealed class Driver
                 _otherEffect == "" && s.Select(x => x.Id).SequenceEqual(ids) && log.Contains("DropResult=None"), Dump(s));
         }
 
-        // D2: вынос на плитку Quick Share своей карточки и на свою же полку -> элементы на месте
+        // D2: вынос на плитку Quick Share своей карточки = отправка; элементы остаются в стопке
         _otherRejects = false;
         if (DragStackTo(QsTile(W, H), W, H))
         {
             var log = AppLog();
+            Rep("INFO D2 log: " + log.Replace("\n", " | "));
             s = ReadShelf();
-            Check("D2 drag-out onto own Quick Share tile -> DropResult None, items stay",
-                s.Select(x => x.Id).SequenceEqual(ids) && log.Contains("DropResult=None"), Dump(s));
+            Check("D2 drag-out onto own Quick Share tile -> send starts (tile Searching), items stay in the shelf",
+                s.Select(x => x.Id).SequenceEqual(ids) && log.Contains("items kept (share)") && log.Contains("share tile Searching") && log.Contains("share: searching,"), Dump(s));
+            MoveTo(_other.Left + 150, _other.Top + 75, 400); Thread.Sleep(100);
+            Click();   // клик вне карточки отменяет поиск
+            Check("D2a click outside the card cancels the search -> tile back to Idle", WaitLog("share tile Idle", 2500), "");
+            Thread.Sleep(1000);
+            s = ReadShelf();
+            Check("D2c shelf unchanged after cancelled share", s.Select(x => x.Id).SequenceEqual(ids), Dump(s));
         }
         var shelfTile = ShelfTile(W, H);
         if (DragStackTo(new Point(shelfTile.X, shelfTile.Y - (int)(20 * _scale)), W, H))
@@ -445,6 +546,8 @@ sealed class Driver
             Check("D2b drag-out and drop on own shelf tile -> DropResult None, items stay, not duplicated",
                 s.Select(x => x.Id).SequenceEqual(ids) && WaitNone(0)   /* DragStackTo начинается с OpenCard, который очищает лог */, Dump(s) + "\n" + AppLog());
         }
+
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1") { ShareScenarios(W, H, a); return; }
 
         // D3: принимающее окно -> Copy, элементы сняты, ссылки целы, Owned живёт ещё не менее 30 с
         if (DragStackTo(otherCenter, W, H, "4-drag"))
@@ -766,7 +869,7 @@ sealed class Driver
 
     // ---- drag ----
     /// <summary>false (и FAIL в отчёте), если карточка не открылась и drag отменён.</summary>
-    bool DragToPanel(object data, int W, int H)
+    bool DragToPanel(object data, int W, int H, Point? dropAt = null)
     {
         _lastEffect = "";
         _pending = data;
@@ -787,7 +890,8 @@ sealed class Driver
             return false;
         }
         Thread.Sleep(700);                               // пружина успокаивается
-        MoveTo(W - (int)((8 + 108) * _scale), H, 300); Thread.Sleep(400);   // центр карточки
+        if (dropAt is { } at) { MoveTo(at.X, at.Y, 300); Thread.Sleep(400); }
+        else { MoveTo(W - (int)((8 + 108) * _scale), H, 300); Thread.Sleep(400); }   // центр карточки
         Mouse(0x0004);                                   // ЛКМ вверх -> drop
         Thread.Sleep(1200);
         MoveTo(W - 700, H, 200); Thread.Sleep(500);      // уходим: карточка закроется, следующий drag откроет её заново
