@@ -2,11 +2,14 @@
   <Folder Name="/src/">
     <Project Path="src/SideBar.Core/SideBar.Core.csproj" />
     <Project Path="src/SideBar.App/SideBar.App.csproj" />
+    <Project Path="src/SideBar.Nearby/SideBar.Nearby.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/SideBar.DragDriver/SideBar.DragDriver.csproj" />
+    <Project Path="tools/SideBar.Nearby.Cli/SideBar.Nearby.Cli.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/SideBar.Core.Tests/SideBar.Core.Tests.csproj" />
+    <Project Path="tests/SideBar.Nearby.Tests/SideBar.Nearby.Tests.csproj" />
   </Folder>
 </Solution>
