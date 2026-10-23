@@ -7,6 +7,11 @@ public enum TransferStatus
     Completed,
     RejectedByPeer,
     CancelledByPeer,
+    /// <summary>Handshake, peer silence or the user's decision took longer than allowed.</summary>
+    TimedOut,
+    /// <summary>The peer sent something that violates the protocol or our limits.</summary>
+    ProtocolError,
+    /// <summary>Transport or local I/O failure.</summary>
     Failed,
 }
 
@@ -35,9 +40,29 @@ public sealed record SessionOptions(
     /// <summary>How long the sender waits for the receiver to finish and close before it disconnects itself.</summary>
     public TimeSpan FinishTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>Whole plaintext handshake (up to the encrypted channel); an accepted socket that stays silent is dropped.</summary>
+    public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>No frame of any kind (keep-alives count) received from the peer for this long ends the session.</summary>
+    public TimeSpan IdleTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long the receiver waits for the user to accept; on expiry the transfer is rejected.</summary>
+    public TimeSpan DecisionTimeout { get; init; } = TimeSpan.FromSeconds(60);
+
+    public int MaxFilesPerIntroduction { get; init; } = 100;
+
+    /// <summary>Largest BYTES payload (negotiation messages are tiny).</summary>
+    public int MaxBytesPayload { get; init; } = 64 * 1024;
+
+    public int MaxConcurrentBytesPayloads { get; init; } = 8;
+
     public IShareIdentity ResolvedIdentity => Identity ?? new AnonymousIdentity();
 }
 
 public sealed record IncomingFile(string Name, long Size, string MimeType);
 
-public sealed record IncomingTransfer(string Pin, string? SenderName, IReadOnlyList<IncomingFile> Files);
+public sealed record IncomingTransfer(string Pin, string? SenderName, IReadOnlyList<IncomingFile> Files)
+{
+    /// <summary>Whether the sender's identity was verified through a paired certificate; always false until M4.</summary>
+    public bool Verified { get; init; }
+}

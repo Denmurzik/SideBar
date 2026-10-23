@@ -21,31 +21,36 @@ public static class ReceiveSession
         Directory.CreateDirectory(outputDirectory);
         var incoming = new Dictionary<long, IncomingTarget>();
 
-        await using var connection = new NearbyConnection(stream, "receive");
+        await using var connection = new NearbyConnection(stream, "receive", options);
+        // A peer that connects and then stalls must not hold the session: the plaintext handshake has its own deadline.
+        using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        handshakeCts.CancelAfter(options.HandshakeTimeout);
+        var hct = handshakeCts.Token;
         try
         {
             // 1. ConnectionRequest and UKEY2 ClientInit (plaintext).
-            var request = await connection.ReadPlainOfflineAsync(ct);
-            if (request.V1?.Type != Conn.V1Frame.Types.FrameType.ConnectionRequest)
+            var request = await connection.ReadPlainOfflineAsync(hct);
+            if (request.V1?.Type != Conn.V1Frame.Types.FrameType.ConnectionRequest || request.V1.ConnectionRequest is null)
                 throw new InvalidDataException("Expected ConnectionRequest.");
             var senderName = DescribeSender(request.V1.ConnectionRequest);
             var remoteInfo = request.V1.ConnectionRequest.EndpointInfo.IsEmpty ? null
                 : EndpointInfo.TryDecode(request.V1.ConnectionRequest.EndpointInfo.Span, out var decoded) ? decoded : null;
 
             using var ukey = new Ukey2Server();
-            var serverInit = ukey.ProcessClientInit(await connection.ReadPlainAsync(ct));
-            await connection.WritePlainAsync(serverInit, ct);
+            var serverInit = ukey.ProcessClientInit(await connection.ReadPlainAsync(hct));
+            await connection.WritePlainAsync(serverInit, hct);
 
             // 2. ClientFinish -> keys; client ConnectionResponse, then ours.
-            var handshake = ukey.ProcessClientFinish(await connection.ReadPlainAsync(ct));
+            var handshake = ukey.ProcessClientFinish(await connection.ReadPlainAsync(hct));
             var pin = Pin.FromAuthString(handshake.AuthString);
             observer.PinReady(pin);
 
-            var clientResponse = await connection.ReadPlainOfflineAsync(ct);
+            var clientResponse = await connection.ReadPlainOfflineAsync(hct);
             if (clientResponse.V1?.Type != Conn.V1Frame.Types.FrameType.ConnectionResponse)
                 throw new InvalidDataException("Expected ConnectionResponse.");
-            await connection.WritePlainAsync(OfflineFrames.ConnectionResponse(accept: true), ct);
+            await connection.WritePlainAsync(OfflineFrames.ConnectionResponse(accept: true), hct);
 
+            handshakeCts.CancelAfter(Timeout.InfiniteTimeSpan);
             connection.EnableEncryption(SecureChannel.ForServer(handshake.NextSecret));
             await connection.SendSharingAsync(SharingFrames.PairedKeyEncryption(
                 identity.CreatePairedKeyEncryption(handshake.AuthString, PairedKeyRole.Receiver, remoteInfo)), ct);
@@ -53,6 +58,7 @@ public static class ReceiveSession
             // 3. Paired key, Introduction, consent, file chunks.
             var accepted = false;
             var saved = new List<string>();
+            var introduced = false;
             long totalSize = 0, receivedTotal = 0;
 
             async Task<bool> OnFileChunk(Conn.PayloadTransferFrame transfer)
@@ -60,8 +66,12 @@ public static class ReceiveSession
                 if (!accepted || !incoming.TryGetValue(transfer.PayloadHeader.Id, out var target))
                     throw new InvalidDataException("FILE payload that was not announced or accepted.");
                 var chunk = transfer.PayloadChunk;
+                if (target.Done)
+                    throw new InvalidDataException("FILE payload continued after its last chunk.");
                 if (chunk.Offset != target.Written)
                     throw new InvalidDataException($"Unexpected file chunk offset {chunk.Offset}, expected {target.Written}.");
+                if (chunk.Body.Length > target.Size - target.Written)
+                    throw new InvalidDataException("FILE payload is larger than announced.");
                 await target.Stream.WriteAsync(chunk.Body.Memory, ct);
                 target.Written += chunk.Body.Length;
                 receivedTotal += chunk.Body.Length;
@@ -71,7 +81,7 @@ public static class ReceiveSession
                 {
                     await target.Stream.DisposeAsync();
                     if (target.Written != target.Size)
-                        throw new InvalidDataException($"File {target.Name} ended at {target.Written} of {target.Size} bytes.");
+                        throw new InvalidDataException("FILE payload ended before its announced size.");
                     target.Done = true;
                     saved.Add(target.Path);
                 }
@@ -94,6 +104,8 @@ public static class ReceiveSession
                     switch (v1?.Type)
                     {
                         case Share.V1Frame.Types.FrameType.PairedKeyEncryption:
+                            if (v1.PairedKeyEncryption is null)
+                                throw new InvalidDataException("PairedKeyEncryption frame without a body.");
                             var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Receiver, remoteInfo);
                             await connection.SendSharingAsync(SharingFrames.PairedKeyResult(status), ct);
                             break;
@@ -102,7 +114,24 @@ public static class ReceiveSession
                             return new TransferResult(TransferStatus.CancelledByPeer, saved);
 
                         case Share.V1Frame.Types.FrameType.Introduction:
-                            var files = v1.Introduction.FileMetadata;
+                            if (introduced)
+                                throw new InvalidDataException("Duplicate Introduction.");
+                            introduced = true;
+                            var files = (v1.Introduction ?? throw new InvalidDataException("Introduction frame without a body.")).FileMetadata;
+                            if (files.Count > options.MaxFilesPerIntroduction)
+                            {
+                                await connection.SendSharingAsync(SharingFrames.Response(
+                                    Share.ConnectionResponseFrame.Types.Status.UnsupportedAttachmentType), ct);
+                                return new TransferResult(TransferStatus.ProtocolError, saved, "Introduction has too many files.");
+                            }
+                            var announced = new HashSet<long>();
+                            foreach (var f in files)
+                            {
+                                if (f.Size < 0)
+                                    throw new InvalidDataException("Introduction has a negative file size.");
+                                if (!announced.Add(f.PayloadId))
+                                    throw new InvalidDataException("Introduction repeats a payload id.");
+                            }
                             if (files.Count == 0)
                             {
                                 await connection.SendSharingAsync(SharingFrames.Response(
@@ -113,11 +142,25 @@ public static class ReceiveSession
                             var offer = new IncomingTransfer(pin, senderName,
                                 files.Select(f => new IncomingFile(f.Name, f.Size, f.MimeType)).ToList());
                             observer.Status("Waiting for the user's decision...");
-                            if (!await consent(offer, ct))
+                            // Only the wait for the user is bounded; the peer's keep-alives are not read meanwhile.
+                            var decision = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            decision.CancelAfter(options.DecisionTimeout);
+                            var expired = false;
+                            decision.Token.Register(() => expired = true);
+                            bool decisionExpired() => expired;
+                            var allowed = false;
+                            var timedOut = false;
+                            try { allowed = await consent(offer, decision.Token); }
+                            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { timedOut = true; }
+                            finally { decision.Dispose(); }
+                            timedOut |= !allowed && decisionExpired();
+                            if (!allowed)
                             {
                                 await connection.SendSharingAsync(SharingFrames.Response(
                                     Share.ConnectionResponseFrame.Types.Status.Reject), ct);
-                                return new TransferResult(TransferStatus.RejectedByPeer, saved, "Rejected locally.");
+                                return timedOut
+                                    ? new TransferResult(TransferStatus.TimedOut, saved, "No decision in time, rejected.")
+                                    : new TransferResult(TransferStatus.RejectedByPeer, saved, "Rejected locally.");
                             }
 
                             foreach (var f in files)
@@ -135,16 +178,20 @@ public static class ReceiveSession
             }
             finally
             {
-                foreach (var target in incoming.Values) await target.DisposeAsync();
+                foreach (var target in incoming.Values)
+                {
+                    await target.DisposeAsync();
+                    if (!target.Done) target.DeleteIncomplete();
+                }
             }
         }
-        catch (PeerDisconnectedException e)
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return new TransferResult(TransferStatus.CancelledByPeer, [], e.Message);
+            return new TransferResult(TransferStatus.TimedOut, [], "Handshake timed out.");
         }
-        catch (Exception e) when (e is IOException or InvalidDataException or Ukey2Exception or SecureChannelException)
+        catch (Exception e) when (SessionErrors.IsHandled(e))
         {
-            return new TransferResult(TransferStatus.Failed, [], e.Message);
+            return SessionErrors.ToResult(e);
         }
     }
 
@@ -154,7 +201,7 @@ public static class ReceiveSession
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(2));
         try { await connection.ReadSharingAsync(null, timeout.Token); }
-        catch (Exception e) when (e is PeerDisconnectedException or IOException or OperationCanceledException or InvalidDataException) { }
+        catch (Exception e) when (e is OperationCanceledException || SessionErrors.IsHandled(e)) { }
     }
 
     private static string? DescribeSender(Conn.ConnectionRequestFrame request)
@@ -189,6 +236,12 @@ public static class ReceiveSession
         }
 
         public ValueTask DisposeAsync() => Stream.DisposeAsync();
+
+        public void DeleteIncomplete()
+        {
+            try { File.Delete(Path); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
     }
 
     /// <summary>Strips any directory part and characters Windows rejects; the sender is untrusted.</summary>

@@ -17,10 +17,11 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Build tests
-        run: |
-          dotnet build tests/SideBar.Core.Tests -c Release
-          dotnet build tests/SideBar.Nearby.Tests -c Release
+      - name: Build Core tests
+        run: dotnet build tests/SideBar.Core.Tests -c Release
+
+      - name: Build Nearby tests
+        run: dotnet build tests/SideBar.Nearby.Tests -c Release
 
       - name: Run tests
         run: tests/SideBar.Core.Tests/bin/Release/net10.0-windows10.0.26100.0/SideBar.Core.Tests.exe

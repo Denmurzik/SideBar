@@ -28,11 +28,16 @@ internal sealed class NearbyConnection : IAsyncDisposable
 
     private readonly string _role;
 
+    /// <summary>True once a write failed: the stream may be mid-frame and must not be written to again.</summary>
+    public bool WriteFaulted { get; private set; }
+    private readonly SessionOptions _options;
+
     /// <param name="role">"send" or "receive": prefix of the <see cref="NearbyLog"/> event kinds.</param>
-    public NearbyConnection(Stream stream, string role)
+    public NearbyConnection(Stream stream, string role, SessionOptions options)
     {
         _stream = stream;
         _role = role;
+        _options = options;
     }
 
     // Whitelist logging: frame kind, size and enum names only, never payload bytes, names or keys.
@@ -88,6 +93,12 @@ internal sealed class NearbyConnection : IAsyncDisposable
         // Encrypt and write under one lock so the sequence number order matches the wire order.
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try { await FrameIO.WriteAsync(_stream, channel.Encrypt(frame.ToByteArray()), ct).ConfigureAwait(false); }
+        catch (Exception)
+        {
+            // A write that failed or was cancelled may have left half a frame on the wire.
+            WriteFaulted = true;
+            throw;
+        }
         finally { _writeLock.Release(); }
         LogOffline("tx", frame);
     }
@@ -95,7 +106,15 @@ internal sealed class NearbyConnection : IAsyncDisposable
     public async Task<Conn.OfflineFrame> ReadOfflineAsync(CancellationToken ct)
     {
         var channel = _channel ?? throw new InvalidOperationException("Encryption is not enabled.");
-        var secure = await FrameIO.ReadAsync(_stream, ct).ConfigureAwait(false);
+        // The idle timer restarts for every frame, so a keep-alive from the peer counts as life.
+        using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        idle.CancelAfter(_options.IdleTimeout);
+        byte[] secure;
+        try { secure = await FrameIO.ReadAsync(_stream, idle.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new SessionTimeoutException("The peer was silent for too long.");
+        }
         var frame = ParseOffline(channel.Decrypt(secure));
         LogOffline("rx", frame);
         return frame;
@@ -130,8 +149,17 @@ internal sealed class NearbyConnection : IAsyncDisposable
                     throw new PeerDisconnectedException("Peer sent a Disconnection frame.");
 
                 case Conn.V1Frame.Types.FrameType.PayloadTransfer:
-                    var transfer = v1.PayloadTransfer;
-                    var header = transfer.PayloadHeader;
+                    var transfer = v1.PayloadTransfer ?? throw new InvalidDataException("PayloadTransfer frame without a body.");
+                    if (transfer.PacketType == Conn.PayloadTransferFrame.Types.PacketType.Control)
+                    {
+                        var control = transfer.ControlMessage ?? throw new InvalidDataException("CONTROL frame without a message.");
+                        if (control.Event == Conn.PayloadTransferFrame.Types.ControlMessage.Types.EventType.PayloadCanceled)
+                            throw new PeerCancelledException("Peer cancelled the payload.");
+                        break; // acks and PAYLOAD_ERROR notifications need no action.
+                    }
+                    var header = transfer.PayloadHeader ?? throw new InvalidDataException("Payload frame without a header.");
+                    if (transfer.PayloadChunk is null)
+                        throw new InvalidDataException("Payload frame without a chunk.");
                     if (header.Type == Conn.PayloadTransferFrame.Types.PayloadHeader.Types.PayloadType.Bytes)
                     {
                         var complete = AppendBytesChunk(transfer);
@@ -162,34 +190,23 @@ internal sealed class NearbyConnection : IAsyncDisposable
         }
     }
 
-    /// <summary>Reads and discards frames until the peer disconnects, closes the stream or the timeout passes.</summary>
-    public async Task WaitForPeerDisconnectAsync(TimeSpan timeout, CancellationToken ct)
-    {
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(timeout);
-        try
-        {
-            while (true)
-            {
-                var frame = await ReadOfflineAsync(cts.Token).ConfigureAwait(false);
-                if (frame.V1?.Type == Conn.V1Frame.Types.FrameType.Disconnection) return;
-            }
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
-        catch (Exception e) when (e is IOException or InvalidDataException or SecureChannelException) { }
-    }
-
     private byte[]? AppendBytesChunk(Conn.PayloadTransferFrame transfer)
     {
         var header = transfer.PayloadHeader;
         var chunk = transfer.PayloadChunk;
-        if (header.TotalSize > FrameIO.MaxFrameLength)
+        if (header.TotalSize < 0 || header.TotalSize > _options.MaxBytesPayload)
             throw new InvalidDataException("BYTES payload too large.");
 
         if (!_bytesPayloads.TryGetValue(header.Id, out var buffer))
+        {
+            if (_bytesPayloads.Count >= _options.MaxConcurrentBytesPayloads)
+                throw new InvalidDataException("Too many BYTES payloads in flight.");
             _bytesPayloads[header.Id] = buffer = new MemoryStream();
+        }
         if (chunk.Offset != buffer.Length)
             throw new InvalidDataException($"Unexpected BYTES chunk offset {chunk.Offset}, expected {buffer.Length}.");
+        if (buffer.Length + chunk.Body.Length > _options.MaxBytesPayload)
+            throw new InvalidDataException("BYTES payload too large.");
         chunk.Body.WriteTo(buffer);
 
         if ((chunk.Flags & (int)Conn.PayloadTransferFrame.Types.PayloadChunk.Types.Flags.LastChunk) == 0) return null;

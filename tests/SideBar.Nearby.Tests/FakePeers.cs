@@ -1,0 +1,180 @@
+using System.Net;
+using System.Net.Sockets;
+using SideBar.Nearby.Crypto;
+using SideBar.Nearby.Session;
+using SideBar.Nearby.Wire;
+using Conn = SideBar.Nearby.Protocol.Connections;
+using Share = SideBar.Nearby.Protocol.Sharing;
+
+namespace SideBar.Nearby.Tests;
+
+/// <summary>A connected loopback TCP pair: <see cref="Server"/> is the accepted end, <see cref="Client"/> the connecting one.</summary>
+internal sealed class Link : IDisposable
+{
+    private readonly TcpClient _server;
+    private readonly TcpClient _client;
+    public Stream Server => _server.GetStream();
+    public Stream Client => _client.GetStream();
+
+    private Link(TcpClient server, TcpClient client)
+    {
+        _server = server;
+        _client = client;
+    }
+
+    public static async Task<Link> OpenAsync(CancellationToken ct)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            var client = new TcpClient();
+            var accept = listener.AcceptTcpClientAsync(ct).AsTask();
+            await client.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port, ct);
+            return new Link(await accept, client);
+        }
+        finally { listener.Stop(); }
+    }
+
+    public void Dispose()
+    {
+        _server.Dispose();
+        _client.Dispose();
+    }
+}
+
+internal static class TestFrames
+{
+    public static Share.FileMetadata File(long payloadId, long size, string name = "f.bin") => new()
+    {
+        Name = name,
+        Size = size,
+        MimeType = "application/octet-stream",
+        Id = payloadId + 1000,
+        PayloadId = payloadId,
+        Type = Share.FileMetadata.Types.Type.Unknown,
+    };
+
+    public static Conn.OfflineFrame Offline(Conn.V1Frame v1) =>
+        new() { Version = Conn.OfflineFrame.Types.Version.V1, V1 = v1 };
+
+    public static Conn.OfflineFrame Control(long payloadId, Conn.PayloadTransferFrame.Types.ControlMessage.Types.EventType ev) =>
+        Offline(new Conn.V1Frame
+        {
+            Type = Conn.V1Frame.Types.FrameType.PayloadTransfer,
+            PayloadTransfer = new Conn.PayloadTransferFrame
+            {
+                PacketType = Conn.PayloadTransferFrame.Types.PacketType.Control,
+                PayloadHeader = OfflineFrames.FileHeader(payloadId, 0, "x"),
+                ControlMessage = new Conn.PayloadTransferFrame.Types.ControlMessage { Event = ev },
+            },
+        });
+
+    public static Conn.OfflineFrame FileChunk(long payloadId, long total, long offset, byte[] body, bool last) =>
+        OfflineFrames.PayloadChunk(OfflineFrames.FileHeader(payloadId, total, "x"), offset, body, last);
+
+    public static Share.Frame Of(Share.V1Frame.Types.FrameType type) =>
+        new() { Version = Share.Frame.Types.Version.V1, V1 = new Share.V1Frame { Type = type } };
+}
+
+/// <summary>A hand-driven sender: does the real handshake, then lets a test inject arbitrary frames.</summary>
+internal sealed class FakeSender : IAsyncDisposable
+{
+    private readonly NearbyConnection _connection;
+    private FakeSender(NearbyConnection connection) => _connection = connection;
+
+    public static async Task<FakeSender> ConnectAsync(Stream stream, CancellationToken ct)
+    {
+        var options = new SessionOptions("fake sender");
+        var c = new NearbyConnection(stream, "fake-send", options);
+        await c.WritePlainAsync(OfflineFrames.ConnectionRequest(
+            "FAKE", "fake sender", EndpointInfo.CreateAnonymous("fake sender", DeviceKind.Laptop).Encode()), ct);
+        using var ukey = new Ukey2Client();
+        await c.WritePlainAsync(ukey.CreateClientInit(), ct);
+        var (finish, handshake) = ukey.ProcessServerInit(await c.ReadPlainAsync(ct));
+        await c.WritePlainAsync(finish, ct);
+        await c.WritePlainAsync(OfflineFrames.ConnectionResponse(accept: true), ct);
+        await c.ReadPlainOfflineAsync(ct);
+        c.EnableEncryption(SecureChannel.ForClient(handshake.NextSecret));
+        return new FakeSender(c);
+    }
+
+    public Task SendOfflineAsync(Conn.OfflineFrame frame, CancellationToken ct) => _connection.SendOfflineAsync(frame, ct);
+
+    public Task SendSharingAsync(Share.Frame frame, CancellationToken ct) => _connection.SendSharingAsync(frame, ct);
+
+    public Task IntroduceAsync(CancellationToken ct, params Share.FileMetadata[] files) =>
+        SendSharingAsync(SharingFrames.Introduction(files), ct);
+
+    /// <summary>Reads Quick Share frames until one of the given type arrives.</summary>
+    public async Task<Share.Frame> ReadAsync(Share.V1Frame.Types.FrameType type, CancellationToken ct)
+    {
+        while (true)
+        {
+            var frame = (await _connection.ReadSharingAsync(null, ct))!;
+            if (frame.V1?.Type == type) return frame;
+        }
+    }
+
+    public async Task<Share.ConnectionResponseFrame.Types.Status> ReadResponseAsync(CancellationToken ct) =>
+        (await ReadAsync(Share.V1Frame.Types.FrameType.Response, ct)).V1.ConnectionResponse.Status;
+
+    public Task DisconnectAsync(CancellationToken ct) => _connection.SendOfflineAsync(OfflineFrames.Disconnection(), ct);
+
+    public ValueTask DisposeAsync() => _connection.DisposeAsync();
+}
+
+/// <summary>A hand-driven receiver for sender tests: handshake, pairing frames, then it hands over the Introduction.</summary>
+internal sealed class FakeReceiver : IAsyncDisposable
+{
+    private readonly NearbyConnection _connection;
+    public Share.IntroductionFrame Introduction { get; }
+
+    private FakeReceiver(NearbyConnection connection, Share.IntroductionFrame introduction)
+    {
+        _connection = connection;
+        Introduction = introduction;
+    }
+
+    public static async Task<FakeReceiver> AcceptAsync(Stream stream, CancellationToken ct)
+    {
+        var c = new NearbyConnection(stream, "fake-recv", new SessionOptions("fake receiver"));
+        await c.ReadPlainOfflineAsync(ct);
+        using var ukey = new Ukey2Server();
+        await c.WritePlainAsync(ukey.ProcessClientInit(await c.ReadPlainAsync(ct)), ct);
+        var handshake = ukey.ProcessClientFinish(await c.ReadPlainAsync(ct));
+        await c.ReadPlainOfflineAsync(ct);
+        await c.WritePlainAsync(OfflineFrames.ConnectionResponse(accept: true), ct);
+        c.EnableEncryption(SecureChannel.ForServer(handshake.NextSecret));
+
+        var identity = new AnonymousIdentity();
+        await c.SendSharingAsync(SharingFrames.PairedKeyEncryption(
+            identity.CreatePairedKeyEncryption(handshake.AuthString, PairedKeyRole.Receiver, null)), ct);
+        await c.SendSharingAsync(SharingFrames.PairedKeyResult(Share.PairedKeyResultFrame.Types.Status.Unable), ct);
+        while (true)
+        {
+            var frame = (await c.ReadSharingAsync(null, ct))!;
+            if (frame.V1?.Type == Share.V1Frame.Types.FrameType.Introduction)
+                return new FakeReceiver(c, frame.V1.Introduction);
+        }
+    }
+
+    public Task SendOfflineAsync(Conn.OfflineFrame frame, CancellationToken ct) => _connection.SendOfflineAsync(frame, ct);
+
+    public Task SendSharingAsync(Share.Frame frame, CancellationToken ct) => _connection.SendSharingAsync(frame, ct);
+
+    public Task AcceptTransferAsync(CancellationToken ct) =>
+        SendSharingAsync(SharingFrames.Response(Share.ConnectionResponseFrame.Types.Status.Accept), ct);
+
+    /// <summary>Reads (and discards file chunks) until a Quick Share frame of the type arrives.</summary>
+    public async Task<Share.Frame> ReadAsync(Share.V1Frame.Types.FrameType type, CancellationToken ct)
+    {
+        while (true)
+        {
+            var frame = await _connection.ReadSharingAsync(_ => Task.FromResult(false), ct);
+            if (frame?.V1?.Type == type) return frame;
+        }
+    }
+
+    public ValueTask DisposeAsync() => _connection.DisposeAsync();
+}

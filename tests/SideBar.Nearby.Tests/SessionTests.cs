@@ -197,7 +197,7 @@ public sealed class SessionTests : IDisposable
         await rogue;
         listener.Stop();
 
-        Assert.Equal(TransferStatus.Failed, result.Status);
+        Assert.Equal(TransferStatus.ProtocolError, result.Status);
     }
 
     [Fact]
@@ -220,7 +220,7 @@ public sealed class SessionTests : IDisposable
             await FrameIO.WriteAsync(client.GetStream(), new byte[] { 1, 2, 3 }, cts.Token);
         }
 
-        Assert.Equal(TransferStatus.Failed, (await receive).Status);
+        Assert.Equal(TransferStatus.ProtocolError, (await receive).Status);
         listener.Stop();
     }
 }
