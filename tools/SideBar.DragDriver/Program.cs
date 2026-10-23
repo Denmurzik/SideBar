@@ -179,7 +179,7 @@ sealed class Driver
         { Rep("FAIL source files must be outside %TEMP% (they would count as temporary)"); _fail++; return; }
 
         if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_PAUSE_ONLY") == "1") { PauseScenarios(W, H, a); return; }   // быстрый прогон: пауза при официальном приложении (P1..P4)
-        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_CLEAR_ONLY") == "1") { ClearScenarios(W, H, a, b, c); return; }   // быстрый прогон: только корзина полки (C1..C5)
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_CLEAR_ONLY") == "1") { ClearScenarios(W, H, a, b, c); return; }   // быстрый прогон: только корзина полки (C1..C6)
         if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1" || Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_FAN_ONLY") == "1")   // быстрый прогон: только вынос стопки и отправка с плитки
         {
             var quickFolder = Path.Combine(_srcDir, "folder1");
@@ -742,6 +742,17 @@ sealed class Driver
         Check("C5 trash is hidden while a stack item is dragged out (Collapsed < completed) and is back after the drag",
             started >= 0 && hidden >= 0 && completed > hidden && back && log.Contains("DropResult=None"),
             $"starting={started} collapsed={hidden} completed={completed} visibleAfter={shown} shelf={s.Count}\n" + log);
+
+        // C6: быстрый двойной клик (250 мс между кликами) приходит как DoubleTapped и тоже очищает полку
+        s = ReadShelf();
+        if (s.Count != 3 || !OpenCard(W, H)) { Check("C6 shelf holds 3 and card open", false, Dump(s)); return; }
+        var t6 = TrashPoint(W, H);
+        MoveTo(t6.X, t6.Y, 300); Thread.Sleep(300);
+        Click(); Thread.Sleep(250); Click();
+        s = WaitShelf(x => x.Count == 0, 3000);
+        bool quiet6 = QuietClick(out var why6);
+        Check("C6 fast double click (250 ms) on the trash clears the shelf; log 'shelf cleared n=3'; no drag-out, no fan, card not foreground",
+            s.Count == 0 && AppLog().Contains("shelf cleared n=3") && quiet6, Dump(s) + "\n" + why6);
     }
 
     // D3e: отложенное удаление переживает перезапуск: перезапуск внутри окна задержки не удаляет папку, после срока она удаляется

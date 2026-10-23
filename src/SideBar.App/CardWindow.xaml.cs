@@ -107,6 +107,18 @@ public sealed partial class CardWindow : Window
     void ShelfClear_Tapped(object sender, TappedRoutedEventArgs e)
     {
         e.Handled = true;
+        PressClear();
+    }
+
+    // быстрый второй клик WinUI отдаёт как DoubleTapped, а не Tapped: это тоже второе нажатие
+    void ShelfClear_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+        PressClear();
+    }
+
+    void PressClear()
+    {
         if (_shelfService is null) return;
         if (_clear.Press(DateTimeOffset.UtcNow) == ClearPress.Cleared)
         {

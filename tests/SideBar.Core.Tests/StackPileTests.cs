@@ -19,58 +19,68 @@ public class StackPileTests
     [InlineData(1)]
     [InlineData(3)]
     [InlineData(10)]
-    public void Layers_stay_inside_the_tile_and_are_centred(int n)
+    [InlineData(25)]
+    public void Every_shown_layer_has_bounded_jitter_and_fits_the_tile(int count)
     {
-        var layers = Enumerable.Range(0, n).Select(k => StackPile.Layer(k, n, Guid.NewGuid())).ToList();
-        foreach (var l in layers)
-        {
-            var rad = Math.Abs(l.Angle) * Math.PI / 180;
-            var half = Box / 2 * (Math.Cos(rad) + Math.Sin(rad));
-            Assert.InRange(Math.Abs(l.X) + half, 0, MaxHalfSpan);
-            Assert.InRange(Math.Abs(l.Y) + half, 0, MaxHalfSpan);
-            Assert.InRange(l.Opacity, StackPile.MinOpacity, 1.0);
-        }
-        Assert.Equal(0, layers[0].X + layers[^1].X, 9);   // симметрично относительно центра
-        Assert.Equal(0, layers[0].Y + layers[^1].Y, 9);
+        int n = StackPile.VisibleLayers(count);
+        for (int rep = 0; rep < 50; rep++)
+            for (int k = 0; k < n; k++)
+            {
+                var l = StackPile.Layer(k, n, Guid.NewGuid());
+                Assert.InRange(l.X, -StackPile.MaxOffset, StackPile.MaxOffset);
+                Assert.InRange(l.Y, -StackPile.MaxOffset, StackPile.MaxOffset);
+                Assert.InRange(l.Angle, -StackPile.MaxAngle, StackPile.MaxAngle);
+                Assert.InRange(l.Opacity, StackPile.MinOpacity, 1.0);
+                var rad = Math.Abs(l.Angle) * Math.PI / 180;
+                var half = Box / 2 * (Math.Cos(rad) + Math.Sin(rad));
+                Assert.InRange(Math.Max(Math.Abs(l.X), Math.Abs(l.Y)) + half, 0, MaxHalfSpan);
+            }
     }
 
     [Fact]
     public void Single_layer_is_unrotated_opaque_and_centred() =>
         Assert.Equal(new StackLayer(0, 0, 0, 1.0), StackPile.Layer(0, 1, Guid.NewGuid()));
 
-    [Fact]
-    public void Front_layer_is_unrotated_and_opaque_and_back_layer_is_dimmest()
+    [Theory]
+    [InlineData(3)]
+    [InlineData(10)]
+    public void Front_layer_is_centred_unrotated_and_opaque(int n)
     {
-        var front = StackPile.Layer(9, 10, Guid.NewGuid());
-        var back = StackPile.Layer(0, 10, Guid.NewGuid());
-        Assert.Equal(0, front.Angle);
-        Assert.Equal(1.0, front.Opacity);
-        Assert.Equal(StackPile.MinOpacity, back.Opacity, 9);
+        var front = StackPile.Layer(n - 1, n, Guid.NewGuid());
+        Assert.Equal(new StackLayer(0, 0, 0, 1.0), front);
     }
 
     [Fact]
-    public void Opacity_falls_with_depth()
+    public void Back_of_ten_is_dimmest_and_opacity_falls_with_depth()
     {
+        Assert.Equal(StackPile.MinOpacity, StackPile.Layer(0, 10, Guid.NewGuid()).Opacity, 9);
         var o = Enumerable.Range(0, 10).Select(k => StackPile.Layer(k, 10, Guid.Empty).Opacity).ToList();
         Assert.True(o.Zip(o.Skip(1), (a, b) => a < b).All(x => x));
     }
 
     [Fact]
-    public void Rotation_depends_only_on_the_id_and_stays_small()
+    public void Jitter_depends_only_on_the_id_not_on_the_depth_or_count()
     {
         var id = Guid.NewGuid();
-        // тот же элемент на глубине 1 в стопке из 3 и из 10 слоёв: угол одинаков
-        Assert.Equal(StackPile.Layer(0, 2, id).Angle, StackPile.Layer(8, 10, id).Angle);
-        for (int i = 0; i < 200; i++) Assert.InRange(StackPile.Layer(0, 10, Guid.NewGuid()).Angle, -3, 3);
+        Assert.Equal(StackPile.Layer(0, 5, id).X, StackPile.Layer(3, 8, id).X);
+        Assert.Equal(StackPile.Layer(0, 5, id).Y, StackPile.Layer(3, 8, id).Y);
+        Assert.Equal(StackPile.Layer(0, 5, id).Angle, StackPile.Layer(3, 8, id).Angle);
+        Assert.Equal(StackPile.Layer(1, 4, id), StackPile.Layer(1, 4, id));
     }
 
     [Fact]
-    public void Offsets_step_four_epx_per_layer()
+    public void Different_ids_do_not_all_get_the_same_jitter()
     {
-        var a = StackPile.Layer(3, 10, Guid.Empty);
-        var b = StackPile.Layer(4, 10, Guid.Empty);
-        Assert.Equal(4, b.X - a.X, 9);
-        Assert.Equal(4, b.Y - a.Y, 9);
+        var angles = Enumerable.Range(0, 50).Select(_ => StackPile.Layer(0, 2, Guid.NewGuid()).Angle).Distinct().Count();
+        Assert.True(angles > 25);
+    }
+
+    [Fact]
+    public void Jitter_does_not_accumulate_with_depth()
+    {
+        // слои из 10 не уезжают лесенкой: нижний тоже в пределах ±5, а не в десятки epx
+        var back = StackPile.Layer(0, 10, Guid.NewGuid());
+        Assert.InRange(Math.Abs(back.X), 0, StackPile.MaxOffset);
     }
 
     [Fact]
