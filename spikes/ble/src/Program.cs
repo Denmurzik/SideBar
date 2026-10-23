@@ -2,14 +2,19 @@ using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Storage.Streams;
+using SideBar.Nearby.Session;
 
-// Usage: Ble info | Ble watch [seconds] [--identify] | Ble publish [seconds] [options]
+// Usage: Ble info | Ble watch [seconds] [--identify] | Ble publish [seconds] [options] | Ble rfcomm [options]
 //   watch --identify: match FEF3 (Nearby Connections) bodies against the official app's public certificates in memory;
 //                     prints only counts, body length, match offset, RSSI, timings and the matched peer's device_name.
 //   publish options: --type notify|silent  --ext|--legacy  --cert 0|1  --tx HEX  --static
 //                    --hash random|selfshare  --raw HEX (full service data after the UUID, overrides everything)
 //                    --short (Chromium 5-byte form: FC128E meta tx)  --flags HEX (last byte of the 24-byte form)
 //                    --uuidlist (also list FE2C as a 16-bit service UUID, like Chromium's advertiser)
+//   rfcomm options: --to NAME (filter candidate device by name substring; default: try all usable self-share certs)
+//                    --send PATH (attempt the full handshake and send this file; default: open+close only, no handshake)
+//                    docs/research/ble-locked-phone.md E3. MAC comes from a certificate (§2.3), not from a live BLE
+//                    capture; never printed (same redaction rule as watch/publish).
 // FastInit V1 layout (sharing/internal/api/fast_init_ble_beacon.h, 24 bytes after the FE2C UUID, same as rquickshare blea.rs):
 //   FC 12 8E | meta[version(3) type(3) uwb(1) sender_cert(1)] | adjusted_tx_power | uwb_metadata(1) uwb_address(8) | salt(1) | secret_id_hash(8) | flags(1)
 // Never prints device addresses or names; only section types, UUIDs of interest, lengths and counters.
@@ -156,6 +161,49 @@ if (cmd == "publish")
     return 0;
 }
 
+if (cmd == "rfcomm")
+{
+    string Opt(string name, string fallback) { var i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : fallback; }
+    bool Has(string name) => Array.IndexOf(args, name) >= 0;
+
+    var nameFilter = Has("--to") ? Opt("--to", "") : null;
+    var sendPath = Has("--send") ? Opt("--send", "") : null;
+
+    var identity = OfficialCertIdentity.Load();
+    Console.WriteLine($"identity: selfShare={identity.HasSelfCertificate} publicCertsValidNow={identity.Summary.PublicValidNow}/{identity.Summary.PublicTotal}");
+    if (!identity.HasSelfCertificate) { Console.WriteLine("no valid SELF_SHARE private certificate on this PC; nothing to sign with"); return 1; }
+
+    var targets = identity.FindRfcommTargets(nameFilter);
+    Console.WriteLine($"candidates: {targets.Count}{(targets.Count == 0 ? "" : " (" + string.Join(", ", targets.Select(t => t.DeviceName ?? "?")) + ")")}");
+    if (targets.Count == 0) { Console.WriteLine("no usable self-share certificate with a MAC address found"); return 1; }
+
+    foreach (var target in targets)
+    {
+        Console.WriteLine($"trying device={target.DeviceName ?? "?"} ...");
+        var (socket, status) = await RfcommClient.ConnectAsync(target.Mac);
+        Console.WriteLine($"  connect: {status}");
+        if (socket is null) continue;
+
+        if (sendPath is null)
+        {
+            Console.WriteLine("  dry run (no --send): connection opened, closing without a handshake.");
+            socket.Dispose();
+            return 0;
+        }
+
+        using var stream = new DuplexSocketStream(socket);
+        var session = new SessionOptions(Environment.MachineName, Identity: identity) { RemoteEndpointInfo = target.RemoteInfo };
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        TransferResult result;
+        try { result = await SendSession.SendFilesAsync(stream, session, [sendPath], new RfcommObserver(), cts.Token); }
+        catch (Exception ex) { Console.WriteLine($"  transfer threw {ex.GetType().Name}: {ex.Message}"); continue; }
+        Console.WriteLine($"  result: {result.Status}{(result.Detail is null ? "" : " - " + result.Detail)}");
+        return result.Status == TransferStatus.Completed ? 0 : 1;
+    }
+    Console.WriteLine("all candidates failed to connect.");
+    return 1;
+}
+
 Console.WriteLine("unknown command");
 return 64;
 
@@ -166,4 +214,12 @@ static (PeerCert? Peer, int Offset) Match(PeerCerts certs, ReadOnlySpan<byte> bo
     for (int o = 0; o + 17 <= body.Length; o++)
         if (certs.Identify(body.Slice(o + 1, 16)) is { } peer) return (peer, o);
     return (null, -1);
+}
+
+sealed class RfcommObserver : ITransferObserver
+{
+    public void PinReady(string pin) => Console.WriteLine($"  PIN: {pin}");
+    public void Status(string message) => Console.WriteLine($"  status: {message}");
+    public void Progress(TransferProgress progress) =>
+        Console.WriteLine($"  progress: {progress.FileName} {progress.FileBytes}/{progress.FileTotal}");
 }

@@ -129,6 +129,47 @@ public sealed class OfficialCertIdentity : IShareIdentity
     private static string? PeerNameFromField7(PublicCertificate cert) =>
         cert.MetadataEncryptionKey.Length == 0 ? null : DeviceName(cert.DecryptMetadata(cert.MetadataEncryptionKey));
 
+    /// <summary>
+    /// A peer reachable by Bluetooth Classic RFCOMM (docs/research/ble-locked-phone.md, E3): its current device name,
+    /// Bluetooth MAC (EncryptedMetadata field 4) and a freshly-salted <see cref="EndpointInfo"/> that
+    /// <see cref="CertificateIdentity.Identify"/>/<c>VerifyPairedKey</c> will match back to this exact certificate,
+    /// so the sender does not need a live BLE capture (§2.3: "discovery необязателен").
+    /// </summary>
+    public sealed record RfcommTarget(string? DeviceName, byte[] Mac, EndpointInfo RemoteInfo);
+
+    /// <summary>
+    /// Self-share certificates valid now whose metadata decrypts with field 7 and carries a 6-byte MAC (field 4).
+    /// <paramref name="nameContains"/> filters by device name (case-insensitive substring); null returns all.
+    /// Multiple results mean an ambiguous "now" window (§2.4b): try each as a separate RFCOMM connection.
+    /// </summary>
+    public IReadOnlyList<RfcommTarget> FindRfcommTargets(string? nameContains = null)
+    {
+        var result = new List<RfcommTarget>();
+        foreach (var cert in _peers.Values)
+        {
+            if (cert.MetadataEncryptionKey.Length == 0) continue;
+            var plain = cert.DecryptMetadata(cert.MetadataEncryptionKey);
+            if (plain is null) continue;
+            var fields = Proto.Parse(plain);
+            var name = Proto.Bytes(fields, 1) is { } n ? SafeUtf8(n) : null;
+            var mac = Proto.Bytes(fields, 4);
+            if (mac is null || mac.Length != 6) continue;
+            if (nameContains is not null && (name is null || !name.Contains(nameContains, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            var salt = RandomNumberGenerator.GetBytes(2);
+            var encrypted = CertificateIdentity.AesCtr(cert.SecretKey, salt, cert.MetadataEncryptionKey);
+            result.Add(new RfcommTarget(name, mac, new EndpointInfo { Metadata = [.. salt, .. encrypted] }));
+        }
+        return result;
+    }
+
+    private static string? SafeUtf8(byte[] bytes)
+    {
+        try { return new UTF8Encoding(false, true).GetString(bytes); }
+        catch (ArgumentException) { return null; }
+    }
+
     // EncryptedMetadata: field 1 = device name (the only field printed; accounts and e-mails are never read).
     private static string? DeviceName(byte[]? metadata)
     {

@@ -9,7 +9,8 @@
   - **E2 подтвердил гипотезу §2.2.** `watch 60 --identify` при заблокированном Pixel: 9 кадров `FEF3`, `len=27`, `NonConnectableUndirected`, `own-account=yes`, `cert=#1` (Pixel 9), `offset=8`, RSSI −68..−61, первый кадр на 3,1 с; совпало 1 из 1 тел.
   - Смещение 8 означает, что endpoint info лежит не в начале тела: перед ним 8 байт обёртки. Это согласуется с обёрткой BLE v2 (§2.2): байт версии и `data_size`, затем внутри connections-advertisement `[version|pcp]` + `endpoint_id(4)`, затем `endpoint_info_size`. Точная разбивка этих 8 байт не проверялась.
   - Сертификат, которым Pixel рекламирует себя при блокировке, теперь известен (#1). Для `secret_id_hash` (§2.4) надо брать его.
-- **Вердикт: (C) — не проверено, но есть конкретный рецепт с сильным обоснованием, близкий к (A).** Fast Initiation (`FE2C`) для заблокированного телефона почти наверняка бесполезен, сколько вариантов ни перебирай. Но разбудить телефон и не нужно: в режиме «Ваши устройства» заблокированный телефон **сам** остаётся доступным, только не по mDNS. Он шлёт BLE-рекламу Nearby (`FEF3`, low power) и **слушает Bluetooth Classic RFCOMM**. Официальный отправитель подключается по RFCOMM к MAC-адресу из **сертификата** телефона, а не из рекламы.
+  - **E3 пройден, все 5 критериев.** `dotnet ble rfcomm --send <файл>` при заблокированном Pixel: RFCOMM-сервис `a82efa21-ae5c-3dde-9bbc-f16da7b16c5a` найден и соединение открылось **без сопряжения** (WinRT не запросил согласие на доступ к устройству); UKEY2-рукопожатие прошло (PIN показан нашей стороной); `PairedKeyEncryption`/`PairedKeyResult` приняты телефоном (Introduction отправлена и принята, а не `kFail`); файл (29 Б) полностью дошёл на заблокированный экран — пользователь подтвердил приём на самом телефоне. MAC телефона и привязка к текущему SELF_SHARE-сертификату взяты из leveldb (поле 4 расшифрованных метаданных), без живого захвата BLE: `OfficialCertIdentity.FindRfcommTargets` сама строит валидный `RemoteEndpointInfo` из сертификата (§2.3 "discovery необязателен" подтвердилось).
+- **Вердикт: (A) — рецепт из §2.3/§2.4 подтверждён сквозным тестом на реальном Pixel 9.** Fast Initiation (`FE2C`) для заблокированного телефона почти наверняка бесполезен, сколько вариантов ни перебирай. Но разбудить телефон и не нужно: в режиме «Ваши устройства» заблокированный телефон **сам** остаётся доступным, только не по mDNS. Он шлёт BLE-рекламу Nearby (`FEF3`, low power) и **слушает Bluetooth Classic RFCOMM**. Транспорт к нему — RFCOMM к MAC-адресу из **сертификата** телефона, а не из рекламы; протокол поверх него — тот же UKEY2/PairedKey/Introduction, что по TCP (переиспользован как есть, см. §7).
 - Google прямо обещает такое поведение: «Your devices: If your screen is off, your device is still visible to your other devices with the same Google Account» ([справка Android](https://support.google.com/android/answer/9286773?hl=en)). Для «Контактов» и «Все» нужен включённый и разблокированный экран. На Chromebook: «If the screen is off or locked, the device is automatically in "Your devices" visibility» ([справка Chromebook](https://support.google.com/chromebook/answer/10751738?hl=en)).
 - **Почему наш beacon не сработал** (подтверждено исходниками для Windows/ChromeOS, для Android — по аналогии и по наблюдению). Fast Initiation — это сигнал «рядом кто-то делится», рассчитанный на экран, который включён. Приёмник при заблокированном экране сканирование Fast Init останавливает. Отправитель при заблокированном экране его не шлёт.
 - **Рецепт (гипотеза; E1, E2, E5 проверяют её косвенно, транспорт — E3, в спайк не добавлен):**
@@ -148,18 +149,16 @@
 - тип рекламы и `len`.
 Ожидание по исходникам: при заблокированном экране `own-account=yes` есть, но `nearby\SideBar.Nearby.Cli\bin\Debug\net10.0-windows10.0.26100.0\nearby.exe discover --self --timeout 30` Pixel не находит (нет mDNS). Если `FEF3` есть, а `matched=0`, значит раскладка тела другая; сравнить `len` с §2.2.
 
-**E3. Транспорт к заблокированному Pixel (Bluetooth Classic).** В спайк не добавлено.
-Механизм описан в §2.3 и §2.4 по открытому коду google/nearby. Нужна ли отдельная доработка, решает тимлид. Эксперимент должен показать:
-- найден ли сервис Nearby на Pixel без сопряжения;
-- открылось ли соединение;
-- ответил ли Pixel на начало рукопожатия;
-- результат PairedKey;
-- принят ли файл < 1 МБ, пока экран заблокирован.
+**E3. Транспорт к заблокированному Pixel (Bluetooth Classic). Пройден 2026-10-23, все 5 пунктов.**
+Механизм описан в §2.3 и §2.4 по открытому коду google/nearby. Добавлено в спайк: команда `rfcomm` (§7) переиспользует готовый протокол (UKEY2/PairedKey/Introduction) из `spikes/nearby/SideBar.Nearby`, добавляя только транспорт — WinRT RFCOMM-клиент без сопряжения и `Stream`-обёртку над `StreamSocket`.
+1. `dotnet ble\bin\Debug\net10.0-windows10.0.26100.0\Ble.dll rfcomm` (без `--send`) на заблокированном Pixel: нашёл 3 self-share сертификата с именем `Pixel 9`, подключился по RFCOMM к первому — **найден сервис и открылось соединение без сопряжения**, без запроса согласия на доступ к устройству.
+2. `dotnet ble\bin\Debug\net10.0-windows10.0.26100.0\Ble.dll rfcomm --send <файл ~29 Б>` на заблокированном Pixel: UKEY2 завершился (PIN получен), `PairedKeyEncryption`/`PairedKeyResult` принят телефоном (дошло до Introduction и Accept, а не `kFail`), файл отправлен и подтверждён принятым на самом телефоне.
+Результат: **(a)** из §2.4 — MAC и привязка к текущему сертификату взяты из leveldb (`OfficialCertIdentity.FindRfcommTargets`, поле 4 расшифрованных метаданных), без живого BLE-захвата; `RemoteEndpointInfo` строится синтетически (свежая соль + `AesCtr` тем же секретным ключом сертификата) и идентифицируется той же функцией `Identify`, что и у живой рекламы — несовпадения не было.
 
 Про сопряжение (вопрос тимлида):
 - Windows-реализация google/nearby (`bluetooth_classic_medium.cc`, `ConnectToService`) подключается к **несопряжённому** устройству через WinRT. Она получает устройство по адресу, ищет RFCOMM-сервис с `BluetoothCacheMode::Uncached` и проверяет только `DeviceAccessInformation` (`HaveAccess`). Pairing она не запрашивает.
 - Android-сторона Nearby, по всей видимости, слушает insecure RFCOMM, тоже без pairing.
-- На нашей машине это **не проверено**. Документация Microsoft ([Bluetooth RFCOMM](https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/send-or-receive-files-with-rfcomm)) описывает только сценарий с сопряжённым устройством. Поведение для несопряжённого устройства и возможный запрос согласия в ней не описаны.
+- На нашей машине это **подтверждено (E3)**: `BluetoothDevice.FromBluetoothAddressAsync` + `GetRfcommServicesForIdAsync(..., Uncached)` + `StreamSocket.ConnectAsync` сработали на несопряжённом Pixel без диалога согласия. Документация Microsoft ([Bluetooth RFCOMM](https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/send-or-receive-files-with-rfcomm)) описывает только сценарий с сопряжённым устройством и не упоминала этот путь.
 - Путь через Winsock `AF_BTH` google/nearby не использует. Подходит ли он для несопряжённого Pixel, по источникам не установлено.
 
 **E4. Калибровка Fast Init при ВКЛЮЧЁННОМ экране.** Публикация BLE, варианты уже в спайке.
@@ -186,10 +185,16 @@
 `spikes/ble/src/PeerCerts.cs` — загрузка сертов только в память. Файлы читаются с `FileShare.ReadWrite | Delete`, leveldb разбирается продуктовым `LevelDbReader` (подключён ссылкой из `src/SideBar.Nearby/Certs`), на диск ничего не пишется. Из метаданных читается только device_name.
 Собрано (0 предупреждений), не запускалось.
 
+`spikes/ble/src/Rfcomm.cs` (новое, E3) — `RfcommClient.ConnectAsync`: WinRT-клиент RFCOMM без сопряжения (`BluetoothDevice.FromBluetoothAddressAsync` → `GetRfcommServicesForIdAsync(RfcommServiceId.FromUuid(a82efa21-…), Uncached)` → `StreamSocket.ConnectAsync`, `SocketProtectionLevel.PlainSocket`); `DuplexSocketStream` — склеивает `InputStream`/`OutputStream` сокета в один `System.IO.Stream` для `NearbyConnection`. MAC никогда не печатается (то же правило, что у `watch`/`publish`).
+`spikes/ble/src/Program.cs`, команда `rfcomm [--to NAME] [--send PATH]` — находит кандидатов через новый `OfficialCertIdentity.FindRfcommTargets`, по очереди пробует RFCOMM-соединение; без `--send` только открывает и закрывает сокет (пп. 1–2 E3), с `--send` проводит полный `SendSession.SendFilesAsync` (пп. 3–5).
+`spikes/nearby/SideBar.Nearby/Session/OfficialCertificates.cs`, `OfficialCertIdentity.FindRfcommTargets` (новое, E3) — для каждого валидного self-share сертификата расшифровывает метаданные через поле 7 (как `PeerNameFromField7`), достаёт MAC (поле 4, 6 байт) и строит свежий `RemoteEndpointInfo` (соль + `AesCtr` секретным ключом *этого* сертификата), который `CertificateIdentity.Identify` опознаёт обратно в тот же сертификат без живого захвата BLE.
+Собрано (0 предупреждений), команда `rfcomm` запущена на реальном заблокированном Pixel 9 (результаты — выше и в §6 E3).
+
 ## 8. Риски и не проверено
 
 - Android-сторона (GMS) закрыта. Перенос поведения десктопного C++ (BLE + RFCOMM listening в фоне, SELF_SHARE на lock screen) на Android — гипотеза; её подкрепляют справка Google и наблюдение «mDNS пропадает».
-- MAC в сертификате может не совпасть с текущим адресом Pixel (рандомизация BT Classic не применяется, но не проверено).
-- WinRT может запросить у пользователя согласие на доступ к Bluetooth-устройству при первом RFCOMM.
-- Неверный SELF_SHARE-серт телефона даёт FAIL. Как Pixel реагирует на серию FAIL (антиабуз, блок-лист) — неизвестно; попытки делать с паузами.
-- Автоприём на заблокированном экране для «своих» обещан только справкой Chromebook; на Android его проверяет E1.
+- MAC в сертификате совпал с текущим адресом Pixel (E3: соединение открылось с первой попытки, без рандомизации BT Classic).
+- WinRT согласия на доступ к Bluetooth-устройству при RFCOMM не запросил (E3), хотя теоретически мог.
+- Неверный SELF_SHARE-серт телефона даёт FAIL. В E3 было 3 валидных сертификата `Pixel 9` одновременно; сработал первый, остальные два не пробовались — поведение Pixel на серию FAIL (антиабуз, блок-лист) по-прежнему неизвестно.
+- Автоприём на заблокированном экране для «своих» подтверждён и для нашего спайкового отправителя (E3), не только для официального приложения (E1).
+- E3 проверялся только маленьким файлом (29 Б) без bandwidth upgrade; скорость и апгрейд для файлов ≥ 1 МБ по-прежнему покрывает только E5 (официальным приложением), не нашим RFCOMM-отправителем.
