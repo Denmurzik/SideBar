@@ -43,6 +43,13 @@ sealed class ThumbnailCache
         if (!_thumbs.ContainsKey(item.Id) && _loading.Add(item.Id)) _ = Load(item, model);
     }
 
+    static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
+        { ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".tif", ".tiff" };
+
+    /// <summary>Рамка и скругление — только у файлов-картинок с миниатюрой-изображением; папки и остальное — значок без рамки.</summary>
+    static bool IsFramedPicture(ShelfItem item, ThumbnailType type) =>
+        type == ThumbnailType.Image && !Directory.Exists(item.Path) && ImageExtensions.Contains(Path.GetExtension(item.Path));
+
     async Task Load(ShelfItem item, ShelfModel model)
     {
         Thumb? result = null;
@@ -56,7 +63,7 @@ sealed class ThumbnailCache
             {
                 var bmp = new BitmapImage();
                 await bmp.SetSourceAsync(thumb);
-                result = new Thumb(bmp, thumb.Type == ThumbnailType.Icon, bmp.PixelHeight > 0 ? (double)bmp.PixelWidth / bmp.PixelHeight : 1);
+                result = new Thumb(bmp, !IsFramedPicture(item, thumb.Type), bmp.PixelHeight > 0 ? (double)bmp.PixelWidth / bmp.PixelHeight : 1);
             }
         }
         catch (Exception ex) { Log.Write("thumbnail failed: " + Log.Describe(ex)); }
