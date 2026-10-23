@@ -60,6 +60,7 @@ public static class ReceiveSession
             var accepted = false;
             var saved = new List<string>();
             var introduced = false;
+            var peerVerified = false;
             long totalSize = 0, receivedTotal = 0;
             var texts = new List<Share.TextMetadata>();
             var pendingTexts = new HashSet<long>();
@@ -122,6 +123,8 @@ public static class ReceiveSession
                             if (v1.PairedKeyEncryption is null)
                                 throw new InvalidDataException("PairedKeyEncryption frame without a body.");
                             var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Receiver, remoteInfo);
+                            // Only a key that arrived before the Introduction counts.
+                            if (!introduced) peerVerified = status == Share.PairedKeyResultFrame.Types.Status.Success;
                             await connection.SendSharingAsync(SharingFrames.PairedKeyResult(status), ct);
                             break;
 
@@ -133,6 +136,12 @@ public static class ReceiveSession
                                 throw new InvalidDataException("Duplicate Introduction.");
                             introduced = true;
                             var introduction = v1.Introduction ?? throw new InvalidDataException("Introduction frame without a body.");
+                            if (options.RejectUnverified && !peerVerified)
+                            {
+                                await connection.SendSharingAsync(SharingFrames.Response(
+                                    Share.ConnectionResponseFrame.Types.Status.Reject), ct);
+                                return new TransferResult(TransferStatus.RejectedByPeer, saved, "unverified");
+                            }
                             var files = introduction.FileMetadata;
                             var announcedTexts = introduction.TextMetadata;
                             var hasWifi = introduction.WifiCredentialsMetadata.Count > 0;
@@ -185,6 +194,8 @@ public static class ReceiveSession
                             {
                                 Texts = announcedTexts.Select(t => new IncomingText(MapKind(t.Type), t.Size)).ToList(),
                                 HasWifiCredentials = hasWifi,
+                                Verified = peerVerified,
+                                VerifiedName = peerVerified && remoteInfo is not null ? identity.TryGetPeerName(remoteInfo) : null,
                             };
                             observer.Status("Waiting for the user's decision...");
                             // Only the wait for the user is bounded; the peer's keep-alives are not read meanwhile.

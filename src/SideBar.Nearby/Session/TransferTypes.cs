@@ -19,6 +19,9 @@ public sealed record TransferResult(TransferStatus Status, IReadOnlyList<string>
 {
     /// <summary>Texts and links received in a completed transfer; their values are never logged or put into <see cref="Detail"/>.</summary>
     public IReadOnlyList<ReceivedText> ReceivedTexts { get; init; } = [];
+
+    /// <summary>Sending: the receiver proved to be one of the user's own devices (our VerifyPairedKey returned Success before the Introduction).</summary>
+    public bool PeerVerified { get; init; }
 }
 
 public enum TextKind { Text, Url, Address, Phone }
@@ -60,6 +63,9 @@ public sealed record SessionOptions(
     /// <summary>How long the receiver waits for the user to accept; on expiry the transfer is rejected.</summary>
     public TimeSpan DecisionTimeout { get; init; } = TimeSpan.FromSeconds(60);
 
+    /// <summary>Receiving: an incoming transfer from a peer that is not <see cref="IncomingTransfer.Verified"/> is rejected without asking.</summary>
+    public bool RejectUnverified { get; init; }
+
     public int MaxFilesPerIntroduction { get; init; } = 100;
 
     /// <summary>Largest BYTES payload (negotiation messages are tiny).</summary>
@@ -77,8 +83,11 @@ public sealed record IncomingFile(string Name, long Size, string MimeType);
 
 public sealed record IncomingTransfer(string Pin, string? SenderName, IReadOnlyList<IncomingFile> Files)
 {
-    /// <summary>Whether the sender's identity was verified through a paired certificate; always false until M4.</summary>
+    /// <summary>The sender's PairedKey was verified against one of our known certificates before the Introduction.</summary>
     public bool Verified { get; init; }
+
+    /// <summary>Device name from the peer's certificate; set only when <see cref="Verified"/> (never the advertised name).</summary>
+    public string? VerifiedName { get; init; }
 
     public IReadOnlyList<IncomingText> Texts { get; init; } = [];
 

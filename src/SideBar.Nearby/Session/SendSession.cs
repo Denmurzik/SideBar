@@ -83,6 +83,7 @@ public static class SendSession
             var introduced = false;
             var gotKeyEncryption = false;
             var gotKeyResult = false;
+            var peerVerified = false;
             while (true)
             {
                 var frame = (await connection.ReadSharingAsync(null, ct))!;
@@ -94,6 +95,8 @@ public static class SendSession
                             throw new InvalidDataException("PairedKeyEncryption frame without a body.");
                         gotKeyEncryption = true;
                         var status = identity.VerifyPairedKey(v1.PairedKeyEncryption, handshake.AuthString, PairedKeyRole.Sender, options.RemoteEndpointInfo);
+                        // The Introduction is only sent after this frame, so a Success is always "before Introduction".
+                        peerVerified = status == Share.PairedKeyResultFrame.Types.Status.Success;
                         await connection.SendSharingAsync(SharingFrames.PairedKeyResult(status), ct);
                         break;
 
@@ -102,14 +105,15 @@ public static class SendSession
                         break;
 
                     case Share.V1Frame.Types.FrameType.Cancel:
-                        return new TransferResult(TransferStatus.CancelledByPeer, []);
+                        return new TransferResult(TransferStatus.CancelledByPeer, []) { PeerVerified = peerVerified };
 
                     case Share.V1Frame.Types.FrameType.Response:
                         if (!introduced)
                             throw new InvalidDataException("Response before Introduction.");
                         if (v1.ConnectionResponse is null)
                             throw new InvalidDataException("Response frame without a body.");
-                        return await HandleResponseAsync(connection, v1.ConnectionResponse.Status, entries, texts, observer, options, ct);
+                        return (await HandleResponseAsync(connection, v1.ConnectionResponse.Status, entries, texts, observer, options, ct))
+                            with { PeerVerified = peerVerified };
                 }
 
                 if (!introduced && gotKeyEncryption && gotKeyResult)
