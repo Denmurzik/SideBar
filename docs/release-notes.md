@@ -2,7 +2,7 @@
 
 **SideBar 0.1.0** — выезжающая с правого края экрана панель для Windows 11.
 
-- **Полка** — временное хранилище для drag-and-drop: перетащите файлы на панель и достаньте их в другом приложении. На полке до 10 элементов, есть корзина.
+- **Полка** — временное хранилище для drag-and-drop: перетащите файлы на панель и достаньте их в другом приложении. На полке до 100 файлов (в стопке видно до 10), есть корзина.
 - **Quick Share с Android** — отправка и приём файлов, текстов и ссылок.
   - Согласие на приём (с PIN) показывается прямо в карточке; тексты и ссылки с телефона попадают в буфер обмена.
   - Режимы видимости «Все» и «Свои устройства». «Свои устройства» принимают автоматически по сертификатам официального Quick Share для Windows (нужен установленный клиент, в который выполнен вход в тот же аккаунт Google); сертификаты обновляются раз в сутки.
@@ -22,7 +22,7 @@
 
 **SideBar 0.1.0** — a panel that slides out from the right screen edge on Windows 11.
 
-- **Shelf** — a temporary stack for drag-and-drop: drop files on the panel and pick them up in another app. The shelf holds up to 10 items and has a trash.
+- **Shelf** — a temporary stack for drag-and-drop: drop files on the panel and pick them up in another app. The shelf holds up to 100 files (the stack shows up to 10) and has a trash.
 - **Quick Share with Android** — send and receive files, texts and links.
   - Consent (with a PIN) is shown right in the card; texts and links from the phone go to the clipboard.
   - Visibility modes "Everyone" and "Your devices". "Your devices" auto-accepts using the certificates of the official Quick Share for Windows (the official app must be installed and signed in to the same Google account); the certificates are refreshed once a day.
