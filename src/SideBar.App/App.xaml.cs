@@ -70,6 +70,7 @@ public partial class App : Application
 #endif
     bool _debugOpen = false;   // DEBUG: SIDEBAR_DEBUG_OPEN=1 держит карточку открытой для скриншотов
     ShareTileModel? _share;
+    ShareTileState _lastShareState;
     NearbyService? _nearby;
     DispatcherTimer? _tileTimer;
     volatile bool _shareActive;   // KeepsCardOpen для рабочего потока хука (клик вне карточки отменяет отправку)
@@ -324,7 +325,7 @@ public partial class App : Application
     void OnTileTick()
     {
         var now = DateTimeOffset.UtcNow;
-        if (_share is { } share) share.Covered = _recv.HasConsent;   // запрос закрывает плитку: таймаут выбора стоит
+        if (_share is { } share) { share.Covered = _recv.HasConsent; share.CardVisible = CardShown(); }   // запрос закрывает плитку: таймаут выбора стоит
         _share?.Tick(now);
         _recv.Tick(now, NoteVisible());
         RefreshTileHold();
@@ -332,13 +333,17 @@ public partial class App : Application
     }
 
     // заметка на экране: карточка Open/Peek, плитка показывает именно её
-    bool NoteVisible()
+    bool CardShown()
     {
         PanelState state;
         lock (_gate) state = _machine?.State ?? PanelState.Hidden;
         // Slide: Peek — полоска 10 epx, заметку не прочесть; InPlace: Peek показывает карточку целиком
-        bool shown = _debugOpen || state == PanelState.Open || (_mode == EdgeMode.InPlace && state != PanelState.Hidden);
-        return shown && _recv.Content(_share?.State ?? ShareTileState.Idle) == TileContent.Note;
+        return _debugOpen || state == PanelState.Open || (_mode == EdgeMode.InPlace && state != PanelState.Hidden);
+    }
+
+    bool NoteVisible()
+    {
+        return CardShown() && _recv.Content(_share?.State ?? ShareTileState.Idle) == TileContent.Note;
     }
 
     // карточка открыта, пока идёт отправка/показ итога или ждёт запрос (плюс 1.5 с после последнего решения)
@@ -394,8 +399,13 @@ public partial class App : Application
     void OnShareChanged()
     {
         bool keep = _share!.KeepsCardOpen;
-        _shareActive = keep;
+        _shareActive = _share.CancelsOnOutsideClick;   // клик вне карточки не трогает идущую передачу
+        _share.CardVisible = CardShown();
         RefreshTileHold();
+        // итог пришёл при спрятанной карточке: один прыжок, сам итог дождётся показа
+        bool result = _share.State is ShareTileState.Done or ShareTileState.Failed;
+        if (result && _lastShareState == ShareTileState.Sending && !CardShown()) BounceOnce();
+        _lastShareState = _share.State;
         // поиск и соединение больше не нужны ни при итоге, ни при отмене; Cancel идемпотентна
         if (!keep) { _nearby?.Cancel(); ShareStaging.Cleanup(); }   // копии временных файлов больше не нужны
         Log.Write($"share tile {_share.State}");
@@ -503,7 +513,7 @@ public partial class App : Application
             card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
         }
         if (card.Contains(x, y) || (zone is { } z && z.Contains(x, y))) return;
-        if (_shareActive) _ui?.TryEnqueue(() => _share?.Cancel());   // клик вне карточки отменяет поиск и передачу
+        if (_shareActive) _ui?.TryEnqueue(() => _share?.Cancel());   // клик вне карточки отменяет поиск и выбор, но не идущую передачу
         if (zone is not null) _ui?.TryEnqueue(() => _fan?.Hide());
     }
 

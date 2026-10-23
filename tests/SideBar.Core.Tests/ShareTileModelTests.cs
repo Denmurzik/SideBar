@@ -334,4 +334,42 @@ public class ShareTileModelTests
         m.DeviceFound(new DeviceView("pixel", "Pixel 9", ShareDeviceKind.Phone));
         Assert.False(m.Devices.Single(d => d.Id == "pixel").IsOwn);
     }
+
+    [Fact]
+    public void Outside_click_cancels_only_searching_and_choosing()
+    {
+        var m = Searching();
+        Assert.True(m.CancelsOnOutsideClick);
+        m.DeviceFound(Dev(1));
+        Assert.True(m.CancelsOnOutsideClick);
+        m.Choose("id1");
+        Assert.False(m.CancelsOnOutsideClick);
+        m.Finished(true, null);
+        Assert.False(m.CancelsOnOutsideClick);
+    }
+
+    [Fact]
+    public void Sending_does_not_hold_card_open_but_results_do()
+    {
+        var m = Sending();
+        Assert.False(m.HoldsCardOpen);
+        m.Finished(true, null);
+        Assert.True(m.HoldsCardOpen);
+    }
+
+    [Fact]
+    public void Result_is_kept_while_card_hidden_and_expires_after_visible()
+    {
+        var m = Sending();
+        m.CardVisible = false;
+        m.Tick(T0);
+        m.Finished(false, "x");
+        m.Tick(T0.AddMinutes(5));
+        Assert.Equal(ShareTileState.Failed, m.State);
+        m.CardVisible = true;
+        m.Tick(T0.AddMinutes(5).AddSeconds(1));
+        Assert.Equal(ShareTileState.Failed, m.State);
+        m.Tick(T0.AddMinutes(5).AddSeconds(2));
+        Assert.Equal(ShareTileState.Idle, m.State);
+    }
 }
