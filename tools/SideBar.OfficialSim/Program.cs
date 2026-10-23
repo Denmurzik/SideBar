@@ -8,7 +8,7 @@ namespace SideBar.OfficialSim;
 //   user    — после маркера пишет "Received WM_COPYDATA" (пользователь «открыл» приложение)
 //   rotate  — до маркера начинает новый nearby_share_<ts>.log и пишет маркер уже в него
 //   silent  — маркер не пишет
-//   show    — ДО маркера на ~600 мс показывает окно (SW_SHOWNOACTIVATE, вне экрана) и снова прячет
+//   show    — ДО маркера на ~2 с показывает окно (SW_SHOWNOACTIVATE, вне экрана) и снова прячет
 // Каталог данных — SIDEBAR_SHARING_DIR (обязателен: настоящие данные Google не трогаем). Жизнь ограничена SIDEBAR_SIM_LIFETIME_SEC (по умолчанию 90).
 static unsafe class Program
 {
@@ -108,17 +108,14 @@ static unsafe class Program
         if (_mode == "show")
         {
             ShowWindow(_hwnd, 4);   // IsWindowVisible == true, но окно за пределами экрана
-            Thread.Sleep(600);
+            Thread.Sleep(2000);
             ShowWindow(_hwnd, 0);
         }
         Thread.Sleep(300);
         if (_mode == "rotate") StartLog();
-        if (_mode != "silent") Write("pub.cc:1] operator(): PublishDevice succeeded. contact_removed: false");
-        if (_mode == "user")
-        {
-            Thread.Sleep(100);
-            Write("main.cc:1] Received WM_COPYDATA");
-        }
+        const string marker = "pub.cc:1] operator(): PublishDevice succeeded. contact_removed: false";
+        if (_mode == "user") Write(marker, "main.cc:1] Received WM_COPYDATA");   // одним Write: опрос не увидит маркер без признака пользователя
+        else if (_mode != "silent") Write(marker);
         Thread.Sleep(lifetimeSec * 1000);
         Environment.Exit(0);
     }
@@ -134,11 +131,11 @@ static unsafe class Program
         }
     }
 
-    static void Write(string line)
+    static void Write(params string[] lines)
     {
         lock (Gate)
         {
-            var bytes = System.Text.Encoding.UTF8.GetBytes($"I{DateTime.UtcNow:MMdd HH:mm:ss.ffffff} {Environment.ProcessId} {line}\n");
+            var bytes = System.Text.Encoding.UTF8.GetBytes(string.Concat(lines.Select(line => $"I{DateTime.UtcNow:MMdd HH:mm:ss.ffffff} {Environment.ProcessId} {line}\n")));
             _log!.Write(bytes);
             _log.Flush();
         }

@@ -27,6 +27,10 @@ internal sealed class RefreshHooks
     public Action? ResumeStack { get; init; }
     /// <summary>&gt; 72 ч без успешного обновления: показать единственное уведомление.</summary>
     public Action? WarnStale { get; init; }
+    /// <summary>Идёт приём или отправка: плановый цикл откладывается (иначе пауза сорвёт живую сессию). Ручной запуск не спрашивает.</summary>
+    public Func<bool>? StackBusy { get; init; }
+    /// <summary>Чужой экземпляр официального приложения работает непрерывно &gt; 10 мин: он сам обновляет сертификаты, предупреждать не нужно.</summary>
+    public Func<bool>? UserAppResident { get; init; }
 }
 
 /// <summary>
@@ -50,6 +54,9 @@ internal sealed class RefreshService : IDisposable
     readonly object _leftoverGate = new();
     LaunchedProcess? _leftover;   // наш процесс, оставшийся после DidNotExit/UserTookOver; дескриптор открыт, поэтому PID не переиспользуется
     DateTimeOffset? _lastWarned;
+    // Копия части state.json в памяти (под _stateGate): сбой чтения или записи файла не должен стирать успех и паузу после неудач.
+    DateTimeOffset? _lastSuccess, _lastAttempt;
+    int _failedAttempts;
 
     public RefreshService(OfficialAppController app, AppStateStore store, RefreshHooks hooks, Action<string> log,
         RefreshTimings? timings = null, Func<DateTimeOffset>? now = null, Func<TimeSpan>? idle = null)
@@ -96,17 +103,18 @@ internal sealed class RefreshService : IDisposable
         {
             var now = _now();
             AppState state;
-            lock (_stateGate)   // чтение-изменение-запись state.json не должны перемежаться с RecordSuccess
+            lock (_stateGate)   // чтение-изменение-запись state.json не должны перемежаться с RecordAttempt
             {
                 var loaded = _store.Load();
-                state = loaded.ClampedTo(now);
+                state = Merge(loaded.ClampedTo(now), now);
                 if (state.FirstSeen is null) state = state with { FirstSeen = now };
                 if (state != loaded) Save(state);   // зажатые «будущие» времена сохраняем, иначе они снова зажмутся к следующему now
 
                 // Без успехов опорой служит первое наблюдение: иначе при отсутствии приложения предупреждения не будет никогда.
                 var anchor = state.LastSuccess ?? state.FirstSeen;
                 var warned = (state.LastWarned, _lastWarned) switch { ({ } x, { } y) => x > y ? x : y, var (x, y) => x ?? y };   // и в памяти: сбой Save не должен повторять уведомление каждые 5 мин
-                if (_scheduler.ShouldWarn(now, anchor, warned))
+                // Пока чужой экземпляр живёт в трее, он сам обновляет сертификаты, а наш LastSuccess стоит на месте.
+                if (_scheduler.ShouldWarn(now, anchor, warned) && !Query(_hooks.UserAppResident, "resident"))
                 {
                     _lastWarned = now;
                     _log("official: no successful refresh for 72h, warning");
@@ -117,7 +125,10 @@ internal sealed class RefreshService : IDisposable
             }
 
             var decision = _scheduler.Decide(now, state.LastSuccess, _idle(), _app.IsInstalled, _app.IsRunning());
-            if (decision == RefreshDecision.RunNow) await RunOnceAsync(ct);
+            if (decision != RefreshDecision.RunNow) return;
+            if (RefreshScheduler.InBackoff(now, state.LastAttempt, state.FailedAttempts)) return;   // после неудачи не чаще, чем раз в 1-2-4-8-16-20 ч
+            if (Query(_hooks.StackBusy, "busy")) return;   // живая сессия приёма/отправки: цикл позже, не сейчас
+            await RunOnceAsync(ct);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception e) { _log($"official: tick failed, {Describe(e)}"); }
@@ -135,7 +146,7 @@ internal sealed class RefreshService : IDisposable
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _cts.Token);
             var outcome = await CycleAsync(linked.Token);
             _log($"official: refresh {outcome}");
-            if (outcome == RefreshOutcome.Succeeded) RecordSuccess();
+            RecordAttempt(outcome);
             return outcome;
         }
         finally { Volatile.Write(ref _busy, 0); }
@@ -148,11 +159,17 @@ internal sealed class RefreshService : IDisposable
 
         var scanner = new LogTailScanner(_app.LogDir);
         LaunchedProcess? proc = null;
+        IReadOnlyDictionary<string, long>? snapshot = null;
         try
         {
             if (_hooks.PauseStack is { } pause) await pause();
             if (_app.IsRunning()) return RefreshOutcome.OfficialAlreadyRunning;   // пользователь мог открыть приложение, пока ставили паузу
-            var snapshot = scanner.Snapshot();
+            snapshot = scanner.Snapshot();
+            if (snapshot is null)
+            {
+                _log("official: log dir unreadable, cycle aborted");   // без базы Scan принял бы старые логи за новые
+                return RefreshOutcome.MarkerTimeout;
+            }
             ct.ThrowIfCancellationRequested();   // отмена за время паузы: приложение не запускаем
             proc = _app.Launch();
             if (proc is null) return RefreshOutcome.NotInstalled;
@@ -181,6 +198,11 @@ internal sealed class RefreshService : IDisposable
                 _ => markerSeen ? RefreshOutcome.Succeeded : RefreshOutcome.MarkerTimeout,
             };
         }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested && proc is not null && snapshot is not null)
+        {
+            QuitOnStop(proc, scanner, snapshot);   // остановка сервиса: не оставляем наш скрытый экземпляр без единой попытки закрытия
+            throw;
+        }
         finally
         {
             lock (_leftoverGate) { if (proc is not null && !ReferenceEquals(proc, _leftover)) proc.Dispose(); }
@@ -189,6 +211,19 @@ internal sealed class RefreshService : IDisposable
             if (!ct.IsCancellationRequested && proc is not null) Hook(_hooks.ReloadCertificates, "reload");
             if (!_cts.IsCancellationRequested) Hook(_hooks.ResumeStack, "resume");
         }
+    }
+
+    /// <summary>Одна просьба выйти без ожидания: если им не пользуются (нет видимого окна и активности в логе). Процесс дальше не трогаем.</summary>
+    void QuitOnStop(LaunchedProcess proc, LogTailScanner scanner, IReadOnlyDictionary<string, long> snapshot)
+    {
+        try
+        {
+            if (proc.HasExited) return;
+            _app.Observe(proc);
+            if (proc.SawVisible || scanner.Scan(snapshot).UserActivity) return;
+            _log($"official: stop quit, {_app.RequestQuit(proc)}");
+        }
+        catch (Exception e) { _log($"official: stop quit {Describe(e)}"); }
     }
 
     RefreshOutcome Leftover(LaunchedProcess proc, RefreshOutcome outcome)
@@ -254,10 +289,48 @@ internal sealed class RefreshService : IDisposable
         return true;
     }
 
-    void RecordSuccess()
+    /// <summary>
+    /// Итог цикла в состояние: успех сбрасывает счётчик неудач, MarkerTimeout/UserTookOver/DidNotExit (и сбой запуска при установленном
+    /// приложении) увеличивают его. OfficialAlreadyRunning и CycleInProgress попыткой не считаются.
+    /// </summary>
+    void RecordAttempt(RefreshOutcome outcome)
     {
+        var success = outcome == RefreshOutcome.Succeeded;
+        var failure = outcome is RefreshOutcome.MarkerTimeout or RefreshOutcome.UserTookOver or RefreshOutcome.DidNotExit
+            || (outcome == RefreshOutcome.NotInstalled && _app.IsInstalled);
+        if (!success && !failure) return;
         var now = _now();
-        lock (_stateGate) Save((_store.Load() with { LastSuccess = now }).ClampedTo(now));
+        lock (_stateGate)
+        {
+            var state = Merge(_store.Load().ClampedTo(now), now);
+            state = success
+                ? state with { LastSuccess = now, LastAttempt = now, FailedAttempts = 0 }
+                : state with { LastAttempt = now, FailedAttempts = Math.Min(state.FailedAttempts, 1000) + 1 };
+            _lastSuccess = state.LastSuccess;
+            _lastAttempt = state.LastAttempt;
+            _failedAttempts = state.FailedAttempts;
+            Save(state);
+        }
+    }
+
+    /// <summary>Под _stateGate: состояние из файла, дополненное копией в памяти (по максимуму времени), и обратно в память.</summary>
+    AppState Merge(AppState state, DateTimeOffset now)
+    {
+        var memSuccess = _lastSuccess is { } ms && ms > now ? now : _lastSuccess;
+        var memAttempt = _lastAttempt is { } ma && ma > now ? now : _lastAttempt;
+        if (memSuccess is { } a && (state.LastSuccess is not { } b || a > b)) state = state with { LastSuccess = a };
+        // пара «время попытки + счётчик» берётся целиком у более свежей стороны
+        if (memAttempt is { } t && (state.LastAttempt is not { } f || t >= f)) state = state with { LastAttempt = t, FailedAttempts = _failedAttempts };
+        _lastSuccess = state.LastSuccess;
+        _lastAttempt = state.LastAttempt;
+        _failedAttempts = state.FailedAttempts;
+        return state;
+    }
+
+    bool Query(Func<bool>? hook, string name)
+    {
+        if (hook is null) return false;
+        try { return hook(); } catch (Exception e) { _log($"official: {name} hook {Describe(e)}"); return false; }
     }
 
     void Save(AppState state)

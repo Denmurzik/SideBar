@@ -16,6 +16,32 @@ public sealed class RefreshSchedulerTests : IDisposable
         _s.Decide(Now, Now - age, idle, installed, running);
 
     [Fact]
+    public void Backoff_escalates_1_2_4_8_16_then_caps_at_20h()
+    {
+        Assert.Equal(TimeSpan.Zero, RefreshScheduler.Backoff(0));
+        Assert.Equal(TimeSpan.FromHours(1), RefreshScheduler.Backoff(1));
+        Assert.Equal(TimeSpan.FromHours(2), RefreshScheduler.Backoff(2));
+        Assert.Equal(TimeSpan.FromHours(4), RefreshScheduler.Backoff(3));
+        Assert.Equal(TimeSpan.FromHours(8), RefreshScheduler.Backoff(4));
+        Assert.Equal(TimeSpan.FromHours(16), RefreshScheduler.Backoff(5));
+        Assert.Equal(TimeSpan.FromHours(20), RefreshScheduler.Backoff(6));
+        Assert.Equal(TimeSpan.FromHours(20), RefreshScheduler.Backoff(int.MaxValue));
+    }
+
+    [Fact]
+    public void In_backoff_until_the_pause_after_last_attempt_passes()
+    {
+        Assert.False(RefreshScheduler.InBackoff(Now, null, 3));
+        Assert.False(RefreshScheduler.InBackoff(Now, Now, 0));   // после успеха паузы нет
+        Assert.True(RefreshScheduler.InBackoff(Now, Now.AddMinutes(-5), 1));
+        Assert.True(RefreshScheduler.InBackoff(Now, Now.AddMinutes(-59), 1));
+        Assert.False(RefreshScheduler.InBackoff(Now, Now.AddHours(-1), 1));
+        Assert.True(RefreshScheduler.InBackoff(Now, Now.AddHours(-3), 3));
+        Assert.False(RefreshScheduler.InBackoff(Now, Now.AddHours(-4), 3));
+        Assert.False(RefreshScheduler.InBackoff(Now, Now.AddHours(2), 3));   // попытка «из будущего» (часы назад) не блокирует
+    }
+
+    [Fact]
     public void Under_20h_waits()
     {
         Assert.Equal(RefreshDecision.Wait, Decide(TimeSpan.FromHours(19.9), Idle));

@@ -34,6 +34,9 @@ internal static unsafe class Native
         public uint cbSize, dwTime;
     }
 
+    public const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+    public const int ERROR_ACCESS_DENIED = 5;
+
     [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
     public static extern int CreateProcessW(char* app, char* cmd, nint pa, nint ta, int inherit, uint flags, nint env,
         char* cwd, ref STARTUPINFOW si, out PROCESS_INFORMATION pi);

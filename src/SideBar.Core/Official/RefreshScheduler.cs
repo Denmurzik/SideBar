@@ -17,6 +17,24 @@ public sealed class RefreshScheduler
     public static readonly TimeSpan IdleRequired = TimeSpan.FromMinutes(5);
     public static readonly TimeSpan ForceAfter = TimeSpan.FromHours(48);
     public static readonly TimeSpan WarnAfter = TimeSpan.FromHours(72);
+    public static readonly TimeSpan BackoffBase = TimeSpan.FromHours(1);
+    public static readonly TimeSpan BackoffCap = TimeSpan.FromHours(20);
+
+    /// <summary>Пауза после <paramref name="failedAttempts"/> неудачных циклов подряд: 1, 2, 4, 8, 16 ч, дальше 20 ч; 0 — паузы нет.</summary>
+    public static TimeSpan Backoff(int failedAttempts)
+    {
+        if (failedAttempts <= 0) return TimeSpan.Zero;
+        var hours = BackoffBase.TotalHours * Math.Pow(2, Math.Min(failedAttempts - 1, 10));
+        return TimeSpan.FromHours(Math.Min(hours, BackoffCap.TotalHours));
+    }
+
+    /// <summary>Идёт ли пауза после неудачи: последняя попытка была меньше <see cref="Backoff"/> назад. Время из будущего (часы назад) паузу не продлевает.</summary>
+    public static bool InBackoff(DateTimeOffset now, DateTimeOffset? lastAttempt, int failedAttempts)
+    {
+        if (lastAttempt is null || failedAttempts <= 0) return false;
+        var since = now - lastAttempt.Value;
+        return since >= TimeSpan.Zero && since < Backoff(failedAttempts);
+    }
 
     /// <summary>Нет приложения или оно запущено — Wait. Ни одного успеха — RunNow. ≥ 20 ч — RunNow при простое ≥ 5 мин, иначе RunWhenIdle; &gt; 48 ч — RunNow сразу.</summary>
     public RefreshDecision Decide(DateTimeOffset now, DateTimeOffset? lastSuccess, TimeSpan idle, bool officialInstalled, bool officialRunning)

@@ -139,7 +139,7 @@ public partial class App : Application
         _official.Poll();   // первое решение приёма уже учитывает процесс
         _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack);
         _official.Start();
-        _refresh = new OfficialRefreshHost(_stack, _identity, _notifications, _official);   // Settings Task 3: передать AppSettings.OfficialExePath
+        _refresh = new OfficialRefreshHost(_stack, _identity, _notifications, _official, () => _receive.Busy || (_nearby?.Busy ?? false));   // Settings Task 3: передать AppSettings.OfficialExePath
         _refresh.Start();
 #if DEBUG
         if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.SetMode(SideBar.Core.Nearby.Visibility.Everyone, persist: false);   // автотест без клика по меню трея

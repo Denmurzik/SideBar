@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using SideBar.Core.Official;
 
 namespace SideBar.Official;
@@ -63,9 +64,12 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
     public bool IsInstalled => File.Exists(exePath);
 
     /// <summary>Любой экземпляр (в том числе пользовательский) этого приложения.</summary>
-    public bool IsRunning()
+    public bool IsRunning() =>
+        AnyProcess(ProcessName) || (!ProcessName.Equals("nearby_share", StringComparison.OrdinalIgnoreCase) && AnyProcess("nearby_share"));   // настроенный exe может называться иначе, чем exe пользователя
+
+    static bool AnyProcess(string name)
     {
-        var all = Process.GetProcessesByName(ProcessName);
+        var all = Process.GetProcessesByName(name);
         try { return all.Length > 0; }
         finally { foreach (var p in all) p.Dispose(); }
     }
@@ -85,10 +89,15 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
         int ok;
         fixed (char* c = cmd)
         fixed (char* d = cwd)
-            ok = Native.CreateProcessW(null, c, 0, 0, 0, 0, 0, d, ref si, out pi);
+        {
+            // Вне задания SideBar: иначе выход SideBar (kill-on-close у отладчика/лаунчера) убил бы и приложение, которым уже пользуются.
+            ok = Native.CreateProcessW(null, c, 0, 0, 0, Native.CREATE_BREAKAWAY_FROM_JOB, 0, d, ref si, out pi);
+            if (ok == 0 && Marshal.GetLastPInvokeError() == Native.ERROR_ACCESS_DENIED)   // задание не разрешает выход
+                ok = Native.CreateProcessW(null, c, 0, 0, 0, 0, 0, d, ref si, out pi);
+        }
         if (ok == 0)
         {
-            log($"official: launch failed, win32 {new Win32Exception().NativeErrorCode}");
+            log($"official: launch failed, win32 {Marshal.GetLastPInvokeError()}");
             return null;
         }
         Native.CloseHandle(pi.hThread);

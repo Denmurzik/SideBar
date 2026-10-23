@@ -20,8 +20,9 @@ sealed class OfficialRefreshHost : IDisposable
     readonly object _residentGate = new();
     Timer? _residentTimer;
 
+    /// <param name="stackBusy">Идёт приём или отправка: плановый цикл ждёт (ручной запуск из трея не спрашивает).</param>
     /// <param name="officialExePath">Путь из настроек (Settings Task 3: <c>AppSettings.OfficialExePath</c>); null — стандартный. В Debug перекрывается SIDEBAR_OFFICIAL_EXE.</param>
-    public OfficialRefreshHost(IStackPause stack, IdentityProvider identity, Notifications notes, OfficialAppWatcher watcher, string? officialExePath = null)
+    public OfficialRefreshHost(IStackPause stack, IdentityProvider identity, Notifications notes, OfficialAppWatcher watcher, Func<bool>? stackBusy = null, string? officialExePath = null)
     {
         _notes = notes;
         _watcher = watcher;
@@ -32,6 +33,8 @@ sealed class OfficialRefreshHost : IDisposable
             ReloadCertificates = identity.Reload,   // зовётся на потоке пула (RunOnceAsync запускается через Task.Run)
             ResumeStack = stack.Resume,             // снимает только свою паузу: пока жив официальный процесс, держит OfficialAppWatcher
             WarnStale = () => notes.Info("refresh-stale", Strings.CertsStale),
+            StackBusy = stackBusy,
+            UserAppResident = () => _resident.UserAppResident,   // чужой экземпляр > 10 мин в трее сам обновляет сертификаты
         };
         _service = new RefreshService(app, new AppStateStore(StatePath()), hooks, Log.Write);
     }

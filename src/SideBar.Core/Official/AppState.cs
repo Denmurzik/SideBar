@@ -15,12 +15,19 @@ public sealed record AppState
     /// <summary>Когда SideBar впервые увидел это состояние: опора для 72-часового предупреждения, пока успеха ещё не было.</summary>
     [JsonPropertyName("firstSeen")] public DateTimeOffset? FirstSeen { get; init; }
 
+    /// <summary>Когда в последний раз запускали цикл обновления (успешный или нет): опора для паузы между неудачными циклами.</summary>
+    [JsonPropertyName("lastAttempt")] public DateTimeOffset? LastAttempt { get; init; }
+
+    /// <summary>Сколько циклов подряд закончились неудачей (0 после успеха): определяет длину паузы.</summary>
+    [JsonPropertyName("failedAttempts")] public int FailedAttempts { get; init; }
+
     /// <summary>Будущие времена (часы ушли назад) приводит к <paramref name="now"/>: иначе «успех из будущего» блокировал бы цикл.</summary>
     public AppState ClampedTo(DateTimeOffset now) => this with
     {
         LastSuccess = Min(LastSuccess, now),
         LastWarned = Min(LastWarned, now),
         FirstSeen = Min(FirstSeen, now),
+        LastAttempt = Min(LastAttempt, now),
     };
 
     static DateTimeOffset? Min(DateTimeOffset? v, DateTimeOffset now) => v is { } t && t > now ? now : v;

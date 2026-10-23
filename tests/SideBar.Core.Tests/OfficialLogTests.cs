@@ -41,7 +41,7 @@ public sealed class OfficialLogTests : IDisposable
     public void Only_text_after_snapshot_counts()
     {
         File.WriteAllText(Log("nearby_share_a.log"), "PublishDevice succeeded\nReceived WM_COPYDATA\n");
-        var snap = _scanner.Snapshot();
+        var snap = _scanner.Snapshot()!;
         Assert.Equal(new LogScan(false, false), _scanner.Scan(snap));
         File.AppendAllText(Log("nearby_share_a.log"), "later PublishDevice succeeded\n");
         Assert.Equal(new LogScan(true, false), _scanner.Scan(snap));
@@ -51,7 +51,7 @@ public sealed class OfficialLogTests : IDisposable
     public void Log_rotation_new_file_is_read_from_start()
     {
         File.WriteAllText(Log("nearby_share_a.log"), "old\n");
-        var snap = _scanner.Snapshot();
+        var snap = _scanner.Snapshot()!;
         File.AppendAllText(Log("nearby_share_a.log"), "tail\n");
         File.WriteAllText(Log("nearby_share_b.log"), "noise\nPublishDevice succeeded\n");
         Assert.True(_scanner.Scan(snap).MarkerSeen);
@@ -60,18 +60,26 @@ public sealed class OfficialLogTests : IDisposable
     [Fact]
     public void Other_files_are_ignored_and_missing_dir_is_empty()
     {
-        var snap = _scanner.Snapshot();
+        var snap = _scanner.Snapshot()!;
         File.WriteAllText(Log("other.log"), "PublishDevice succeeded");
         Assert.Equal(new LogScan(false, false), _scanner.Scan(snap));
         var gone = new LogTailScanner(Path.Combine(_dir, "nope"));
-        Assert.Empty(gone.Snapshot());
+        Assert.Empty(gone.Snapshot()!);   // нет каталога — не ошибка
         Assert.Equal(new LogScan(false, false), gone.Scan(new Dictionary<string, long>()));
+    }
+
+    [Fact]
+    public void Unreadable_log_dir_gives_null_snapshot_not_empty()
+    {
+        var notADir = Log("file.txt");
+        File.WriteAllText(notADir, "x");
+        Assert.Null(new LogTailScanner(notADir).Snapshot());   // ошибка ввода-вывода отличается от «логов ещё нет»
     }
 
     [Fact]
     public void Open_for_write_by_another_process_is_readable()
     {
-        var snap = _scanner.Snapshot();
+        var snap = _scanner.Snapshot()!;
         using var w = new FileStream(Log("nearby_share_c.log"), FileMode.Create, FileAccess.Write, FileShare.Read);
         w.Write("PublishDevice succeeded\n"u8);
         w.Flush();
@@ -82,7 +90,7 @@ public sealed class OfficialLogTests : IDisposable
     public void Truncated_file_does_not_throw()
     {
         File.WriteAllText(Log("nearby_share_a.log"), new string('a', 200) + "\n");
-        var snap = _scanner.Snapshot();
+        var snap = _scanner.Snapshot()!;
         File.WriteAllText(Log("nearby_share_a.log"), "x");
         Assert.Equal(new LogScan(false, false), _scanner.Scan(snap));
         File.WriteAllText(Log("nearby_share_a.log"), "PublishDevice succeeded\n");   // новый файл короче смещения: читается с начала

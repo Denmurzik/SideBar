@@ -11,6 +11,10 @@ public sealed class ResidentAppDetector(TimeSpan threshold)
 {
     DateTimeOffset? _since;
     bool _noted;
+    volatile bool _userResident;
+
+    /// <summary>Чужой (не наш оставшийся) экземпляр работает непрерывно дольше порога: он сам обновляет сертификаты, 72-часовое предупреждение не нужно.</summary>
+    public bool UserAppResident => _userResident;
 
     /// <param name="running">Процесс официального приложения запущен.</param>
     /// <param name="ownCycle">Идёт наш цикл обновления.</param>
@@ -20,10 +24,12 @@ public sealed class ResidentAppDetector(TimeSpan threshold)
         if (!running || ownCycle)
         {
             _since = null;
+            _userResident = false;
             if (!running) _noted = false;
             return ResidentNote.None;
         }
         _since ??= now;
+        _userResident = !ourLeftover && now - _since >= threshold;
         if (_noted || now - _since < threshold) return ResidentNote.None;
         _noted = true;
         return ourLeftover ? ResidentNote.OurLeftover : ResidentNote.UserApp;

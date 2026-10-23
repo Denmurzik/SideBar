@@ -23,8 +23,8 @@ public sealed class LogTailScanner(string logDir)
     public const string PublishMarker = "PublishDevice succeeded";
     const string Pattern = "nearby_share*.log";
 
-    /// <summary>Длины текущих логов; пустой словарь, если каталога нет.</summary>
-    public Dictionary<string, long> Snapshot()
+    /// <summary>Длины текущих логов; пустой словарь, если каталога нет; null — каталог не прочитать (без базы Scan принял бы старые логи за новые).</summary>
+    public Dictionary<string, long>? Snapshot()
     {
         var map = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         try
@@ -32,7 +32,8 @@ public sealed class LogTailScanner(string logDir)
             foreach (var f in Directory.GetFiles(logDir, Pattern))
                 map[f] = new FileInfo(f).Length;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        catch (DirectoryNotFoundException) { map.Clear(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
         return map;
     }
 

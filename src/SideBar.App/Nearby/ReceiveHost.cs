@@ -77,6 +77,9 @@ sealed class ReceiveHost : IDisposable
         if (_visibility.Current != Visibility.Hidden) _ = Task.Run(() => EvaluateAsync());   // «Свои устройства» по умолчанию: слушать сразу, а не через 30 с
     }
 
+    /// <summary>Есть живая сессия приёма (в том числе ждущая согласия).</summary>
+    public bool Busy => Volatile.Read(ref _sessions) > 0;
+
     public Visibility Mode
     {
         get { lock (_gate) return _visibility.Current; }

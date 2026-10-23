@@ -18,6 +18,32 @@ public class ResidentAppDetectorTests
     }
 
     [Fact]
+    public void User_app_counts_as_resident_only_after_threshold_and_not_for_our_leftover()
+    {
+        var d = new ResidentAppDetector(Ten);
+        d.Observe(true, T0, false);
+        Assert.False(d.UserAppResident);
+        d.Observe(true, T0.AddMinutes(9), false);
+        Assert.False(d.UserAppResident);
+        d.Observe(true, T0.AddMinutes(10), false);
+        Assert.True(d.UserAppResident);
+        d.Observe(true, T0.AddMinutes(60), false);
+        Assert.True(d.UserAppResident);   // остаётся истиной, хотя заметка уже показана
+        d.Observe(false, T0.AddMinutes(61), false);
+        Assert.False(d.UserAppResident);
+
+        var ours = new ResidentAppDetector(Ten);
+        ours.Observe(true, T0, false, ourLeftover: true);
+        ours.Observe(true, T0.AddMinutes(30), false, ourLeftover: true);
+        Assert.False(ours.UserAppResident);
+
+        var cycle = new ResidentAppDetector(Ten);
+        cycle.Observe(true, T0, false);
+        cycle.Observe(true, T0.AddMinutes(20), true);   // идёт наш цикл: отсчёт сброшен
+        Assert.False(cycle.UserAppResident);
+    }
+
+    [Fact]
     public void Our_leftover_process_gets_its_own_note()
     {
         var d = new ResidentAppDetector(Ten);

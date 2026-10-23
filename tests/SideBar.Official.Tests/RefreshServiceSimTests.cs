@@ -179,7 +179,8 @@ public sealed class RefreshServiceSimTests : IDisposable
         svc.Dispose();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
         Assert.Equal(["pause"], _hooks);   // приложение закрывается: ни перезагрузки, ни возобновления
-        Assert.Single(SimProcesses());     // процесс не убиваем
+        Assert.Contains(_log, l => l.Contains("stop quit, Posted"));   // одна просьба выйти, без ожидания и без убийства
+        Assert.True(WaitFor(() => SimProcesses().Length == 0));   // симулятор послушался WM_QUIT
         Assert.False(svc.IsBusy);
     }
 
@@ -258,6 +259,134 @@ public sealed class RefreshServiceSimTests : IDisposable
         Assert.DoesNotContain(_log, l => l.Contains("close attempt"));
         Assert.Null(new AppStateStore(StatePath).Load().LastSuccess);
         Assert.Contains(_log, l => l.Contains("visible window latched, class " + OfficialAppController.WindowClass));   // класс окна в логе
+    }
+
+    [Fact]
+    public async Task Service_stop_after_user_activity_leaves_process_alone()
+    {
+        var svc = Make("user");
+        Assert.Equal(RefreshOutcome.UserTookOver, await svc.RunOnceAsync());
+        svc.Dispose();
+        Assert.DoesNotContain(_log, l => l.Contains("stop quit"));
+        Assert.Single(SimProcesses());
+    }
+
+    [Fact]
+    public async Task Unreadable_log_dir_aborts_cycle_without_launching()
+    {
+        Directory.CreateDirectory(SharingDir);
+        File.WriteAllText(Path.Combine(SharingDir, "Logs"), "not a dir");   // вместо каталога логов - файл
+        var svc = Make("normal");
+        Assert.Equal(RefreshOutcome.MarkerTimeout, await svc.RunOnceAsync());
+        Assert.Empty(SimProcesses());
+        Assert.Equal(["pause", "resume"], _hooks);   // пауза снята, сертификаты не перечитывались
+        var state = new AppStateStore(StatePath).Load();
+        Assert.Null(state.LastSuccess);
+        Assert.Equal(1, state.FailedAttempts);   // считается попыткой
+    }
+
+    [Fact]
+    public async Task Failed_cycle_backs_off_1h_then_retries_and_manual_run_bypasses_it()
+    {
+        var silent = new RefreshTimings
+        {
+            MarkerTimeout = TimeSpan.FromSeconds(1),
+            Settle = TimeSpan.FromMilliseconds(100),
+            ExitWait = TimeSpan.FromSeconds(5),
+            RetryDelay = TimeSpan.FromSeconds(1),
+        };
+        var svc = Make("silent", silent);
+        await svc.TickAsync();   // T0: MarkerTimeout
+        Assert.Equal(["pause", "reload", "resume"], _hooks);
+        Assert.Contains(_log, l => l.Contains("refresh MarkerTimeout"));
+        Assert.Empty(SimProcesses());
+
+        _hooks.Clear();
+        _now = T0.AddMinutes(5);
+        await svc.TickAsync();
+        Assert.Empty(_hooks);   // в паузе: ничего не запускали
+
+        _now = T0.AddMinutes(59);
+        await svc.TickAsync();
+        Assert.Empty(_hooks);
+
+        Assert.Equal(RefreshOutcome.MarkerTimeout, await svc.RunOnceAsync());   // ручной запуск паузу обходит
+        Assert.Equal(["pause", "reload", "resume"], _hooks);
+        Assert.Equal(2, new AppStateStore(StatePath).Load().FailedAttempts);
+
+        // новый экземпляр сервиса (перезапуск SideBar) читает паузу из файла: попытка была в T0+59 мин, пауза теперь 2 ч
+        _hooks.Clear();
+        _now = T0.AddMinutes(59 + 90);
+        var restarted = Make("silent", silent);
+        await restarted.TickAsync();
+        Assert.Empty(_hooks);
+
+        _now = T0.AddMinutes(59 + 121);
+        await restarted.TickAsync();
+        Assert.Equal(["pause", "reload", "resume"], _hooks);   // пауза прошла: запускает снова
+    }
+
+    [Fact]
+    public async Task Backoff_survives_unwritable_state_file_via_memory()
+    {
+        var svc = Make("silent", new RefreshTimings
+        {
+            MarkerTimeout = TimeSpan.FromSeconds(1),
+            Settle = TimeSpan.FromMilliseconds(100),
+            ExitWait = TimeSpan.FromSeconds(5),
+            RetryDelay = TimeSpan.FromSeconds(1),
+        });
+        Directory.CreateDirectory(StatePath);   // state.json - каталог: Load даёт пустое состояние, Save не удаётся
+        await svc.TickAsync();
+        Assert.Equal(["pause", "reload", "resume"], _hooks);
+        _hooks.Clear();
+        _now = T0.AddMinutes(5);
+        await svc.TickAsync();
+        Assert.Empty(_hooks);   // без файла пауза держится по памяти
+    }
+
+    [Fact]
+    public async Task Busy_stack_defers_scheduled_cycle_but_not_manual_run()
+    {
+        var busy = true;
+        SetEnv("normal", SharingDir, SimExe());
+        var app = OfficialAppController.FromEnvironment(s => _log.Add(s));
+        var hooks = new RefreshHooks
+        {
+            PauseStack = () => { _hooks.Add("pause"); return Task.CompletedTask; },
+            ReloadCertificates = () => _hooks.Add("reload"),
+            ResumeStack = () => _hooks.Add("resume"),
+            StackBusy = () => busy,
+        };
+        var svc = new RefreshService(app, new AppStateStore(StatePath), hooks, s => _log.Add(s),
+            new RefreshTimings { MarkerTimeout = TimeSpan.FromSeconds(10), Settle = TimeSpan.FromMilliseconds(100), ExitWait = TimeSpan.FromSeconds(5) }, () => _now, () => TimeSpan.FromMinutes(10));
+        await svc.TickAsync();
+        Assert.Empty(_hooks);   // сессия идёт: ждём
+        Assert.Equal(RefreshOutcome.Succeeded, await svc.RunOnceAsync());   // ручной запуск не спрашивает
+        Assert.Equal(["pause", "reload", "resume"], _hooks);
+
+        busy = false;
+        _hooks.Clear();
+        _now = T0.AddHours(25);
+        await svc.TickAsync();
+        Assert.Equal(["pause", "reload", "resume"], _hooks);
+    }
+
+    [Fact]
+    public async Task Resident_user_app_suppresses_stale_warning()
+    {
+        var resident = true;
+        SetEnv("normal", SharingDir, Path.Combine(_dir, "missing", "nearby_share.exe"));
+        var app = OfficialAppController.FromEnvironment(s => _log.Add(s));
+        var hooks = new RefreshHooks { WarnStale = () => _hooks.Add("warn"), UserAppResident = () => resident };
+        var svc = new RefreshService(app, new AppStateStore(StatePath), hooks, s => _log.Add(s), null, () => _now);
+        await svc.TickAsync();   // FirstSeen
+        _now = T0.AddHours(80);
+        await svc.TickAsync();
+        Assert.Empty(_hooks);   // чужой экземпляр в трее: не предупреждаем
+        resident = false;
+        await svc.TickAsync();
+        Assert.Equal(["warn"], _hooks);
     }
 
     [Fact]
