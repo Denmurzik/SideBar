@@ -45,12 +45,15 @@ Source: "..\artifacts\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 Name: "{group}\SideBar"; Filename: "{app}\SideBar.exe"
 
 [Run]
-; Удаляем старое правило (ошибка, если его нет, игнорируется), затем добавляем: дубликаты не копятся.
+; Сначала удаляем ВСЕ входящие правила для нашего exe, в том числе Block, которые Windows создаёт при «Отмене» в запросе брандмауэра
+; (Block сильнее Allow). Затем правило по имени (старая установка в другой папке). Ошибка «правил нет» игнорируется. Потом добавляем: дубликаты не копятся.
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=all dir=in program=""{app}\SideBar.exe"""; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FwRule}"""; Flags: runhidden waituntilterminated
-Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FwRule}"" dir=in action=allow program=""{app}\SideBar.exe"" protocol=TCP profile=private"; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""{#FwRule}"" dir=in action=allow program=""{app}\SideBar.exe"" protocol=TCP profile=private,domain"; Flags: runhidden waituntilterminated
 Filename: "{app}\SideBar.exe"; Description: "{cm:LaunchProgram,SideBar}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=all dir=in program=""{app}\SideBar.exe"""; Flags: runhidden waituntilterminated; RunOnceId: "DelFwRulesByProgram"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""{#FwRule}"""; Flags: runhidden waituntilterminated; RunOnceId: "DelFwRule"
 
 [Code]

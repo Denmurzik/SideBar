@@ -16,9 +16,12 @@ sealed partial class ShelfService
 
     static int ReadDeleteDelayMs()
     {
+        var sec = DefaultOwnedDeleteDelaySec;
+#if DEBUG
         // SIDEBAR_OWNED_DELETE_DELAY_SEC — для автотеста
         var raw = Environment.GetEnvironmentVariable("SIDEBAR_OWNED_DELETE_DELAY_SEC");
-        var sec = int.TryParse(raw, out var v) && v >= 0 ? v : DefaultOwnedDeleteDelaySec;
+        if (int.TryParse(raw, out var v) && v >= 0) sec = v;
+#endif
         return (int)Math.Min(sec * 1000L, int.MaxValue);
     }
 

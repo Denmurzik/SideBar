@@ -26,7 +26,7 @@ sealed record SettingsDeps(SettingsStore Store, Autostart Autostart, string ExeP
 public sealed partial class SettingsWindow : Window
 {
     const double DefaultWidth = 900, DefaultHeight = 640, MinWidth = 640, MinHeight = 480;   // epx
-    const string DefaultOfficialPath = @"C:\Program Files\Google\NearbyShare\nearby_share.exe";
+    static string DefaultOfficialPath => SideBar.Official.OfficialAppController.DefaultExe;
     const string RepoUrl = "https://github.com/Denmurzik/SideBar";
     static readonly TimeSpan ClearArmWindow = TimeSpan.FromSeconds(5);
 
@@ -448,7 +448,7 @@ public sealed partial class SettingsWindow : Window
                 _ => Strings.CertsNoValid,
             });
         if (id.Current is not null && id.Summary is { } s)
-            return Strings.CertsLoaded(s.PeerCount, s.NextExpiry.ToLocalTime().ToString("dd.MM.yyyy"));
+            return Strings.CertsLoaded(s.PeerCount, Strings.CertDate(s.NextExpiry.ToLocalTime().DateTime));
         return Strings.CertsLoading;
     }
 

@@ -437,6 +437,9 @@ spikes/**/out/
 # Cross-agent build lock (one heavy build at a time)
 .buildlock/
 
+# Per-session isolated git worktrees
+.worktrees/
+
 # Spike publish outputs
 spikes/**/out-*/
 spikes/**/*.log

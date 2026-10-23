@@ -60,7 +60,7 @@ static class UiTextEn
         CheckingNow = "Checking\u2026",
         UpToDate = "You have the latest version",
         CheckFailed = "Couldn\u2019t check",
-        CheckFailedClosed = "Couldn\u2019t check (the repository is private)",
+        CheckFailedClosed = "No releases available (repository is private)",
         ReleasesTitle = "Releases page",
         ReleasesLink = "Open on GitHub",
         VisibilityTitle = "Visibility",
@@ -131,6 +131,7 @@ static class UiTextEn
         CheckUpdatesDescFmt = "Version {0}",
         UpdateAvailableFmt = "Version {0} available",
         MsFmt = "{0} ms",
+        CertDateFormat = "MMM d, yyyy",
         CertsLoadedFmt = "Loaded \u00B7 devices: {0} \u00B7 valid until {1}",
         CertsFailedFmt = "Unavailable: {0}",
     };

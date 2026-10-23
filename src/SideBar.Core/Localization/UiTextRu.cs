@@ -60,7 +60,7 @@ static class UiTextRu
         CheckingNow = "Проверяем…",
         UpToDate = "Установлена последняя версия",
         CheckFailed = "Не удалось проверить",
-        CheckFailedClosed = "Не удалось проверить (репозиторий закрыт)",
+        CheckFailedClosed = "Нет доступных релизов (репозиторий закрыт)",
         ReleasesTitle = "Страница релизов",
         ReleasesLink = "Открыть на GitHub",
         VisibilityTitle = "Видимость",
@@ -133,5 +133,6 @@ static class UiTextRu
         MsFmt = "{0} мс",
         CertsLoadedFmt = "загружены · устройств {0} · действуют до {1}",
         CertsFailedFmt = "недоступны: {0}",
+        CertDateFormat = "dd.MM.yyyy",
     };
 }

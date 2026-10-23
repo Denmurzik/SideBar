@@ -149,6 +149,9 @@ sealed class Driver
         psi.Environment["SIDEBAR_DATA_DIR"] = _dataDir;
         psi.Environment["SIDEBAR_NEARBY_ONLY_NAME"] = "SidebarE2E";   // Debug: в плитке только устройство e2e, настоящий телефон не виден
         psi.Environment["SIDEBAR_NEARBY_INCLUDE_LOCAL"] = "1";   // только Debug-сборка: loopback e2e видит сервисы этой машины; Release игнорирует
+        // настоящий официальный Quick Share на этой машине: обновление сертификатов закрывало бы его/запускало и крало фокус во время drag-ов
+        psi.Environment["SIDEBAR_OFFICIAL_EXE"] = Path.Combine(_work, "no-official", "nearby_share.exe");   // файла нет -> «не установлен»
+        psi.Environment["SIDEBAR_SHARING_DIR"] = Path.Combine(_work, "no-official", "sharing");
         if (defaultDeleteDelay) psi.Environment.Remove("SIDEBAR_OWNED_DELETE_DELAY_SEC");
         else psi.Environment["SIDEBAR_OWNED_DELETE_DELAY_SEC"] = deleteDelaySec.ToString();
         _app = Process.Start(psi)!;
@@ -196,7 +199,7 @@ sealed class Driver
         DragToPanel(files, W, H);
         var s = WaitShelf(x => x.Count == 3);
         Check("T2 three files in one drop -> three [reference] items, originals untouched",
-            s.Count == 3 && s.All(x => x.Kind == Reference) && Same(s.Select(x => x.Path), a, b, c) && File.Exists(a) && File.Exists(b) && File.Exists(c), Dump(s));
+            s.Count == 3 && s.All(x => x.Kind == Reference) && Same(s.Select(x => x.Path), a, b, c) && File.Exists(a) && File.Exists(b) && File.Exists(c), Dump(s) + " | drop log: " + _lastLog.Replace("\n", " | "));
 
         // T2b: тот же файл ещё раз -> уникальное отображаемое имя
         var again = new DataObject();
@@ -205,6 +208,7 @@ sealed class Driver
         s = WaitShelf(x => x.Count == 4);
         Check("T2b duplicate a.txt -> second [reference] item named 'a (2).txt'",
             s.Count == 4 && s[3].Name == "a (2).txt" && s[3].Kind == Reference && s[3].Path.Equals(a, StringComparison.OrdinalIgnoreCase) && File.Exists(a), Dump(s));
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_T2_ONLY") == "1") return;   // быстрый прогон: только T2, T2b
 
         // T3: виртуальный файл > 1 МиБ (потоковая запись кусками) -> Owned в Shelf
         var big = new byte[(1 << 20) * 5 / 2 + 123];

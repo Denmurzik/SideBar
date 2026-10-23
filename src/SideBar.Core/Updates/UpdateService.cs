@@ -15,6 +15,7 @@ public sealed class UpdateService
     private readonly DateTimeOffset _startedAt;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private volatile ReleaseInfo? _found;
+    private DateTimeOffset? _lastCheck;   // в памяти: если файл не пишется, политика всё равно видит последнюю проверку
 
     public UpdateService(UpdateStateStore state, Version current, Func<CancellationToken, Task<(int Status, byte[]? Body)>> fetch,
         Func<DateTimeOffset> clock, Func<bool> enabled, Action<string>? log = null)
@@ -40,11 +41,13 @@ public sealed class UpdateService
         _state.Save(st with { Tag = null, HtmlUrl = null });
     }
 
+    private static DateTimeOffset? Latest(DateTimeOffset? a, DateTimeOffset? b) => a is null ? b : b is null ? a : a > b ? a : b;
+
     /// <summary>Тик таймера: выключено или рано по политике — запроса нет.</summary>
     public async Task TickAsync(CancellationToken ct)
     {
         if (!_enabled()) return;
-        if (!UpdatePolicy.ShouldCheck(_clock(), _startedAt, _state.LastCheck)) return;
+        if (!UpdatePolicy.ShouldCheck(_clock(), _startedAt, Latest(_state.LastCheck, _lastCheck))) return;
         await CheckAsync(ct);
     }
 
@@ -81,7 +84,9 @@ public sealed class UpdateService
                     persisted = persisted with { Tag = null, HtmlUrl = null };
                     break;
             }
-            _state.Save(persisted with { LastCheck = _clock() });
+            var now = _clock();
+            _lastCheck = now;
+            _state.Save(persisted with { LastCheck = now });
             return outcome;
         }
         finally { _gate.Release(); }
