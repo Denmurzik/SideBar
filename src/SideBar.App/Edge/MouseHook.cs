@@ -94,6 +94,10 @@ sealed unsafe class MouseHook : IDisposable
             try
             {
                 while (_downs.TryDequeue(out long d)) _onPrimaryDown?.Invoke((int)(d >> 32), (int)(d & 0xFFFFFFFF));
+            }
+            catch { /* сбой клика не должен пропускать onMove */ }
+            try
+            {
                 long p = Interlocked.Read(ref _lastPt);
                 _onMove((int)(p >> 32), (int)(p & 0xFFFFFFFF));
             }

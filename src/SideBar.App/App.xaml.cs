@@ -158,7 +158,7 @@ public partial class App : Application
             card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
         }
         if (zone is not { } z || z.Contains(x, y) || card.Contains(x, y)) return;
-        _ui?.TryEnqueue(() => _fan?.Close());
+        _ui?.TryEnqueue(() => _fan?.Hide());
     }
 
     /// <summary>Пересчёт по WM_DISPLAYCHANGE / WM_DPICHANGED / WM_SETTINGCHANGE. Только из UI-потока.</summary>
@@ -177,7 +177,7 @@ public partial class App : Application
             _mode = mode;
             _machine.Relayout(layout, mode);
         }
-        _fan?.Close();
+        _fan?.Hide();
         _window.Relayout(layout, mode, scale);
         _dropTarget?.Refresh();   // WinUI может пересоздать дочерние HWND при смене DPI/дисплея
         _trimmer.OnHidden();   // Relayout не поднимает Settled
@@ -235,7 +235,7 @@ public partial class App : Application
                 lock (_gate) { if (gen != _generation) return; }
                 Log.Write($"edge {s}");
                 if (s != PanelState.Hidden) _trimmer.OnShown();
-                else _fan?.Close();
+                else _fan?.Hide();
                 _window?.SetState(s);
             });
         }

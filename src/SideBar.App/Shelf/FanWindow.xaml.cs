@@ -2,7 +2,6 @@ using System.Diagnostics;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using SideBar.Core;
 using SideBar.Core.Motion;
@@ -17,8 +16,8 @@ namespace SideBar.Shelf;
 /// Веер: отдельное окно того же стиля, что карточка, слева от неё (зазор 8 epx, по центру карточки по вертикали).
 /// Колонка строк 48 epx (превью 40 + имя), до 8 видимых, дальше прокрутка. Появляется пружиной по X из-за карточки.
 /// Каждая строка выносится отдельно (только Copy, через <see cref="DragOut"/>).
-/// Закрывает веер владелец (клик вне веера и карточки, скрытие карточки); сам он закрывается по Esc, если получил фокус,
-/// и когда стопка опустела.
+/// Окно никогда не активируется (WS_EX_NOACTIVATE + MA_NOACTIVATE). Скрывает веер владелец (клик вне веера и карточки,
+/// скрытие карточки); сам он скрывается, когда стопка опустела.
 /// </summary>
 public sealed partial class FanWindow : Window
 {
@@ -94,7 +93,7 @@ public sealed partial class FanWindow : Window
     }
 
     /// <summary>Скрывает веер (окно остаётся для повторного показа).</summary>
-    internal new void Close()
+    internal void Hide()
     {
         if (!_open) return;
         _open = false;
@@ -104,7 +103,6 @@ public sealed partial class FanWindow : Window
         {
             AppWindow.Hide();
             _shown = false;
-            WorkingSet.Trim();
         }
         ZoneChanged?.Invoke(null);
     }
@@ -151,7 +149,7 @@ public sealed partial class FanWindow : Window
     void OnModelChanged()
     {
         if (!_open) return;
-        if (_model!.Items.Count == 0) { Close(); return; }
+        if (_model!.Items.Count == 0) { Hide(); return; }
         double offset = Scroller.VerticalOffset;
         RebuildRows();
         Layout();
@@ -225,12 +223,6 @@ public sealed partial class FanWindow : Window
         row.DragStarting += (_, e) => DragOut.Start(e, [item]);
         row.DropCompleted += (_, e) => { if (_shelf != null) DragOut.Completed(e, _shelf); };
         return row;
-    }
-
-    void OnEscape(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
-    {
-        args.Handled = true;
-        Close();
     }
 
     void StartTicking()

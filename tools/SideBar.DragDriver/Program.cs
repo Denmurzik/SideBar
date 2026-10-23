@@ -36,6 +36,9 @@ sealed class Driver
     [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out Point p);
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(nint hwnd, out uint pid);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(nint hwnd, System.Text.StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, nint extra);
 
     const int Reference = 0, Owned = 1;
@@ -482,6 +485,19 @@ sealed class Driver
         return z;
     }
 
+    nint _fgBeforeFan;
+
+    /// <summary>Окно переднего плана принадлежит процессу SideBar (карточка или веер)?</summary>
+    bool ForegroundIsApp(out string cls)
+    {
+        var h = GetForegroundWindow();
+        var sb = new System.Text.StringBuilder(256);
+        GetClassNameW(h, sb, 256);
+        cls = sb.ToString();
+        GetWindowThreadProcessId(h, out var pid);
+        return _app != null && pid == (uint)_app.Id;
+    }
+
     static void Click() { Mouse(0x0002); Thread.Sleep(80); Mouse(0x0004); }
 
     /// <summary>Открывает карточку и кликом по стопке — веер; ждёт, пока пружина успокоится.</summary>
@@ -490,6 +506,7 @@ sealed class Driver
         if (!OpenCard(W, H)) return null;
         var tile = ShelfTile(W, H);
         MoveTo(tile.X, tile.Y, 300); Thread.Sleep(300);
+        _fgBeforeFan = GetForegroundWindow();
         Click();
         var z = WaitFan(true);
         Thread.Sleep(900);
@@ -541,13 +558,19 @@ sealed class Driver
         if (z is not { } fan) { Check("F1 click on the stack opens the fan", false, "no 'fan open' in the log"); return; }
         int expH = (int)Math.Round((5 * 48 + 8) * _scale), expLeft = card.Left - (int)Math.Round(224 * _scale);
         int cardCenter = card.Top + card.Height / 2;
+        nint fgAfterOpen = GetForegroundWindow();
         ShotRegion("6-fan", new Rectangle(Math.Max(0, fan.Left - 30), Math.Max(0, Math.Min(fan.Top, card.Top) - 20), W - Math.Max(0, fan.Left - 30), Math.Max(fan.Height, card.Height) + 40));
         Check("F1 click on the stack -> fan zone left of the card (8 epx gap), vertically centred, 5 rows of 48 epx",
             Math.Abs(fan.Left - expLeft) <= 3 && Math.Abs(fan.Right - card.Left) <= 3 && Math.Abs(fan.Height - expH) <= 3
             && Math.Abs(fan.Top + fan.Height / 2 - cardCenter) <= 3, $"fan={fan} card={card} expLeft={expLeft} expH={expH}");
 
+        Check("F1b clicking the stack and opening the fan does not change the foreground window", fgAfterOpen == _fgBeforeFan, $"before={_fgBeforeFan} after={fgAfterOpen}");
+
         // F2: вынос одной строки (вторая сверху = ref-original.txt) в принимающее окно -> Copy, снят только он
+        nint fgBeforeDrag = GetForegroundWindow();
         DragFanRow(fan, 1, otherCenter, W, H);
+        nint fgAfterDrag = GetForegroundWindow();
+        bool fgAppAfterDrag = ForegroundIsApp(out var fgClass);
         var got = _received;
         var left = ReadShelf();
         var removed = ids.Except(left.Select(x => x.Id)).ToList();
@@ -555,6 +578,22 @@ sealed class Driver
             _otherEffect == "Copy" && got.Length == 1 && got[0].EndsWith("ref-original.txt") && left.Count == 4 && removed.Count == 1
             && s.First(x => x.Id == removed[0]).Path.EndsWith("ref-original.txt") && File.Exists(refFile) && AppLog().Contains("DropResult=Copy"),
             $"effect={_otherEffect} received=[{string.Join("; ", got)}] removed={removed.Count}" + "\n" + Dump(left));
+
+        // приёмник drop'а вправе сам выйти на передний план (Проводник так делает): важно, что не карточка и не веер
+        Check("F2b after a fan row drag-out the foreground window is not the card or the fan", !fgAppAfterDrag, $"before={fgBeforeDrag} after={fgAfterDrag} class={fgClass}");
+
+        // F2c: строка, брошенная на свою же полку (карточку) или на сам веер, остаётся в стопке
+        var idsNow = ReadShelf().Select(x => x.Id).ToList();
+        fan = OpenFan(W, H) ?? default;
+        if (fan.IsEmpty) { Check("F2c fan re-opens", false, "no fan"); return; }
+        DragFanRow(fan, 0, ShelfTile(W, H), W, H);
+        var afterCard = ReadShelf().Select(x => x.Id).ToList();
+        bool cardNone = AppLog().Contains("DropResult=None");
+        Check("F2c fan row dropped onto the card (own shelf) -> DropResult None, item stays", afterCard.SequenceEqual(idsNow) && cardNone, $"log={AppLog()}");
+        fan = OpenFan(W, H) ?? default;
+        if (fan.IsEmpty) { Check("F2d fan re-opens", false, "no fan"); return; }
+        DragFanRow(fan, 0, FanRow(fan, 2), W, H);
+        Check("F2d fan row dropped onto the fan itself -> item stays", ReadShelf().Select(x => x.Id).SequenceEqual(idsNow), $"log={AppLog()}");
 
         // F3: клик вне карточки и веера -> веер закрыт
         fan = OpenFan(W, H) ?? default;
@@ -574,13 +613,14 @@ sealed class Driver
         string log = AppLog();
         bool stillOpen = !log.Contains("edge Hidden") && FanZone() != null;
         Check("F4a cursor over the fan (not over the card) for 1.2 s -> card stays open, fan stays", stillOpen, log);
+        var t0 = DateTime.Now;
         MoveTo(FarX(W), H, 200);
-        var t0 = DateTime.UtcNow;
         for (int i = 0; i < 40 && !AppLog().Contains("edge Hidden"); i++) Thread.Sleep(50);
-        double ms = (DateTime.UtcNow - t0).TotalMilliseconds;
         Thread.Sleep(200);
-        Check("F4b cursor leaves card and fan -> card hides (about 300 ms after leaving) and the fan closes",
-            AppLog().Contains("edge Hidden") && FanZone() == null && ms < 1500, $"hidden after {ms:F0} ms since the move ended");
+        var hid = System.Text.RegularExpressions.Regex.Match(AppLog(), @"(\d\d):(\d\d):(\d\d)\.(\d\d\d) edge Hidden");
+        double ms = hid.Success ? (new DateTime(t0.Year, t0.Month, t0.Day, int.Parse(hid.Groups[1].Value), int.Parse(hid.Groups[2].Value), int.Parse(hid.Groups[3].Value), int.Parse(hid.Groups[4].Value)) - t0).TotalMilliseconds : -1;
+        Check("F4b cursor leaves card and fan -> card hides 250..800 ms after the move starts (300 ms delay inside the 200 ms move) and the fan closes",
+            hid.Success && FanZone() == null && ms >= 250 && ms <= 800, $"hidden {ms:F0} ms after the move started");
 
         // F5: последний элемент вынесен из веера -> веер закрывается сам
         var rest = ReadShelf();
