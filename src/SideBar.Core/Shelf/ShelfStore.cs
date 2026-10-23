@@ -5,7 +5,7 @@ namespace SideBar.Core.Shelf;
 /// <summary>Хранение стопки в JSON. Запись атомарна: <c>&lt;file&gt;.tmp</c> + <c>File.Move(overwrite)</c>; остаточный .tmp при загрузке игнорируется.</summary>
 public sealed class ShelfStore(string filePath)
 {
-    const int LoadRetries = 4, LoadRetryDelayMs = 200;
+    const int LoadRetries = 4, LoadRetryDelayMs = 200, SaveRetries = 3, SaveRetryDelayMs = 100;
 
     // файл, который не прочитан и не убран в сторону: перезаписать его Save'ом значит потерять единственную копию
     bool _unprotectedBadFile;
@@ -88,11 +88,22 @@ public sealed class ShelfStore(string filePath)
         var dir = Path.GetDirectoryName(filePath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
         var tmp = filePath + ".tmp";
-        using (var stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+        for (var attempt = 0; ; attempt++)
         {
-            JsonSerializer.Serialize(stream, items.ToList(), ShelfJsonContext.Default.ListShelfItem);
-            stream.Flush(flushToDisk: true);
+            try
+            {
+                using (var stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    JsonSerializer.Serialize(stream, items.ToList(), ShelfJsonContext.Default.ListShelfItem);
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(tmp, filePath, overwrite: true);
+                return;
+            }
+            catch (IOException) when (attempt < SaveRetries)
+            {
+                Thread.Sleep(SaveRetryDelayMs);   // антивирус/индексатор держит файл коротко
+            }
         }
-        File.Move(tmp, filePath, overwrite: true);
     }
 }

@@ -159,4 +159,17 @@ public sealed class ShelfStoreTests : IDisposable
         Assert.Equal("{ not json [[[", File.ReadAllText(bads[0]));
         Assert.Single(store.Load());
     }
+
+    [Fact]
+    public void Save_retries_while_the_temp_file_is_briefly_locked()
+    {
+        var file = Path.Combine(_dir, "shelf.json");
+        var store = new ShelfStore(file);
+        var held = new FileStream(file + ".tmp", FileMode.Create, FileAccess.Write, FileShare.None);
+        var release = new Thread(() => { Thread.Sleep(150); held.Dispose(); });
+        release.Start();
+        store.Save([Item("a.txt")]);   // первая попытка упирается в блокировку, повтор через 100 мс проходит
+        release.Join();
+        Assert.Single(store.Load());
+    }
 }
