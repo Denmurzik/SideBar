@@ -172,4 +172,66 @@ public sealed class ShelfStoreTests : IDisposable
         release.Join();
         Assert.Single(store.Load());
     }
+
+    [Fact]
+    public void Store_round_trips_pending_deletes()
+    {
+        var store = new ShelfStore(Path.Combine(_dir, "shelf.json"));
+        ShelfItem[] items = [Item("a.txt")];
+        PendingDelete[] pending = [new(Guid.NewGuid(), new DateTimeOffset(2026, 10, 23, 12, 10, 0, TimeSpan.Zero))];
+        store.Save(items, pending);
+        Assert.True(store.TryLoad(out var loaded, out var loadedPending));
+        Assert.Equal(items, loaded);
+        Assert.Equal(pending, loadedPending);
+        var json = File.ReadAllText(Path.Combine(_dir, "shelf.json"));
+        Assert.Contains("\"pendingDeletes\"", json);
+        Assert.Contains("\"deleteAfterUtc\"", json);
+    }
+
+    [Fact]
+    public void Old_array_format_loads_with_empty_pending_deletes()
+    {
+        var file = Path.Combine(_dir, "shelf.json");
+        const string id = "11111111-1111-1111-1111-111111111111";
+        File.WriteAllText(file, $$"""[{"Id":"{{id}}","DisplayName":"a.txt","Path":"C:/a.txt","Kind":0,"AddedAt":"2026-10-23T12:00:00+03:00"}]""");
+        Assert.True(new ShelfStore(file).TryLoad(out var items, out var pending));
+        Assert.Equal([Guid.Parse(id)], items.Select(i => i.Id));
+        Assert.Empty(pending);
+    }
+
+    [Fact]
+    public void Object_format_without_pending_deletes_loads_and_garbage_pending_entries_are_dropped()
+    {
+        var file = Path.Combine(_dir, "shelf.json");
+        File.WriteAllText(file, """{"items":[]}""");
+        Assert.True(new ShelfStore(file).TryLoad(out var items, out var pending));
+        Assert.Empty(items);
+        Assert.Empty(pending);
+
+        const string id = "33333333-3333-3333-3333-333333333333";
+        File.WriteAllText(file, $$"""{"items":[],"pendingDeletes":[null,{},{"guid":"{{id}}","deleteAfterUtc":"2026-10-23T12:00:00Z"},{"guid":"{{id}}","deleteAfterUtc":"2026-10-23T13:00:00Z"}]}""");
+        Assert.True(new ShelfStore(file).TryLoad(out _, out pending));
+        Assert.Equal([Guid.Parse(id)], pending.Select(p => p.Guid));
+    }
+
+    [Fact]
+    public void Corrupt_object_file_is_reported_as_unreadable()
+    {
+        var file = Path.Combine(_dir, "shelf.json");
+        File.WriteAllText(file, """{"items": [""");
+        Assert.False(new ShelfStore(file).TryLoad(out var items, out var pending));
+        Assert.Empty(items);
+        Assert.Empty(pending);
+    }
+
+    [Fact]
+    public void PendingDeletePolicy_caps_far_future_keeps_normal_and_past()
+    {
+        var now = new DateTimeOffset(2026, 10, 23, 12, 0, 0, TimeSpan.Zero);
+        var delay = TimeSpan.FromMinutes(10);
+        Assert.Equal(now.AddHours(1), PendingDeletePolicy.Cap(now.AddYears(50), now, delay));
+        Assert.Equal(now.AddMinutes(10), PendingDeletePolicy.Cap(now.AddMinutes(10), now, delay));
+        Assert.Equal(now.AddMinutes(-5), PendingDeletePolicy.Cap(now.AddMinutes(-5), now, delay));
+        Assert.Equal(now.AddHours(3), PendingDeletePolicy.Cap(now.AddYears(1), now, TimeSpan.FromHours(3)));
+    }
 }

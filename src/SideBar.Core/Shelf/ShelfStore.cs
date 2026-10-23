@@ -21,18 +21,35 @@ public sealed class ShelfStore(string filePath)
     /// false — файл есть, но не прочитан/не разобран (битый JSON, <c>null</c>, блокировка антивирусом): <paramref name="items"/> пуст.
     /// true — файл прочитан или его просто нет (тогда пусто). Не бросает.
     /// </summary>
-    public bool TryLoad(out IReadOnlyList<ShelfItem> items)
+    public bool TryLoad(out IReadOnlyList<ShelfItem> items) => TryLoad(out items, out _);
+
+    /// <summary>
+    /// Как <see cref="TryLoad(out IReadOnlyList{ShelfItem})"/>, плюс отложенные удаления. Понимает оба формата:
+    /// объект <c>{ "items": [...], "pendingDeletes": [...] }</c> и старый голый массив элементов (тогда pending пуст).
+    /// </summary>
+    public bool TryLoad(out IReadOnlyList<ShelfItem> items, out IReadOnlyList<PendingDelete> pendingDeletes)
     {
         items = [];
+        pendingDeletes = [];
         for (var attempt = 0; ; attempt++)
         {
             try
             {
                 if (!File.Exists(filePath)) return true;
-                using var stream = File.OpenRead(filePath);
-                var parsed = JsonSerializer.Deserialize(stream, ShelfJsonContext.Default.ListShelfItem);
-                if (parsed is null) return false;
-                items = ShelfModel.Sanitize(parsed);
+                var bytes = File.ReadAllBytes(filePath);
+                if (bytes is [0xEF, 0xBB, 0xBF, ..]) bytes = bytes[3..];   // BOM
+                var first = bytes.FirstOrDefault(b => !char.IsWhiteSpace((char)b));
+                if (first == (byte)'[')
+                {
+                    var parsed = JsonSerializer.Deserialize(bytes, ShelfJsonContext.Default.ListShelfItem);
+                    if (parsed is null) return false;
+                    items = ShelfModel.Sanitize(parsed);
+                    return true;
+                }
+                var file = JsonSerializer.Deserialize(bytes, ShelfJsonContext.Default.ShelfFile);
+                if (file is null) return false;
+                items = ShelfModel.Sanitize(file.Items ?? []);
+                pendingDeletes = SanitizePending(file.PendingDeletes);
                 return true;
             }
             catch (IOException e) when (attempt < LoadRetries && e is not (FileNotFoundException or DirectoryNotFoundException))
@@ -44,6 +61,17 @@ public sealed class ShelfStore(string filePath)
                 return false;
             }
         }
+    }
+
+    static List<PendingDelete> SanitizePending(List<PendingDeleteDto>? raw)
+    {
+        var result = new List<PendingDelete>();
+        if (raw is null) return result;
+        var seen = new HashSet<Guid>();
+        foreach (var p in raw)
+            if (p is not null && p.Guid != Guid.Empty && seen.Add(p.Guid))
+                result.Add(new PendingDelete(p.Guid, p.DeleteAfterUtc));
+        return result;
     }
 
     /// <summary>
@@ -82,7 +110,10 @@ public sealed class ShelfStore(string filePath)
     }
 
     /// <summary>Бросает IOException/UnauthorizedAccessException. Не безопасен при параллельных вызовах (только UI-поток).</summary>
-    public void Save(IReadOnlyList<ShelfItem> items)
+    public void Save(IReadOnlyList<ShelfItem> items) => Save(items, []);
+
+    /// <summary>Бросает IOException/UnauthorizedAccessException. Не безопасен при параллельных вызовах (только UI-поток).</summary>
+    public void Save(IReadOnlyList<ShelfItem> items, IReadOnlyList<PendingDelete> pendingDeletes)
     {
         if (!TryProtectBadFile()) throw new IOException("unreadable shelf.json has no backup copy yet; not overwriting it");
         var dir = Path.GetDirectoryName(filePath);
@@ -94,7 +125,11 @@ public sealed class ShelfStore(string filePath)
             {
                 using (var stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
-                    JsonSerializer.Serialize(stream, items.ToList(), ShelfJsonContext.Default.ListShelfItem);
+                    JsonSerializer.Serialize(stream, new ShelfFile
+                    {
+                        Items = items.ToList(),
+                        PendingDeletes = pendingDeletes.Select(p => new PendingDeleteDto { Guid = p.Guid, DeleteAfterUtc = p.DeleteAfterUtc }).ToList(),
+                    }, ShelfJsonContext.Default.ShelfFile);
                     stream.Flush(flushToDisk: true);
                 }
                 File.Move(tmp, filePath, overwrite: true);

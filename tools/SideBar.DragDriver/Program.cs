@@ -138,13 +138,13 @@ sealed class Driver
 
     // ---- приложение ----
     /// <param name="defaultDeleteDelay">true — без SIDEBAR_OWNED_DELETE_DELAY_SEC (боевая задержка 10 мин); иначе короткая, чтобы D3c не ждал 10 минут.</param>
-    bool StartApp(bool defaultDeleteDelay = false)
+    bool StartApp(bool defaultDeleteDelay = false, int deleteDelaySec = 30)
     {
         try { File.Delete(_appLog); } catch { }
         var psi = new ProcessStartInfo(_exe) { UseShellExecute = false };
         psi.Environment["SIDEBAR_DATA_DIR"] = _dataDir;
         if (defaultDeleteDelay) psi.Environment.Remove("SIDEBAR_OWNED_DELETE_DELAY_SEC");
-        else psi.Environment["SIDEBAR_OWNED_DELETE_DELAY_SEC"] = "30";
+        else psi.Environment["SIDEBAR_OWNED_DELETE_DELAY_SEC"] = deleteDelaySec.ToString();
         _app = Process.Start(psi)!;
         for (int i = 0; i < 150 && !AppLog().Contains(" ready"); i++)
         {
@@ -467,6 +467,55 @@ sealed class Driver
         }
         FanScenarios(W, H, a, refFile, folder, otherCenter);
         DefaultDelayScenario(W, H, a, refFile, folder, otherCenter);
+        PendingDeleteRestartScenario(W, H, a, refFile, folder, otherCenter);
+    }
+
+    // D3e: отложенное удаление переживает перезапуск: перезапуск внутри окна задержки не удаляет папку, после срока она удаляется
+    void PendingDeleteRestartScenario(int W, int H, string a, string refFile, string folder, Point otherCenter)
+    {
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        const int delaySec = 25;
+        if (!StartApp(deleteDelaySec: delaySec)) { _fail++; return; }
+        var s = FillShelf(a, folder, refFile, W, H);
+        var owned = s.FirstOrDefault(x => x.Kind == Owned);
+        if (s.Count != 5 || owned == null) { Check("D3e shelf prepared", false, Dump(s)); return; }
+        var ownedDir = Path.GetDirectoryName(owned.Path)!;
+        bool dragged = DragStackTo(otherCenter, W, H);
+        s = WaitShelf(x => x.Count == 0, 3000);
+        var pending = ReadPending();
+        Check("D3e drag-out records the owned folder in shelf.json pendingDeletes",
+            dragged && s.Count == 0 && pending.Any(p => Guid.TryParse(Path.GetFileName(ownedDir), out var dirGuid) && Guid.Parse(p.Guid) == dirGuid), string.Join("; ", pending));
+        StopApp();
+        bool restarted = StartApp(deleteDelaySec: delaySec);
+        var deadline = pending.Select(p => p.After).DefaultIfEmpty(DateTimeOffset.UtcNow).Max();
+        bool inWindow = DateTimeOffset.UtcNow < deadline - TimeSpan.FromSeconds(2);
+        Check("D3e restart inside the delay window: owned folder and file are still there (not swept)",
+            restarted && inWindow && Directory.Exists(ownedDir) && File.Exists(owned.Path), $"inWindow={inWindow} left={(deadline - DateTimeOffset.UtcNow).TotalSeconds:F1}s");
+        var wait = deadline + TimeSpan.FromSeconds(3) - DateTimeOffset.UtcNow;
+        if (wait > TimeSpan.Zero) Thread.Sleep(wait);
+        Check("D3e after the saved deadline the re-armed timer deletes the owned folder", !Directory.Exists(ownedDir), ownedDir);
+    }
+
+    record PendingEntry(string Guid, DateTimeOffset After)
+    {
+        public override string ToString() => $"{Guid} after {After:O}";
+    }
+
+    List<PendingEntry> ReadPending()
+    {
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                if (!File.Exists(_shelfJson)) return [];
+                using var doc = JsonDocument.Parse(File.ReadAllText(_shelfJson));
+                if (doc.RootElement.ValueKind != JsonValueKind.Object || !doc.RootElement.TryGetProperty("pendingDeletes", out var arr)) return [];
+                return arr.EnumerateArray().Select(e => new PendingEntry(e.GetProperty("guid").GetString()!, e.GetProperty("deleteAfterUtc").GetDateTimeOffset())).ToList();
+            }
+            catch (Exception e) when (e is IOException or JsonException) { Thread.Sleep(100); }
+        }
+        return [];
     }
 
     // D3d: с боевой задержкой (10 мин) Owned-файл жив и через 60 с после выноса
@@ -688,7 +737,9 @@ sealed class Driver
             {
                 if (!File.Exists(_shelfJson)) return [];
                 using var doc = JsonDocument.Parse(File.ReadAllText(_shelfJson));
-                return doc.RootElement.EnumerateArray().Select(e => new ShelfEntry(
+                // новый формат — объект { items, pendingDeletes }, старый — голый массив
+                var items = doc.RootElement.ValueKind == JsonValueKind.Object ? doc.RootElement.GetProperty("items") : doc.RootElement;
+                return items.EnumerateArray().Select(e => new ShelfEntry(
                     e.GetProperty("Id").GetGuid(), e.GetProperty("DisplayName").GetString()!,
                     e.GetProperty("Path").GetString()!, e.GetProperty("Kind").GetInt32())).ToList();
             }
