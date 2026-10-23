@@ -48,6 +48,7 @@ internal sealed class RefreshService : IDisposable
     readonly CancellationTokenSource _cts = new();
     Task? _loop;
     int _busy;
+    DateTimeOffset? _lastWarned;
 
     public RefreshService(OfficialAppController app, AppStateStore store, RefreshHooks hooks, Action<string> log,
         RefreshTimings? timings = null, Func<DateTimeOffset>? now = null, Func<TimeSpan>? idle = null)
@@ -97,8 +98,10 @@ internal sealed class RefreshService : IDisposable
 
             // Без успехов опорой служит первое наблюдение: иначе при отсутствии приложения предупреждения не будет никогда.
             var anchor = state.LastSuccess ?? state.FirstSeen;
-            if (_scheduler.ShouldWarn(now, anchor, state.LastWarned))
+            var warned = state.LastWarned > _lastWarned ? state.LastWarned : _lastWarned;   // и в памяти: сбой Save не должен повторять уведомление каждые 5 мин
+            if (_scheduler.ShouldWarn(now, anchor, warned))
             {
+                _lastWarned = now;
                 _log("official: no successful refresh for 72h, warning");
                 try { _hooks.WarnStale?.Invoke(); } catch (Exception e) { _log($"official: warn hook {Describe(e)}"); }
                 state = state with { LastWarned = now };
@@ -136,6 +139,7 @@ internal sealed class RefreshService : IDisposable
         try
         {
             if (_hooks.PauseStack is { } pause) await pause();
+            if (_app.IsRunning()) return RefreshOutcome.AlreadyRunning;   // пользователь мог открыть приложение, пока ставили паузу
             var snapshot = scanner.Snapshot();
             proc = _app.Launch();
             if (proc is null) return RefreshOutcome.NotInstalled;
@@ -146,6 +150,8 @@ internal sealed class RefreshService : IDisposable
             {
                 var scan = scanner.Scan(snapshot);
                 if (scan.UserActivity) return RefreshOutcome.UserTookOver;
+                _app.Observe(proc);
+                if (proc.SawVisible) return RefreshOutcome.UserTookOver;
                 if (scan.MarkerSeen) { markerSeen = true; break; }
                 if (proc.HasExited) return RefreshOutcome.MarkerTimeout;   // вышел сам, не опубликовав
                 await Task.Delay(_t.Poll, ct);
@@ -179,11 +185,14 @@ internal sealed class RefreshService : IDisposable
             // расписание — CloseRetryPolicy; фактическая пауза берётся из таймингов (тесты ужимают)
             if (delay > TimeSpan.Zero && await WaitExitAsync(proc, _t.RetryDelay, ct)) return CloseResult.Exited;
             if (proc.HasExited) return CloseResult.Exited;
+            _app.Observe(proc);
+            if (proc.SawVisible) return CloseResult.UserTookOver;
             if (scanner.Scan(snapshot).UserActivity) return CloseResult.UserTookOver;
             var quit = _app.RequestQuit(proc);
             if (quit == QuitResult.WindowsVisible) return CloseResult.UserTookOver;
             _log($"official: close attempt {attempt}, {quit}");
             if (await WaitExitAsync(proc, _t.ExitWait, ct)) return CloseResult.Exited;
+            if (proc.SawVisible) return CloseResult.UserTookOver;
         }
         return CloseResult.DidNotExit;
     }
@@ -193,7 +202,8 @@ internal sealed class RefreshService : IDisposable
         var sw = Stopwatch.StartNew();
         while (!proc.HasExited)
         {
-            if (sw.Elapsed >= timeout) return false;
+            _app.Observe(proc);
+            if (proc.SawVisible || sw.Elapsed >= timeout) return false;   // видимое окно: ждать выхода незачем, процесс уже не наш
             await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(200, Math.Max(1, (timeout - sw.Elapsed).TotalMilliseconds))), ct);
         }
         return true;

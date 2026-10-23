@@ -84,7 +84,8 @@ public sealed class LogTailScanner(string logDir)
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             var len = fs.Length;
-            if (len <= offset) return null;
+            if (len < offset) offset = 0;   // файл усечён/перезаписан: читаем с начала
+            if (len == offset) return null;
             fs.Position = offset;
             var buf = new byte[len - offset];
             var n = fs.Read(buf, 0, buf.Length);

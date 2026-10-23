@@ -36,8 +36,11 @@ public sealed class RefreshServiceSimTests : IDisposable
         var d = new DirectoryInfo(AppContext.BaseDirectory);
         while (d is not null && !Directory.Exists(Path.Combine(d.FullName, "tools", "SideBar.OfficialSim"))) d = d.Parent;
         Assert.NotNull(d);
-        return Directory.GetFiles(Path.Combine(d.FullName, "tools", "SideBar.OfficialSim", "bin"), SimName + ".exe", SearchOption.AllDirectories)
-            .OrderByDescending(File.GetLastWriteTimeUtc).First();
+        // та же конфигурация и TFM, что у сборки тестов: bin/<Config>/<tfm>/
+        var tfmDir = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        var exe = Path.Combine(d.FullName, "tools", "SideBar.OfficialSim", "bin", tfmDir.Parent!.Name, tfmDir.Name, SimName + ".exe");
+        Assert.True(File.Exists(exe), exe);
+        return exe;
     }
 
     static Process[] SimProcesses() => Process.GetProcessesByName(SimName);
@@ -58,11 +61,23 @@ public sealed class RefreshServiceSimTests : IDisposable
     string SharingDir => Path.Combine(_dir, "Sharing");
     string StatePath => Path.Combine(_dir, "state.json");
 
-    RefreshService Make(string mode, RefreshTimings? timings = null, string? exe = null, Func<TimeSpan>? idle = null)
+    static void SetEnv(string mode, string sharingDir, string exe)
     {
         Environment.SetEnvironmentVariable("SIDEBAR_SIM_MODE", mode);
-        Environment.SetEnvironmentVariable("SIDEBAR_SHARING_DIR", SharingDir);
-        Environment.SetEnvironmentVariable("SIDEBAR_OFFICIAL_EXE", exe ?? SimExe());
+        Environment.SetEnvironmentVariable("SIDEBAR_SHARING_DIR", sharingDir);
+        Environment.SetEnvironmentVariable("SIDEBAR_OFFICIAL_EXE", exe);
+    }
+
+    static bool WaitFor(Func<bool> cond, int ms = 5000)
+    {
+        var sw = Stopwatch.StartNew();
+        while (!cond()) { if (sw.ElapsedMilliseconds > ms) return false; Thread.Sleep(50); }
+        return true;
+    }
+
+    RefreshService Make(string mode, RefreshTimings? timings = null, string? exe = null, Func<TimeSpan>? idle = null)
+    {
+        SetEnv(mode, SharingDir, exe ?? SimExe());
         var app = OfficialAppController.FromEnvironment(s => _log.Add($"{_sw.ElapsedMilliseconds}ms " + s));
         var hooks = new RefreshHooks
         {
@@ -157,6 +172,49 @@ public sealed class RefreshServiceSimTests : IDisposable
         Assert.Single(SimProcesses());
         Assert.Equal(logs, Directory.GetFiles(Path.Combine(SharingDir, "Logs")).Length);
         Assert.Empty(_hooks);   // стек не трогали
+    }
+
+    [Fact]
+    public void Quit_is_scoped_to_our_pid_and_leaves_another_instance_alone()
+    {
+        SetEnv("normal", SharingDir, SimExe());
+        var app = OfficialAppController.FromEnvironment(s => _log.Add(s));
+        using var other = Process.Start(new ProcessStartInfo(SimExe()) { UseShellExecute = false, CreateNoWindow = true })!;   // «чужой» экземпляр
+        using var ours = app.Launch()!;
+        Assert.True(WaitFor(() => Native.WindowsOf(ours.Pid).Any(w => w.ClassName == OfficialAppController.WindowClass)));
+        Assert.True(WaitFor(() => Native.WindowsOf(other.Id).Any(w => w.ClassName == OfficialAppController.WindowClass)));
+
+        Assert.Equal(QuitResult.Posted, app.RequestQuit(ours));
+        Assert.True(WaitFor(() => ours.HasExited));
+        Assert.False(other.HasExited);
+        Assert.Contains(Native.WindowsOf(other.Id), w => w.ClassName == OfficialAppController.WindowClass);
+    }
+
+    [Fact]
+    public async Task Briefly_visible_window_latches_and_we_never_quit()
+    {
+        var svc = Make("show");
+        Assert.Equal(RefreshOutcome.UserTookOver, await svc.RunOnceAsync());
+        Assert.Single(SimProcesses());
+        Assert.DoesNotContain(_log, l => l.Contains("close attempt"));
+        Assert.Null(new AppStateStore(StatePath).Load().LastSuccess);
+    }
+
+    [Fact]
+    public async Task Marker_from_before_launch_is_not_success()
+    {
+        var logs = Path.Combine(SharingDir, "Logs");
+        Directory.CreateDirectory(logs);
+        File.WriteAllText(Path.Combine(logs, "nearby_share_2020-01-01-000000.log"), "I0101 PublishDevice succeeded. contact_removed: false\n");
+        var svc = Make("silent", new RefreshTimings
+        {
+            MarkerTimeout = TimeSpan.FromSeconds(1),
+            Settle = TimeSpan.FromMilliseconds(100),
+            ExitWait = TimeSpan.FromSeconds(5),
+            RetryDelay = TimeSpan.FromSeconds(1),
+        });
+        Assert.Equal(RefreshOutcome.MarkerTimeout, await svc.RunOnceAsync());
+        Assert.Null(new AppStateStore(StatePath).Load().LastSuccess);
     }
 
     [Fact]

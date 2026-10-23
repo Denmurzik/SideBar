@@ -8,6 +8,7 @@ namespace SideBar.OfficialSim;
 //   user    — после маркера пишет "Received WM_COPYDATA" (пользователь «открыл» приложение)
 //   rotate  — до маркера начинает новый nearby_share_<ts>.log и пишет маркер уже в него
 //   silent  — маркер не пишет
+//   show    — после маркера на ~600 мс показывает окно (SW_SHOWNOACTIVATE) и снова прячет
 // Каталог данных — SIDEBAR_SHARING_DIR (обязателен: настоящие данные Google не трогаем). Жизнь ограничена SIDEBAR_SIM_LIFETIME_SEC (по умолчанию 90).
 static unsafe class Program
 {
@@ -43,6 +44,9 @@ static unsafe class Program
     [DllImport("user32.dll", ExactSpelling = true)] static extern nint DispatchMessageW(ref MSG m);
     [DllImport("user32.dll", ExactSpelling = true)] static extern nint DefWindowProcW(nint h, uint m, nint w, nint l);
 
+    [DllImport("user32.dll", ExactSpelling = true)] static extern int ShowWindow(nint hwnd, int cmd);
+
+    static nint _hwnd;
     static string _mode = "normal";
     static string _logDir = "";
     static FileStream? _log;
@@ -70,7 +74,7 @@ static unsafe class Program
             };
             if (RegisterClassExW(ref wc) == 0) return 3;
             // Обычное окно верхнего уровня, но без ShowWindow: невидимо, как у настоящего приложения при SW_HIDE.
-            if (CreateWindowExW(0, cls, title, 0x00CF0000, 0, 0, 100, 100, 0, 0, 0, 0) == 0) return 4;
+            if ((_hwnd = CreateWindowExW(0, cls, title, 0x00CF0000, 0, 0, 100, 100, 0, 0, 0, 0)) == 0) return 4;
         }
 
         var lifetime = int.TryParse(Environment.GetEnvironmentVariable("SIDEBAR_SIM_LIFETIME_SEC"), out var s) ? s : 90;
@@ -104,6 +108,12 @@ static unsafe class Program
         Thread.Sleep(300);
         if (_mode == "rotate") StartLog();
         if (_mode != "silent") Write("pub.cc:1] operator(): PublishDevice succeeded. contact_removed: false");
+        if (_mode == "show")
+        {
+            ShowWindow(_hwnd, 4);
+            Thread.Sleep(600);
+            ShowWindow(_hwnd, 0);
+        }
         if (_mode == "user")
         {
             Thread.Sleep(100);

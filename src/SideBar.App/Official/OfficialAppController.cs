@@ -19,6 +19,8 @@ internal sealed class LaunchedProcess(nint handle, int pid) : IDisposable
 {
     public int Pid { get; } = pid;
     public bool HasExited => Native.HasExited(handle);
+    /// <summary>Хоть раз видели видимое окно процесса: им уже пользуются (защёлка, скрытие обратно не отменяет).</summary>
+    public bool SawVisible { get; set; }
     public void Dispose() => Native.CloseHandle(handle);
 }
 
@@ -78,17 +80,24 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
         return new LaunchedProcess(pi.hProcess, pi.dwProcessId);
     }
 
+    /// <summary>Обновляет защёлку <see cref="LaunchedProcess.SawVisible"/>.</summary>
+    public void Observe(LaunchedProcess proc)
+    {
+        if (!proc.SawVisible && !proc.HasExited && Native.WindowsOf(proc.Pid).Any(w => w.Visible)) proc.SawVisible = true;
+    }
+
     /// <summary>
     /// Просит наш процесс завершить цикл сообщений: <c>WM_QUIT</c> только потоку окна <see cref="WindowClass"/> этого PID
     /// и только если все его окна невидимы. (WM_CLOSE у настоящего приложения лишь прячет в трей, поэтому не годится.)
     /// </summary>
     public QuitResult RequestQuit(LaunchedProcess proc)
     {
+        if (proc.SawVisible) return QuitResult.WindowsVisible;
         var windows = Native.WindowsOf(proc.Pid);
-        if (windows.Any(w => w.Visible)) return QuitResult.WindowsVisible;
+        if (windows.Any(w => w.Visible)) { proc.SawVisible = true; return QuitResult.WindowsVisible; }
         var threads = windows.Where(w => w.ClassName == WindowClass).Select(w => w.ThreadId).Distinct().ToList();
         if (threads.Count == 0) return QuitResult.NoWindow;
-        foreach (var t in threads) Native.PostQuitToThread(t);
+        foreach (var t in threads) Native.PostQuitToThread(t, proc.Pid);
         return QuitResult.Posted;
     }
 }

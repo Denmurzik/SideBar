@@ -81,10 +81,12 @@ public sealed class OfficialLogTests : IDisposable
     [Fact]
     public void Truncated_file_does_not_throw()
     {
-        File.WriteAllText(Log("nearby_share_a.log"), "long long long line\n");
+        File.WriteAllText(Log("nearby_share_a.log"), new string('a', 200) + "\n");
         var snap = _scanner.Snapshot();
         File.WriteAllText(Log("nearby_share_a.log"), "x");
         Assert.Equal(new LogScan(false, false), _scanner.Scan(snap));
+        File.WriteAllText(Log("nearby_share_a.log"), "PublishDevice succeeded\n");   // новый файл короче смещения: читается с начала
+        Assert.True(_scanner.Scan(snap).MarkerSeen);
     }
 
     [Fact]

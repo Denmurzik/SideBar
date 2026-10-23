@@ -8,7 +8,7 @@ internal static unsafe class Native
     public const uint STARTF_USESHOWWINDOW = 1;
     public const ushort SW_HIDE = 0;
     public const uint WM_QUIT = 0x0012;
-    const uint WAIT_OBJECT_0 = 0;
+    const uint WAIT_OBJECT_0 = 0, THREAD_QUERY_LIMITED_INFORMATION = 0x0800;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct STARTUPINFOW
@@ -41,6 +41,8 @@ internal static unsafe class Native
     [DllImport("kernel32.dll", ExactSpelling = true)] public static extern int CloseHandle(nint h);
     [DllImport("kernel32.dll", ExactSpelling = true)] static extern uint WaitForSingleObject(nint h, uint ms);
     [DllImport("kernel32.dll", ExactSpelling = true)] static extern uint GetTickCount();
+    [DllImport("kernel32.dll", ExactSpelling = true)] static extern nint OpenThread(uint access, int inherit, uint tid);
+    [DllImport("kernel32.dll", ExactSpelling = true)] static extern uint GetProcessIdOfThread(nint hThread);
 
     [DllImport("user32.dll", ExactSpelling = true)] static extern int GetLastInputInfo(ref LASTINPUTINFO info);
     [DllImport("user32.dll", ExactSpelling = true)] static extern int EnumWindows(delegate* unmanaged<nint, nint, int> cb, nint lParam);
@@ -84,5 +86,15 @@ internal static unsafe class Native
         return 1;
     }
 
-    public static bool PostQuitToThread(uint threadId) => PostThreadMessageW(threadId, WM_QUIT, 0, 0) != 0;
+    /// <summary>
+    /// WM_QUIT потоку, только если он принадлежит <paramref name="pid"/>: открытый дескриптор не даёт TID переиспользоваться
+    /// между проверкой и отправкой.
+    /// </summary>
+    public static bool PostQuitToThread(uint threadId, int pid)
+    {
+        var h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, threadId);
+        if (h == 0) return false;
+        try { return GetProcessIdOfThread(h) == (uint)pid && PostThreadMessageW(threadId, WM_QUIT, 0, 0) != 0; }
+        finally { CloseHandle(h); }
+    }
 }
