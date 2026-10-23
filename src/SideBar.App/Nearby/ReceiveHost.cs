@@ -31,6 +31,7 @@ sealed class ReceiveHost : IDisposable
     readonly CancellationTokenSource _lifetime = new();
     int _ticks;
     int _sessions;
+    readonly HashSet<Task> _running = [];   // под _gate
     bool _disposed;
 
     // состояние слушателя — только под _evaluate
@@ -109,7 +110,7 @@ sealed class ReceiveHost : IDisposable
 
             if (!allowed || lan is null)
             {
-                // «Скрыто» не рвёт уже идущие передачи; сеть Public/Unknown или пропавший маршрут — рвёт
+                // «Скрыто» намеренно не рвёт уже принятые передачи (слушатель и реклама закрываются, сессии доживают); сеть Public/Unknown или пропавший маршрут при «Все» рвёт их
                 Stop(cancelSessions: everyone);
                 return;
             }
@@ -212,13 +213,20 @@ sealed class ReceiveHost : IDisposable
                 Log.Write("receive connection refused (busy)");
                 continue;
             }
-            _ = Task.Run(() => RunSessionAsync(client, ct));
+            Task? task = null;
+            lock (_gate)
+            {
+                task = Task.Run(() => RunSessionAsync(client, ct));
+                _running.Add(task);
+            }
+            _ = task.ContinueWith(t => { lock (_gate) _running.Remove(t); }, TaskScheduler.Default);
         }
     }
 
     async Task RunSessionAsync(TcpClient client, CancellationToken ct)
     {
         IncomingTransfer? offer = null;
+        var accepted = false;
         try
         {
             using (client)
@@ -231,9 +239,9 @@ sealed class ReceiveHost : IDisposable
                     options = options with { DecisionTimeout = TimeSpan.FromSeconds(seconds) };   // автотест таймаута решения
 #endif
                 var result = await ReceiveSession.ReceiveAsync(client.GetStream(), options, ReceivedFileWriter.DownloadsFolder(),
-                    (o, token) => { offer = o; return ConsentAsync(o, token); }, null, ct);
+                    async (o, token) => { offer = o; accepted = await ConsentAsync(o, token); return accepted; }, null, ct);
                 Log.Write($"receive session {result.Status} files={result.Files.Count} texts={result.ReceivedTexts.Count}");
-                _ui.TryEnqueue(() => ShowResult(result, offer));
+                _ui.TryEnqueue(() => ShowResult(result, offer, accepted));
             }
         }
         catch (Exception e)
@@ -242,6 +250,8 @@ sealed class ReceiveHost : IDisposable
         }
         finally { Interlocked.Decrement(ref _sessions); }
     }
+
+    static string DeviceName(string? raw) => DisplayText.SanitizeName(raw, Strings.UnknownDevice);
 
     Task<bool> ConsentAsync(IncomingTransfer offer, CancellationToken token)
     {
@@ -253,16 +263,16 @@ sealed class ReceiveHost : IDisposable
             return Task.FromResult(true);
         }
 #endif
-        string device = string.IsNullOrWhiteSpace(offer.SenderName) ? Strings.UnknownDevice : offer.SenderName.Trim();
+        string device = DeviceName(offer.SenderName);
         bool onlyLinks = offer.Texts.Count > 0 && offer.Texts.All(t => t.Kind == TextKind.Url);
-        string line = Strings.WantsToSend(device, offer.Files.Count, offer.Texts.Count, onlyLinks, offer.Pin);
-        return _notifications.AskAccept(line, token);
+        string line = Strings.WantsToSend(device, offer.Files.Count, offer.Texts.Count, onlyLinks);
+        return _notifications.AskAccept(line, offer.Pin, token);
     }
 
     // UI-поток
-    void ShowResult(TransferResult result, IncomingTransfer? offer)
+    void ShowResult(TransferResult result, IncomingTransfer? offer, bool accepted)
     {
-        string device = string.IsNullOrWhiteSpace(offer?.SenderName) ? Strings.UnknownDevice : offer!.SenderName!.Trim();
+        string device = DeviceName(offer?.SenderName);
         switch (result.Status)
         {
             case TransferStatus.Completed:
@@ -282,6 +292,9 @@ sealed class ReceiveHost : IDisposable
             case TransferStatus.CancelledByPeer when offer is not null:
                 _notifications.Info("cancelled", Strings.SenderCancelled);
                 break;
+            case TransferStatus.TimedOut when accepted:
+                _notifications.Info("interrupted", Strings.TransferInterrupted);   // пир замолчал посреди передачи
+                break;
             case TransferStatus.TimedOut when offer is not null:
                 _notifications.Info("timeout", Strings.TimedOut);
                 break;
@@ -296,7 +309,15 @@ sealed class ReceiveHost : IDisposable
         _disposed = true;
         NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
         _timer.Dispose();
-        try { _lifetime.Cancel(); } catch (Exception) { }
+        try { _lifetime.Cancel(); } catch (Exception) { }   // прерывает идущий StartAsync/RegisterAsync и все сессии
+        // тот же затвор, что у Evaluate: Stop не гоняется с StartAsync
+        var gated = false;
+        try { gated = _evaluate.Wait(TimeSpan.FromSeconds(2)); } catch (Exception) { }
         try { Stop(cancelSessions: true); } catch (Exception) { }
+        if (gated) _evaluate.Release();
+        // сессии успевают удалить .part-файлы до Environment.Exit
+        Task[] running;
+        lock (_gate) running = [.. _running];
+        try { Task.WaitAll(running, TimeSpan.FromSeconds(2)); } catch (Exception) { }
     }
 }

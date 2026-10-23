@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.UI.Dispatching;
 using Microsoft.Windows.AppNotifications;
+using SideBar.Core.Nearby;
 using SideBar.Nearby.Session;
 
 namespace SideBar.Sharing;
@@ -106,11 +107,11 @@ sealed partial class Notifications : IDisposable
     /// Показывает уведомление Windows, а если они недоступны или показ не удался — запасную панель.
     /// <paramref name="sticky"/>: не исчезает само (запрос согласия); иначе запасная панель скрывается через 8 с.
     /// </summary>
-    bool Notify(string kind, string[] lines, (string Label, Action Act)[] buttons, bool sticky, string? tag = null, CancellationToken ct = default)
+    bool Notify(string kind, string[] lines, (string Label, Action Act)[] buttons, bool sticky, string? tag = null, CancellationToken ct = default, string? pin = null)
     {
-        if (_registered && ShowToast(kind, lines, buttons, sticky, tag)) return true;
+        if (_registered && ShowToast(kind, pin is null ? lines : [.. lines, Strings.Pin(pin)], buttons, sticky, tag)) return true;
         if (_fallback is not { } fallback) return false;
-        var spec = new PromptSpec(lines, buttons, sticky ? null : TimeSpan.FromSeconds(8));
+        var spec = new PromptSpec(lines, pin, buttons, sticky ? null : TimeSpan.FromSeconds(8));
         _ui.TryEnqueue(() => fallback(spec, ct));
         Log.Write("notify " + kind + " (panel)");
         return true;
@@ -145,7 +146,7 @@ sealed partial class Notifications : IDisposable
     /// Запрос «Принять/Отклонить». Завершается true/false по кнопке; по отмене <paramref name="ct"/> (таймаут решения, пир ушёл)
     /// уведомление/панель убираются и результат false. Если показать запрос нельзя — false.
     /// </summary>
-    public Task<bool> AskAccept(string line, CancellationToken ct)
+    public Task<bool> AskAccept(string line, string pin, CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         string tag = "c" + Interlocked.Increment(ref _seq);
@@ -154,7 +155,7 @@ sealed partial class Notifications : IDisposable
             (Strings.Accept, () => tcs.TrySetResult(true)),
             (Strings.Decline, () => tcs.TrySetResult(false)),
         };
-        if (!Notify("consent", [line], buttons, sticky: true, tag, ct)) return Task.FromResult(false);
+        if (!Notify("consent", [line], buttons, sticky: true, tag, ct, pin)) return Task.FromResult(false);
 
         var reg = ct.Register(() =>
         {
@@ -173,7 +174,7 @@ sealed partial class Notifications : IDisposable
         if (paths.Count == 0) return;
         string path = paths[0];
         (string, Action)[] buttons = paths.Count == 1
-            ? [(Strings.Open, () => Launch(path)), (Strings.ShowInFolder, () => ShowInFolder(path))]
+            ? [(Strings.Open, () => { if (DisplayText.IsExecutableLike(path)) ShowInFolder(path); else Launch(path); }), (Strings.ShowInFolder, () => ShowInFolder(path))]
             : [(Strings.ShowInFolder, () => ShowInFolder(path))];
         Notify("received", [Strings.Received(paths.Count)], buttons, sticky: false);
     }
@@ -181,43 +182,15 @@ sealed partial class Notifications : IDisposable
     /// <summary>Текст/ссылка уже в буфере обмена; уведомление с превью и кнопками.</summary>
     public void SharedText(string device, TextKind kind, string value)
     {
-        string preview = Preview(value);
+        string preview = DisplayText.Preview(value);
         (string, Action) copy = (Strings.Copy, () => ClipboardText.Set(value, _clipboardOwner));
-        if (kind == TextKind.Url && TryHttpUri(value, out var uri))
+        if (kind == TextKind.Url && DisplayText.TryHttpUri(value, out var uri))
             Notify("link", [Strings.SharedLink(device, uri.Host), preview], [(Strings.Open, () => Launch(uri.AbsoluteUri)), copy], sticky: false);
         else
             Notify("text", [Strings.SharedText(device), preview], [copy], sticky: false);
     }
 
     public void Info(string kind, string text) => Notify(kind, [text], [], sticky: false);
-
-    public static bool TryHttpUri(string value, out Uri uri)
-    {
-        if (Uri.TryCreate(value.Trim(), UriKind.Absolute, out var u) && u.Scheme is "http" or "https" && u.Host.Length > 0)
-        {
-            uri = u;
-            return true;
-        }
-        uri = null!;
-        return false;
-    }
-
-    /// <summary>Первые 100 символов в одну строку.</summary>
-    public static string Preview(string value)
-    {
-        var sb = new StringBuilder();
-        bool space = false;
-        foreach (var ch in value)
-        {
-            if (char.IsWhiteSpace(ch) || char.IsControl(ch)) { space = sb.Length > 0; continue; }
-            if (space) { sb.Append(' '); space = false; }
-            sb.Append(ch);
-            if (sb.Length >= 101) break;
-        }
-        if (sb.Length <= 100) return sb.ToString();
-        sb.Length = 100;
-        return sb + "…";
-    }
 
     static void Launch(string target) => ShellExecute(0, "open", target, null, null, 1);
 

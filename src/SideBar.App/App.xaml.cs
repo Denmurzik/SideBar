@@ -38,6 +38,7 @@ public partial class App : Application
     ReceiveHost? _receive;
     PromptWindow? _prompt;
     readonly BumpGate _bump = new();
+    PxRect? _promptZone;   // под _gate: зона запасной панели (клик по ней не «снаружи»)
     ShareTileModel? _share;
     NearbyService? _nearby;
     DispatcherTimer? _shareTimer;
@@ -105,8 +106,9 @@ public partial class App : Application
                     _prompt = new PromptWindow();
                     _prompt.SetAnchor(() =>
                     {
-                        lock (_gate) return (_layout.CardRectAt(_layout.LeftFor(PanelState.Open)), _scale);
+                        lock (_gate) return new PromptAnchor(_layout.CardRectAt(_layout.LeftFor(PanelState.Open)), _scale, _primary, _fanZone);
                     });
+                    _prompt.ZoneChanged += z => { lock (_gate) _promptZone = z; };
                 }
                 _prompt.Present(spec, ct);
             });
@@ -211,12 +213,15 @@ public partial class App : Application
         if (FullscreenProbe.IsBusy(primary)) return;   // то же подавление, что у края
         if (!_bump.TryBump(Environment.TickCount64)) return;
         Log.Write("edge Peek (incoming)");
+        _trimmer.OnShown();
         _window.SetState(PanelState.Peek);
         _ = Task.Delay(1500).ContinueWith(_ => _ui?.TryEnqueue(() =>
         {
             bool stillHidden;
             lock (_gate) stillHidden = machine.State == PanelState.Hidden;
-            if (stillHidden) _window?.SetState(PanelState.Hidden);
+            if (!stillHidden) return;
+            _window?.SetState(PanelState.Hidden);
+            _trimmer.OnHidden();
         }), TaskScheduler.Default);
     }
 
@@ -250,6 +255,7 @@ public partial class App : Application
             _fanZone = zone;
             _machine?.SetKeepOpenRect(zone);
         }
+        _prompt?.Reposition();   // панель обходит веер
         Log.Write(zone is { } z ? $"fan open {z.Left},{z.Top},{z.Right},{z.Bottom}" : "fan closed");
     }
 
@@ -257,9 +263,11 @@ public partial class App : Application
     void OnPrimaryDown(int x, int y)
     {
         PxRect? zone;
+        PxRect? promptZone;
         PxRect card;
         lock (_gate)
         {
+            promptZone = _promptZone;
             zone = _fanZone;
             card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
         }

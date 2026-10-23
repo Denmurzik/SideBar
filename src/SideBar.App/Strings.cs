@@ -31,13 +31,16 @@ static class Strings
 
     public static string SharedLink(string device, string domain) => $"{device} поделился ссылкой · {domain}";
     public static string SharedText(string device) => $"{device} поделился текстом";
+    public const string TransferInterrupted = "Передача прервана";
 
-    public static string WantsToSend(string device, int files, int texts, bool onlyLinks, string pin)
+    public static string Pin(string pin) => $"PIN {pin}";
+
+    public static string WantsToSend(string device, int files, int texts, bool onlyLinks)
     {
         string what = files > 0
             ? texts > 0 ? $"отправить {Files(files)} и текст" : $"отправить {Files(files)}"
             : onlyLinks ? (texts > 1 ? "поделиться ссылками" : "поделиться ссылкой") : "поделиться текстом";
-        return $"{device} хочет {what} · PIN {pin}";
+        return $"{device} хочет {what}";
     }
     public const string Searching = "Поиск устройств…";
     public const string SendToDevice = "Отправить на устройство";

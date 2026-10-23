@@ -1,3 +1,4 @@
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -9,17 +10,24 @@ using WinRT.Interop;
 
 namespace SideBar.Sharing;
 
-/// <summary>Содержимое запасного уведомления: строки, кнопки, живёт до клика, отмены или автоскрытия.</summary>
-sealed record PromptSpec(string[] Lines, (string Label, Action Act)[] Buttons, TimeSpan? AutoHide);
+/// <summary>
+/// Содержимое запасного уведомления: строки, отдельная строка PIN (её имя отправителя вытеснить не может), кнопки.
+/// <paramref name="AutoHide"/> null — запрос согласия, живёт до решения или отмены.
+/// </summary>
+sealed record PromptSpec(string[] Lines, string? Pin, (string Label, Action Act)[] Buttons, TimeSpan? AutoHide);
+
+/// <summary>Где стоит открытая карточка (физические px), масштаб, основной экран и зона веера, которую панель обходит.</summary>
+readonly record struct PromptAnchor(PxRect Card, double Scale, PxRect Primary, PxRect? Avoid);
 
 /// <summary>
 /// Запасной путь, когда уведомления Windows недоступны: панель того же стиля, что карточка, слева от неё.
-/// Окно не активируется (WS_EX_NOACTIVATE). Показывает по одному запросу, остальные ждут в очереди.
-/// Все методы — только с UI-потока.
+/// Показывает все живые записи стопкой: запросы согласия сверху (у каждого свои PIN и кнопки), ниже — итоговые заметки;
+/// не больше <see cref="MaxEntries"/>, лишними становятся самые старые заметки. Окно не активируется. Только UI-поток.
 /// </summary>
 public sealed partial class PromptWindow : Window
 {
     const double WidthEpx = 300, GapEpx = 8;
+    const int MaxEntries = 4;
 
     sealed class Entry(PromptSpec spec, CancellationToken ct)
     {
@@ -27,14 +35,17 @@ public sealed partial class PromptWindow : Window
         public CancellationToken Ct { get; } = ct;
         public CancellationTokenRegistration Registration;
         public DispatcherTimer? Timer;
+        public bool Sticky => Spec.AutoHide is null;
     }
 
-    readonly Queue<Entry> _queue = new();
-    Entry? _current;
+    readonly List<Entry> _entries = [];   // порядок прихода
     nint _hwnd;
     bool _initialized, _shown;
     AlwaysActiveAcrylicBackdrop? _backdrop;
-    Func<(PxRect Card, double Scale)>? _anchor;
+    Func<PromptAnchor>? _anchor;
+
+    /// <summary>Прямоугольник окна (физические px) или null, когда оно скрыто.</summary>
+    internal event Action<PxRect?>? ZoneChanged;
 
     public PromptWindow()
     {
@@ -43,52 +54,48 @@ public sealed partial class PromptWindow : Window
         Root.ActualThemeChanged += (_, _) => OnThemeChanged();
     }
 
-    /// <summary>Где стоит открытая карточка (физические px) и масштаб раскладки.</summary>
-    internal void SetAnchor(Func<(PxRect Card, double Scale)> anchor) => _anchor = anchor;
+    internal void SetAnchor(Func<PromptAnchor> anchor) => _anchor = anchor;
 
     internal void Present(PromptSpec spec, CancellationToken ct)
     {
         if (ct.IsCancellationRequested) return;
         var entry = new Entry(spec, ct);
-        entry.Registration = ct.Register(() => DispatcherQueue.TryEnqueue(() => Dismiss(entry)));
-        _queue.Enqueue(entry);
-        if (_current is null) ShowNext();
-    }
-
-    void ShowNext()
-    {
-        while (_queue.Count > 0)
+        if (_entries.Count >= MaxEntries)
         {
-            var entry = _queue.Dequeue();
-            if (entry.Ct.IsCancellationRequested) { entry.Registration.Dispose(); continue; }
-            _current = entry;
-            Build(entry);
-            if (entry.Spec.AutoHide is { } hide)
-            {
-                var timer = new DispatcherTimer { Interval = hide };
-                timer.Tick += (_, _) => Dismiss(entry);
-                entry.Timer = timer;
-                timer.Start();
-            }
-            return;
+            var oldestNote = _entries.FirstOrDefault(e => !e.Sticky);
+            if (oldestNote is not null) Remove(oldestNote);
+            else if (!entry.Sticky) return;   // стопка занята одними запросами: заметка не нужна
         }
-        HideWindow();
+        entry.Registration = ct.Register(() => DispatcherQueue.TryEnqueue(() => Dismiss(entry)));
+        if (spec.AutoHide is { } hide)
+        {
+            var timer = new DispatcherTimer { Interval = hide };
+            timer.Tick += (_, _) => Dismiss(entry);
+            entry.Timer = timer;
+            timer.Start();
+        }
+        _entries.Add(entry);
+        Rebuild();
     }
 
     void Dismiss(Entry entry)
     {
+        if (!_entries.Contains(entry)) return;
+        Remove(entry);
+        Rebuild();
+    }
+
+    void Remove(Entry entry)
+    {
         entry.Timer?.Stop();
         entry.Registration.Dispose();
-        if (_current != entry)
-        {
-            // ещё в очереди: пересобираем без него
-            var rest = _queue.Where(e => e != entry).ToList();
-            _queue.Clear();
-            foreach (var e in rest) _queue.Enqueue(e);
-            return;
-        }
-        _current = null;
-        ShowNext();
+        _entries.Remove(entry);
+    }
+
+    /// <summary>Положение пересчитывается при смене зоны веера.</summary>
+    internal void Reposition()
+    {
+        if (_shown) Place();
     }
 
     void EnsureInitialized()
@@ -120,21 +127,47 @@ public sealed partial class PromptWindow : Window
         Panel.BorderBrush = new SolidColorBrush(dark ? Windows.UI.Color.FromArgb(0x70, 0x8C, 0x8C, 0x8C) : Windows.UI.Color.FromArgb(0x50, 0x40, 0x40, 0x40));
     }
 
-    void Build(Entry entry)
+    void Rebuild()
     {
+        if (_entries.Count == 0)
+        {
+            HideWindow();
+            return;
+        }
         EnsureInitialized();
         Body.Children.Clear();
+        // запросы сверху (свежие ниже среди запросов), под ними заметки, новые выше
+        var ordered = _entries.Where(e => e.Sticky).Concat(_entries.Where(e => !e.Sticky).Reverse()).ToList();
+        for (int i = 0; i < ordered.Count; i++)
+        {
+            if (i > 0) Body.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x30, 0x80, 0x80, 0x80)) });
+            Body.Children.Add(Build(ordered[i]));
+        }
+        Place();
+        // шаблоны кнопок применяются только после первого показа: размер по содержимому уточняем в следующем такте
+        var snapshot = _entries.Count;
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => { if (_shown && _entries.Count == snapshot) Place(); });
+    }
+
+    FrameworkElement Build(Entry entry)
+    {
+        var panel = new StackPanel { Spacing = 6 };
         for (int i = 0; i < entry.Spec.Lines.Length; i++)
         {
-            Body.Children.Add(new TextBlock
+            panel.Children.Add(new TextBlock
             {
                 Text = entry.Spec.Lines[i],
                 FontSize = 13,
                 FontWeight = i == 0 ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
                 TextWrapping = TextWrapping.Wrap,
-                MaxLines = i == 0 ? 3 : 2,
+                MaxLines = 3,
                 TextTrimming = TextTrimming.CharacterEllipsis,
             });
+        }
+        if (entry.Spec.Pin is { } pin)
+        {
+            // отдельная строка без усечения: PIN нельзя вытеснить из видимой области текстом отправителя
+            panel.Children.Add(new TextBlock { Text = Strings.Pin(pin), FontSize = 16, FontWeight = Microsoft.UI.Text.FontWeights.Bold });
         }
         if (entry.Spec.Buttons.Length > 0)
         {
@@ -150,22 +183,26 @@ public sealed partial class PromptWindow : Window
                 };
                 row.Children.Add(button);
             }
-            Body.Children.Add(row);
+            panel.Children.Add(row);
         }
-        Place();
-        // шаблоны кнопок применяются только после первого показа: размер по содержимому уточняем в следующем такте
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => { if (_current == entry) Place(); });
+        return panel;
     }
 
     void Place()
     {
+        var a = _anchor?.Invoke() ?? new PromptAnchor(default, 1.0, default, null);
         Root.UpdateLayout();
-        var (card, scale) = _anchor?.Invoke() ?? (default, 1.0);
         Root.Measure(new Windows.Foundation.Size(WidthEpx, double.PositiveInfinity));
-        double height = Root.DesiredSize.Height;
-        int w = (int)Math.Round(WidthEpx * scale), h = (int)Math.Round(height * scale);
-        int left = card.Left - (int)Math.Round(GapEpx * scale) - w;
-        int top = (card.Top + card.Bottom) / 2 - h / 2;
+        int w = (int)Math.Round(WidthEpx * a.Scale), h = (int)Math.Round(Root.DesiredSize.Height * a.Scale);
+        int gap = (int)Math.Round(GapEpx * a.Scale);
+        int left = a.Card.Left - gap - w;
+        int top = (a.Card.Top + a.Card.Bottom) / 2 - h / 2;
+        if (a.Avoid is { } fan && left < fan.Right && left + w > fan.Left && top < fan.Bottom && top + h > fan.Top)
+        {
+            // веер занимает тот же столбец: панель выше него, а если места нет — ниже
+            top = fan.Top - gap - h;
+            if (top < a.Primary.Top) top = fan.Bottom + gap;
+        }
         AppWindow.MoveAndResize(new RectInt32(left, top, w, h));
         if (!_shown)
         {
@@ -173,6 +210,7 @@ public sealed partial class PromptWindow : Window
             _shown = true;
             WindowFrame.Strip(_hwnd);
         }
+        ZoneChanged?.Invoke(new PxRect(left, top, left + w, top + h));
     }
 
     void HideWindow()
@@ -180,5 +218,6 @@ public sealed partial class PromptWindow : Window
         if (!_shown) return;
         AppWindow.Hide();
         _shown = false;
+        ZoneChanged?.Invoke(null);
     }
 }
