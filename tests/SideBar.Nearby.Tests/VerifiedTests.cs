@@ -290,10 +290,14 @@ public sealed class VerifiedTests : IDisposable
     [Fact]
     public async Task Reflected_paired_key_is_not_verified()
     {
-        var pair = new OwnPair();
-        var advert = pair.Phone.CreateEndpointInfo("x", DeviceKind.Phone);
+        // The PC knows its own certificate and the peer advertises it, so the echoed frame passes the key check
+        // and only the role prefix (0x01 sender / 0x02 receiver) can stop it.
+        var phone = CertFixtures.NewDevice("Pixel 9");
+        var pcDevice = CertFixtures.NewDevice("My PC");
+        var pc = new CertificateIdentity(PrivateOf(pcDevice), [PublicOf(phone), PublicOf(pcDevice)]);
+        var advert = pc.CreateEndpointInfo("x", DeviceKind.Phone);
 
-        var (offer, _, asked) = await RunFakeAsync(pair.Pc, advert, async (s, ct) =>
+        var (offer, _, asked) = await RunFakeAsync(pc, advert, async (s, ct) =>
         {
             // Echo the receiver's own key frame back to it.
             var theirs = await s.ReadAsync(Share.V1Frame.Types.FrameType.PairedKeyEncryption, ct);
