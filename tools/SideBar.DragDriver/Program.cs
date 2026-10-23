@@ -137,11 +137,14 @@ sealed class Driver
     }
 
     // ---- приложение ----
-    bool StartApp()
+    /// <param name="defaultDeleteDelay">true — без SIDEBAR_OWNED_DELETE_DELAY_SEC (боевая задержка 10 мин); иначе короткая, чтобы D3c не ждал 10 минут.</param>
+    bool StartApp(bool defaultDeleteDelay = false)
     {
         try { File.Delete(_appLog); } catch { }
         var psi = new ProcessStartInfo(_exe) { UseShellExecute = false };
         psi.Environment["SIDEBAR_DATA_DIR"] = _dataDir;
+        if (defaultDeleteDelay) psi.Environment.Remove("SIDEBAR_OWNED_DELETE_DELAY_SEC");
+        else psi.Environment["SIDEBAR_OWNED_DELETE_DELAY_SEC"] = "30";
         _app = Process.Start(psi)!;
         for (int i = 0; i < 150 && !AppLog().Contains(" ready"); i++)
         {
@@ -439,8 +442,8 @@ sealed class Driver
         if (DragStackTo(new Point(shelfTile.X, shelfTile.Y - (int)(20 * _scale)), W, H))
         {
             s = ReadShelf();
-            Check("D2b drag-out and drop on own shelf tile -> items stay, not duplicated",
-                s.Select(x => x.Id).SequenceEqual(ids), Dump(s));
+            Check("D2b drag-out and drop on own shelf tile -> DropResult None, items stay, not duplicated",
+                s.Select(x => x.Id).SequenceEqual(ids) && WaitNone(0)   /* DragStackTo начинается с OpenCard, который очищает лог */, Dump(s) + "\n" + AppLog());
         }
 
         // D3: принимающее окно -> Copy, элементы сняты, ссылки целы, Owned живёт ещё не менее 30 с
@@ -463,6 +466,24 @@ sealed class Driver
                 !File.Exists(owned.Path) && !Directory.Exists(Path.GetDirectoryName(owned.Path)!), owned.Path);
         }
         FanScenarios(W, H, a, refFile, folder, otherCenter);
+        DefaultDelayScenario(W, H, a, refFile, folder, otherCenter);
+    }
+
+    // D3d: с боевой задержкой (10 мин) Owned-файл жив и через 60 с после выноса
+    void DefaultDelayScenario(int W, int H, string a, string refFile, string folder, Point otherCenter)
+    {
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        if (!StartApp(defaultDeleteDelay: true)) { _fail++; return; }
+        var s = FillShelf(a, folder, refFile, W, H);
+        var owned = s.FirstOrDefault(x => x.Kind == Owned);
+        if (s.Count != 5 || owned == null) { Check("D3d shelf prepared", false, Dump(s)); return; }
+        bool dragged = DragStackTo(otherCenter, W, H);
+        s = WaitShelf(x => x.Count == 0, 3000);
+        var t0 = DateTime.UtcNow;
+        int wait = 60_000 - (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+        Thread.Sleep(Math.Max(wait, 0));
+        Check("D3d default delay: owned file still exists 60 s after drag-out", dragged && s.Count == 0 && File.Exists(owned.Path), owned.Path);
     }
 
     // ---- веер (Task 5) ----
@@ -496,6 +517,16 @@ sealed class Driver
         cls = sb.ToString();
         GetWindowThreadProcessId(h, out var pid);
         return _app != null && pid == (uint)_app.Id;
+    }
+
+    /// <summary>Сколько раз в логе приложения встретился результат выноса None (лог накапливается, поэтому сравниваем счётчики до/после).</summary>
+    int NoneCount() => System.Text.RegularExpressions.Regex.Count(AppLog(), "DropResult=None");
+
+    /// <summary>Ждёт, пока счётчик DropResult=None превысит <paramref name="before"/> (DropCompleted приходит чуть позже конца drag'а).</summary>
+    bool WaitNone(int before, int ms = 4000)
+    {
+        for (int t = 0; t < ms && NoneCount() <= before; t += 100) Thread.Sleep(100);
+        return NoneCount() > before;
     }
 
     static void Click() { Mouse(0x0002); Thread.Sleep(80); Mouse(0x0004); }
@@ -566,6 +597,13 @@ sealed class Driver
 
         Check("F1b clicking the stack and opening the fan does not change the foreground window", fgAfterOpen == _fgBeforeFan, $"before={_fgBeforeFan} after={fgAfterOpen}");
 
+        // F1c: повторный клик по стопке при открытом веере закрывает его (переключатель)
+        Click();
+        var toggled = WaitFan(false, 1500);
+        Check("F1c second click on the stack while the fan is open -> fan closed", toggled == null, AppLog());
+        fan = OpenFan(W, H) ?? default;
+        if (fan.IsEmpty) { Check("F1d fan re-opens after toggle", false, "no fan"); return; }
+
         // F2: вынос одной строки (вторая сверху = ref-original.txt) в принимающее окно -> Copy, снят только он
         nint fgBeforeDrag = GetForegroundWindow();
         DragFanRow(fan, 1, otherCenter, W, H);
@@ -592,8 +630,10 @@ sealed class Driver
         Check("F2c fan row dropped onto the card (own shelf) -> DropResult None, item stays", afterCard.SequenceEqual(idsNow) && cardNone, $"log={AppLog()}");
         fan = OpenFan(W, H) ?? default;
         if (fan.IsEmpty) { Check("F2d fan re-opens", false, "no fan"); return; }
+        int noneBeforeD = NoneCount();
         DragFanRow(fan, 0, FanRow(fan, 2), W, H);
-        Check("F2d fan row dropped onto the fan itself -> item stays", ReadShelf().Select(x => x.Id).SequenceEqual(idsNow), $"log={AppLog()}");
+        Check("F2d fan row dropped onto the fan itself -> DropResult None, item stays",
+            ReadShelf().Select(x => x.Id).SequenceEqual(idsNow) && WaitNone(noneBeforeD), $"log={AppLog()}");
 
         // F3: клик вне карточки и веера -> веер закрыт
         fan = OpenFan(W, H) ?? default;
