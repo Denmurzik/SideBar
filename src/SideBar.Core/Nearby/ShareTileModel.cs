@@ -135,7 +135,12 @@ public sealed class ShareTileModel
     }
 
     /// <summary>Таймер плитки стоял и запускается снова: простой не засчитывается как прошедшее время.</summary>
-    public void Resume(DateTimeOffset now) => _clock = now;
+    public void Resume(DateTimeOffset now)
+    {
+        _clock = now;
+        // итог мог прийти, пока таймер стоял (_clock устарел): полные ResultDuration отсчитываются с запуска таймера
+        if (State is ShareTileState.Done or ShareTileState.Failed or ShareTileState.OfficialAppRunning) _finishedAt = now;
+    }
 
     public void Tick(DateTimeOffset now)
     {

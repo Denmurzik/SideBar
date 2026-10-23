@@ -372,4 +372,40 @@ public class ShareTileModelTests
         m.Tick(T0.AddMinutes(5).AddSeconds(2));
         Assert.Equal(ShareTileState.Idle, m.State);
     }
+
+    [Fact]
+    public void Result_after_untimed_sending_gets_full_duration_from_resume()
+    {
+        var m = Sending();
+        m.Finished(true, null);
+        m.Resume(T0.AddMinutes(5));
+        m.Tick(T0.AddMinutes(5).AddSeconds(1));
+        Assert.Equal(ShareTileState.Done, m.State);
+        m.Tick(T0.AddMinutes(5).AddSeconds(2));
+        Assert.Equal(ShareTileState.Idle, m.State);
+    }
+
+    [Fact]
+    public void Result_while_visible_with_ticks_expires_after_duration()
+    {
+        var m = Sending();
+        m.Tick(T0.AddSeconds(1));
+        m.Finished(true, null);
+        m.Tick(T0.AddSeconds(2));
+        Assert.Equal(ShareTileState.Done, m.State);
+        m.Tick(T0.AddSeconds(3));
+        Assert.Equal(ShareTileState.Idle, m.State);
+    }
+
+    [Fact]
+    public void Resume_while_searching_changes_only_the_clock()
+    {
+        var m = Searching();
+        m.Tick(T0.AddSeconds(10));
+        m.Resume(T0.AddSeconds(58));
+        m.Tick(T0.AddSeconds(59));
+        Assert.Equal(ShareTileState.Searching, m.State);
+        m.Tick(T0.AddSeconds(60));
+        Assert.Equal(ShareTileState.Failed, m.State);
+    }
 }

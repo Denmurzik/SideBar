@@ -520,7 +520,7 @@ public partial class App : Application
             card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
         }
         if (card.Contains(x, y) || (zone is { } z && z.Contains(x, y))) return;
-        if (_shareActive) _ui?.TryEnqueue(() => { if (_share is { CancelsOnOutsideClick: true } s) s.Cancel(); });   // состояние могло смениться, пока событие ждало UI   // клик вне карточки отменяет поиск и выбор, но не идущую передачу
+        if (_shareActive) _ui?.TryEnqueue(() => { if (_share is { CancelsOnOutsideClick: true } s) s.Cancel(); });   // клик вне карточки отменяет поиск и выбор, но не передачу; состояние могло смениться, пока событие ждало UI
         if (zone is not null) _ui?.TryEnqueue(() => _fan?.Hide());
     }
 
