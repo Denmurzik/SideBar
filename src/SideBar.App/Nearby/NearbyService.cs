@@ -221,11 +221,10 @@ sealed class NearbyService : IDisposable
             var observer = new ProgressObserver(f => Post(epoch, () => Progress?.Invoke(f)));
             var result = await SendSession.SendFilesAsync(client.GetStream(), options, files, observer, ct).ConfigureAwait(false);
             Log.Write($"share: result {result.Status}");
-            // TimedOut приходит из Task 2 (защита сессий); сравнение по имени, пока ветки не слиты
             var reason = result.Status switch
             {
                 TransferStatus.Completed => truncated ? Strings.OnlyFirstFiles : null,
-                _ when result.Status.ToString() == "TimedOut" => Strings.SendTimedOut,
+                TransferStatus.TimedOut => Strings.SendTimedOut,
                 TransferStatus.RejectedByPeer => Strings.SendRejected,
                 TransferStatus.CancelledByPeer => Strings.SendCancelled,
                 _ => Strings.SendFailed,
@@ -261,8 +260,8 @@ sealed class NearbyService : IDisposable
             foreach (var t in _lostGrace.Values) t.Dispose();
             _lostGrace.Clear();
         }
-        try { expand?.Cancel(); } catch (Exception e) { Log.Write("share: cancel failed: " + Log.Describe(e)); }
         try { cts?.Cancel(); } catch (Exception e) { Log.Write("share: cancel failed: " + Log.Describe(e)); }
+        try { expand?.Cancel(); } catch (Exception e) { Log.Write("share: cancel failed: " + Log.Describe(e)); }
         try { browser?.Dispose(); } catch (Exception e) { Log.Write("share: browser dispose failed: " + Log.Describe(e)); }
     }
 

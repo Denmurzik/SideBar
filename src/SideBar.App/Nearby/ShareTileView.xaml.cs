@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Visibility = Microsoft.UI.Xaml.Visibility;   // SideBar.Core.Nearby.Visibility (Hidden/Everyone) конфликтует
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using SideBar.Core.Nearby;
