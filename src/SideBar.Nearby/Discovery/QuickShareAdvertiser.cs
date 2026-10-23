@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using SideBar.Nearby.Wire;
 using Native = SideBar.Nearby.Discovery.DnsSdNative;
@@ -13,7 +12,7 @@ public sealed class QuickShareAdvertiser : IDisposable
     private readonly string _endpointId;
     private readonly byte[] _endpointInfo;
     private readonly int _port;
-    private readonly IPAddress? _address;
+    private readonly IPAddress _address;
     private readonly uint _interfaceIndex;
 
     private nint _instance;
@@ -21,20 +20,19 @@ public sealed class QuickShareAdvertiser : IDisposable
     private nint _contextHandle;
     private nint[] _strings = [];
 
-    /// <param name="address">LAN address to announce; by default the interface with a default gateway, so virtual
-    /// adapters (Hyper-V, WSL, VPN) are neither announced nor used.</param>
-    public QuickShareAdvertiser(string endpointId, byte[] endpointInfo, int port, IPAddress? address = null)
+    /// <param name="address">LAN address to announce, from <see cref="NetworkInfo.DefaultRouteInterface"/>.</param>
+    /// <param name="interfaceIndex">Index of the interface owning <paramref name="address"/>; the service is registered only there.</param>
+    public QuickShareAdvertiser(string endpointId, byte[] endpointInfo, int port, IPAddress address, int interfaceIndex)
     {
         _endpointId = endpointId;
         _endpointInfo = endpointInfo;
         _port = port;
-        var lan = address is null ? FindLanInterface() : FindInterfaceOf(address);
-        _address = address ?? lan?.Address;
-        _interfaceIndex = (uint)(lan?.Index ?? 0);
+        _address = address;
+        _interfaceIndex = (uint)interfaceIndex;
     }
 
     public string InstanceName => MdnsName.Encode(_endpointId);
-    public IPAddress? Address => _address;
+    public IPAddress Address => _address;
 
     public async Task RegisterAsync(CancellationToken ct = default)
     {
@@ -82,12 +80,8 @@ public sealed class QuickShareAdvertiser : IDisposable
         var keys = stackalloc nint[1] { key };
         var values = stackalloc nint[1] { value };
         uint ip4 = 0;
-        uint* ip4Ptr = null;
-        if (_address is not null)
-        {
-            _address.TryWriteBytes(new Span<byte>(&ip4, 4), out _);
-            ip4Ptr = &ip4;
-        }
+        _address.TryWriteBytes(new Span<byte>(&ip4, 4), out _);
+        uint* ip4Ptr = &ip4;
 
         var instance = Native.DnsServiceConstructInstance(serviceName, hostName, ip4Ptr, 0, (ushort)_port, 0, 0, 1, keys, values);
         if (instance is null) throw new InvalidOperationException("DnsServiceConstructInstance failed.");
@@ -140,39 +134,6 @@ public sealed class QuickShareAdvertiser : IDisposable
     }
 
     public void Dispose() => Unregister();
-
-    public sealed record LanInterface(IPAddress Address, int Index);
-
-    /// <summary>IPv4 address and index of an operational, non-loopback adapter that has a default gateway.</summary>
-    public static LanInterface? FindLanInterface()
-    {
-        LanInterface? fallback = null;
-        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (nic.OperationalStatus != OperationalStatus.Up || nic.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-            var props = nic.GetIPProperties();
-            var v4 = props.UnicastAddresses.FirstOrDefault(a => a.Address.AddressFamily == AddressFamily.InterNetwork)?.Address;
-            if (v4 is null || props.GetIPv4Properties() is not { } v4Props) continue;
-            var lan = new LanInterface(v4, v4Props.Index);
-            if (props.GatewayAddresses.Any(g => g.Address.AddressFamily == AddressFamily.InterNetwork && !g.Address.Equals(IPAddress.Any)))
-                return lan;
-            fallback ??= lan;
-        }
-        return fallback;
-    }
-
-    public static IPAddress? FindLanAddress() => FindLanInterface()?.Address;
-
-    private static LanInterface? FindInterfaceOf(IPAddress address)
-    {
-        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            var props = nic.GetIPProperties();
-            if (props.UnicastAddresses.Any(a => a.Address.Equals(address)) && props.GetIPv4Properties() is { } v4)
-                return new LanInterface(address, v4.Index);
-        }
-        return null;
-    }
 
     /// <summary>True when the address belongs to one of this machine's adapters (our own announcements).</summary>
     public static bool IsLocalAddress(IPAddress address) =>

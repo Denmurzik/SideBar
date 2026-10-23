@@ -124,12 +124,13 @@ static async Task<int> Receive(CliOptions options, SessionOptions session, Cance
     var autoAccept = options.Flag("--yes");
     var reannounce = options.Int("--reannounce", 30);
 
-    var listener = new TcpListener(IPAddress.Any, 0);
+    if (NetworkInfo.DefaultRouteInterface() is not { } lan) return Fail("No IPv4 interface with a default route.");
+    var listener = new TcpListener(lan.Address, 0);
     listener.Start();
     var port = ((IPEndPoint)listener.LocalEndpoint).Port;
 
     var info = session.ResolvedIdentity.CreateEndpointInfo(session.DeviceName, session.DeviceKind);
-    using var advertiser = new QuickShareAdvertiser(MdnsName.NewEndpointId(), info.Encode(), port);
+    using var advertiser = new QuickShareAdvertiser(MdnsName.NewEndpointId(), info.Encode(), port, lan.Address, lan.InterfaceIndex);
     await advertiser.RegisterAsync(ct);
     AppDomain.CurrentDomain.ProcessExit += (_, _) => advertiser.Dispose();
     Console.WriteLine($"Advertising '{session.DeviceName}' as {advertiser.InstanceName} on {advertiser.Address}:{port}");
