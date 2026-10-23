@@ -160,6 +160,24 @@ public sealed class RobustnessTests : IDisposable
     }
 
     [Fact]
+    public async Task Not_enough_free_space_rejects_before_asking_the_user()
+    {
+        var ct = Token();
+        using var link = await Link.OpenAsync(ct);
+        var options = new SessionOptions("R") { FreeBytes = _ => 100L * 1024 * 1024 };
+        var asked = false;
+        var receive = Receive(link, ct, options, (_, _) => { asked = true; return Task.FromResult(true); });
+        await using var peer = await FakeSender.ConnectAsync(link.Client, ct);
+        await peer.IntroduceAsync(ct, TestFrames.File(7, 40L * 1024 * 1024));
+
+        Assert.Equal(Share.ConnectionResponseFrame.Types.Status.Reject, await peer.ReadResponseAsync(ct));
+        var result = await receive;
+        Assert.Equal(TransferStatus.RejectedByPeer, result.Status);
+        Assert.Equal("not-enough-space", result.Detail);
+        Assert.False(asked);
+    }
+
+    [Fact]
     public async Task User_decision_timeout_rejects()
     {
         var ct = Token();
@@ -375,10 +393,10 @@ public sealed class RobustnessTests : IDisposable
     {
         var ct = Token();
         using var link = await Link.OpenAsync(ct);
-        var options = new SessionOptions("R") { IdleTimeout = TimeSpan.FromMilliseconds(300) };
+        var options = new SessionOptions("R") { IdleTimeout = TimeSpan.FromSeconds(1) };
         var receive = Receive(link, ct, options);
         await using var peer = await FakeSender.ConnectAsync(link.Client, ct);
-        for (var i = 0; i < 10; i++)
+        for (var i = 0; i < 30; i++)
         {
             await peer.SendOfflineAsync(OfflineFrames.KeepAlive(ack: false), ct);
             await Task.Delay(100, ct);

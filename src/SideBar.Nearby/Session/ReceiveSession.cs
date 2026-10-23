@@ -79,9 +79,9 @@ public static class ReceiveSession
 
                 if ((chunk.Flags & (int)Conn.PayloadTransferFrame.Types.PayloadChunk.Types.Flags.LastChunk) != 0)
                 {
-                    await target.Stream.DisposeAsync();
                     if (target.Written != target.Size)
                         throw new InvalidDataException("FILE payload ended before its announced size.");
+                    target.Path = target.Writer.Commit();
                     target.Done = true;
                     saved.Add(target.Path);
                 }
@@ -139,6 +139,16 @@ public static class ReceiveSession
                                 return new TransferResult(TransferStatus.Failed, saved, "Introduction has no files.");
                             }
 
+                            long needed = 0;
+                            try { foreach (var f in files) needed = checked(needed + f.Size); }
+                            catch (OverflowException) { needed = long.MaxValue; }
+                            if (!ReceivedFileWriter.HasSpace(outputDirectory, needed, options.FreeBytes))
+                            {
+                                await connection.SendSharingAsync(SharingFrames.Response(
+                                    Share.ConnectionResponseFrame.Types.Status.Reject), ct);
+                                return new TransferResult(TransferStatus.RejectedByPeer, saved, "not-enough-space");
+                            }
+
                             var offer = new IncomingTransfer(pin, senderName,
                                 files.Select(f => new IncomingFile(f.Name, f.Size, f.MimeType)).ToList());
                             observer.Status("Waiting for the user's decision...");
@@ -180,8 +190,7 @@ public static class ReceiveSession
             {
                 foreach (var target in incoming.Values)
                 {
-                    await target.DisposeAsync();
-                    if (!target.Done) target.DeleteIncomplete();
+                    if (!target.Done) target.Writer.Abort();
                 }
             }
         }
@@ -214,56 +223,28 @@ public static class ReceiveSession
 
     private sealed class NullObserver : ITransferObserver;
 
-    private sealed class IncomingTarget : IAsyncDisposable
+    private sealed class IncomingTarget
     {
         public required string Name { get; init; }
-        public required string Path { get; init; }
+        public required string Path { get; set; }
         public required long Size { get; init; }
-        public required FileStream Stream { get; init; }
+        public required Stream Stream { get; init; }
+        public required ReceivedFileWriter Writer { get; init; }
         public long Written { get; set; }
         public bool Done { get; set; }
 
         public static IncomingTarget Create(string directory, Share.FileMetadata metadata)
         {
-            var path = UniquePath(directory, SanitizeFileName(metadata.Name));
+            var writer = new ReceivedFileWriter(directory);
+            var stream = writer.Begin(metadata.Name, metadata.Size, out var preview);
             return new IncomingTarget
             {
                 Name = metadata.Name,
-                Path = path,
+                Path = preview,
                 Size = metadata.Size,
-                Stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, useAsync: true),
+                Stream = stream,
+                Writer = writer,
             };
-        }
-
-        public ValueTask DisposeAsync() => Stream.DisposeAsync();
-
-        public void DeleteIncomplete()
-        {
-            try { File.Delete(Path); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
-        }
-    }
-
-    /// <summary>Strips any directory part and characters Windows rejects; the sender is untrusted.</summary>
-    internal static string SanitizeFileName(string name)
-    {
-        var leaf = name.Replace('\\', '/');
-        leaf = leaf[(leaf.LastIndexOf('/') + 1)..];
-        var invalid = System.IO.Path.GetInvalidFileNameChars();
-        var cleaned = new string(leaf.Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim().TrimEnd('.');
-        return cleaned.Length == 0 ? "file" : cleaned;
-    }
-
-    internal static string UniquePath(string directory, string fileName)
-    {
-        var path = System.IO.Path.Combine(directory, fileName);
-        if (!File.Exists(path)) return path;
-        var stem = System.IO.Path.GetFileNameWithoutExtension(fileName);
-        var ext = System.IO.Path.GetExtension(fileName);
-        for (var i = 1; ; i++)
-        {
-            path = System.IO.Path.Combine(directory, $"{stem} ({i}){ext}");
-            if (!File.Exists(path)) return path;
         }
     }
 }

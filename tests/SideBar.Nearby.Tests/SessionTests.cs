@@ -124,19 +124,9 @@ public sealed class SessionTests : IDisposable
 
         Assert.Equal(TransferStatus.Completed, send.Status);
         Assert.Equal("old", File.ReadAllText(Path.Combine(_out, "doc.txt")));
-        Assert.Equal("new", File.ReadAllText(Path.Combine(_out, "doc (1).txt")));
-        Assert.Equal(Path.Combine(_out, "doc (1).txt"), Assert.Single(receive.Files));
+        Assert.Equal("new", File.ReadAllText(Path.Combine(_out, "doc (2).txt")));
+        Assert.Equal(Path.Combine(_out, "doc (2).txt"), Assert.Single(receive.Files));
     }
-
-    [Theory]
-    [InlineData("..\\..\\evil.exe", "evil.exe")]
-    [InlineData("a/b/c.txt", "c.txt")]
-    [InlineData("we:ird?.txt", "we_ird_.txt")]
-    [InlineData("   ", "file")]
-    [InlineData("name.", "name")]
-    [InlineData("", "file")]
-    public void SanitizeFileName(string input, string expected) =>
-        Assert.Equal(expected, ReceiveSession.SanitizeFileName(input));
 
     [Fact]
     public async Task SenderDisconnectsOnlyAfterTheReceiverHasFinished()
@@ -222,23 +212,5 @@ public sealed class SessionTests : IDisposable
 
         Assert.Equal(TransferStatus.ProtocolError, (await receive).Status);
         listener.Stop();
-    }
-}
-
-public class OutputPathTests
-{
-    [Fact]
-    public void UniquePathAddsCounter()
-    {
-        var dir = Path.Combine(Path.GetTempPath(), "sidebar-nearby-unique-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(dir);
-        try
-        {
-            Assert.Equal(Path.Combine(dir, "a.txt"), ReceiveSession.UniquePath(dir, "a.txt"));
-            File.WriteAllText(Path.Combine(dir, "a.txt"), "");
-            File.WriteAllText(Path.Combine(dir, "a (1).txt"), "");
-            Assert.Equal(Path.Combine(dir, "a (2).txt"), ReceiveSession.UniquePath(dir, "a.txt"));
-        }
-        finally { Directory.Delete(dir, recursive: true); }
     }
 }

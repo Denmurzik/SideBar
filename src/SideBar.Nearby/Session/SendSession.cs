@@ -187,7 +187,7 @@ public static class SendSession
             await readerCts.CancelAsync();
             // The reader reports through PeerWatch; whatever it throws must not replace the real result.
             try { await reader; }
-            catch (Exception) { }
+            catch (Exception e) { NearbyLog.Write(new NearbyLogEvent("send.reader-ended", Value: e.GetType().Name)); }
         }
     }
 

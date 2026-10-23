@@ -56,6 +56,9 @@ public sealed record SessionOptions(
 
     public int MaxConcurrentBytesPayloads { get; init; } = 8;
 
+    /// <summary>Free bytes on the volume of the given directory; injectable for tests (default: <see cref="DriveInfo"/>).</summary>
+    public Func<string, long>? FreeBytes { get; init; }
+
     public IShareIdentity ResolvedIdentity => Identity ?? new AnonymousIdentity();
 }
 
