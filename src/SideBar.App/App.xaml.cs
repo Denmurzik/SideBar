@@ -31,7 +31,7 @@ public partial class App : Application
     MessageWindow? _messages;
     TrayIcon? _tray;
     ShelfService? _shelf;
-    IDisposable? _dropTarget;
+    OleDropTarget.DropRegistration? _dropTarget;
 
     public App()
     {
@@ -125,6 +125,7 @@ public partial class App : Application
             _machine.Relayout(layout, mode);
         }
         _window.Relayout(layout, mode, scale);
+        _dropTarget?.Refresh();   // WinUI может пересоздать дочерние HWND при смене DPI/дисплея
         _trimmer.OnHidden();   // Relayout не поднимает Settled
     }
 

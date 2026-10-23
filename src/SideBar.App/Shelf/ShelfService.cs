@@ -36,14 +36,27 @@ sealed partial class ShelfService
 
     public void Load()
     {
-        var model = new ShelfModel(_store.Load());
-        int pruned = model.PruneMissing(File.Exists);
+        ShelfModel model;
+        int pruned = 0;
+        try
+        {
+            model = new ShelfModel(_store.Load());
+            pruned = model.PruneMissing(Exists);
+            SweepOrphans(model);
+        }
+        catch (Exception e)
+        {
+            Log.Write("shelf load failed: " + Log.Describe(e));
+            model = new ShelfModel();
+        }
         Model = model;
-        SweepOrphans(model);
         if (pruned > 0) Persist();
         model.Changed += OnChanged;
         Log.Write($"shelf loaded: {model.Items.Count} item(s), pruned {pruned}");
     }
+
+    /// <summary>Файл или каталог: каталоги кладутся в стопку ссылками.</summary>
+    static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
 
     /// <summary>Вызывается из IDropTarget.Drop. Возвращает DROPEFFECT_COPY, если добавлен хотя бы один элемент.</summary>
     public int AcceptDrop(nint dataObject)
@@ -51,7 +64,7 @@ sealed partial class ShelfService
         try
         {
             var payload = ReadPayload(dataObject, out var descriptors);
-            var decision = DropPolicy.Decide(payload, File.Exists, TempRoots());
+            var decision = DropPolicy.Decide(payload, Exists, TempRoots());
             int needed = decision.Action switch
             {
                 DropAction.References => decision.ReferencePaths.Count + decision.TempPathsToCopy.Count,
@@ -70,8 +83,13 @@ sealed partial class ShelfService
                 Log.Write($"drop rejected: shelf limit {ShelfModel.MaxItems} (have {Model.Items.Count}, need {needed})");
                 return DropEffectNone;
             }
+            if (HasOversizedFile(decision, descriptors))
+            {
+                Log.Write("drop rejected: a file is over the per-file limit");
+                return DropEffectNone;
+            }
 
-            int added = 0;
+            var added = new List<ShelfItem>();
             _batch = true;
             try
             {
@@ -79,31 +97,38 @@ sealed partial class ShelfService
                 {
                     case DropAction.References:
                         foreach (var path in decision.ReferencePaths)
-                            if (Model.Add(path, ShelfItemKind.Reference) != null) added++;
-                        added += CopyTemps(decision.TempPathsToCopy);
+                            Track(Model.Add(path, ShelfItemKind.Reference), added);
+                        CopyTemps(decision.TempPathsToCopy, added);
                         break;
                     case DropAction.CopyTempPaths:
-                        added += CopyTemps(decision.TempPathsToCopy);
+                        CopyTemps(decision.TempPathsToCopy, added);
                         break;
                     case DropAction.MaterializeVirtual:
-                        added += MaterializeVirtual(dataObject, descriptors, payload.Url);
+                        MaterializeVirtual(dataObject, descriptors, payload.Url, added);
                         break;
                     case DropAction.MaterializeImage:
-                        added += MaterializeImage(dataObject, payload.ImageFormat!);
+                        MaterializeImage(dataObject, payload.ImageFormat!, added);
                         break;
                 }
+            }
+            catch (TooLargeException)
+            {
+                // поток оказался больше заявленного: отменяем весь drop целиком
+                Rollback(added);
+                added.Clear();
+                Log.Write("drop rejected: a stream is over the per-file limit");
             }
             finally
             {
                 _batch = false;
-                if (added > 0) Persist();
+                if (added.Count > 0) Persist();
             }
-            Log.Write($"drop {decision.Action}: added {added} of {needed}");
-            return added > 0 ? DropEffectCopy : DropEffectNone;
+            Log.Write($"drop {decision.Action}: added {added.Count} of {needed}");
+            return added.Count > 0 ? DropEffectCopy : DropEffectNone;
         }
         catch (Exception e)
         {
-            Log.Write("drop failed: " + e);
+            Log.Write("drop failed: " + Log.Describe(e));
             return DropEffectNone;
         }
     }
@@ -118,60 +143,83 @@ sealed partial class ShelfService
 
     DropPayload ReadPayload(nint dobj, out List<VirtualDescriptor> descriptors)
     {
-        var paths = OleData.ReadHDrop(dobj).Select(NormalizePath).ToList();
-        descriptors = OleData.ReadDescriptors(dobj);
-        var image = OleData.ImageFormat(dobj);
-        var url = descriptors.Count > 0 ? OleData.ReadUrl(dobj) : null;
+        var paths = Safe(() => OleData.ReadHDrop(dobj), []).Select(NormalizePath).ToList();
+        descriptors = Safe(() => OleData.ReadDescriptors(dobj), []);
+        var image = Safe(() => OleData.ImageFormat(dobj), null);
+        var url = descriptors.Count > 0 ? Safe(() => OleData.ReadUrl(dobj), null) : null;
         bool tdOnly = paths.Count == 0 && descriptors.Count == 0 && image == null && OleData.HasFormat(dobj, "application/x-td-forward");
         return new DropPayload(paths, descriptors.Select(d => new VirtualFileInfo(d.Name, d.Size)).ToList(), url, image, tdOnly);
     }
 
-    int CopyTemps(IReadOnlyList<string> temps)
+    static T Safe<T>(Func<T> read, T fallback)
     {
-        int added = 0;
-        foreach (var src in temps)
-        {
-            try
-            {
-                var path = Materializer.CopyFile(ShelfRoot, src);
-                if (Model.Add(path, ShelfItemKind.Owned) != null) added++;
-                else Materializer.TryDeleteDir(Path.GetDirectoryName(path)!);
-            }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-            {
-                Log.Write("temp copy failed: " + e.GetType().Name);
-            }
-        }
-        return added;
+        try { return read(); }
+        catch (Exception e) { Log.Write("drop data read failed: " + Log.Describe(e)); return fallback; }
     }
 
-    int MaterializeVirtual(nint dobj, List<VirtualDescriptor> descriptors, string? url)
+    /// <summary>Один файл больше лимита отклоняет весь drop (до того, как что-то записано).</summary>
+    static bool HasOversizedFile(DropDecision decision, List<VirtualDescriptor> descriptors)
     {
-        int added = 0;
+        if (decision.Action == DropAction.MaterializeVirtual) return descriptors.Any(d => d.Size > Materializer.MaxFileBytes);
+        foreach (var path in decision.TempPathsToCopy)
+        {
+            try { if (File.Exists(path) && new FileInfo(path).Length > Materializer.MaxFileBytes) return true; }
+            catch (Exception e) { Log.Write("size check failed: " + Log.Describe(e)); }
+        }
+        return false;
+    }
+
+    static void Track(ShelfItem? item, List<ShelfItem> added)
+    {
+        if (item != null) added.Add(item);
+    }
+
+    /// <summary>Добавляет Owned-файл; если стопка вдруг полна — файл не оставляем.</summary>
+    void TrackOwned(string path, List<ShelfItem> added)
+    {
+        var item = Model.Add(path, ShelfItemKind.Owned);
+        if (item != null) added.Add(item);
+        else Materializer.TryDeleteDir(Path.GetDirectoryName(path)!);
+    }
+
+    void Rollback(List<ShelfItem> added)
+    {
+        foreach (var item in added)
+        {
+            Model.Remove(item.Id);
+            if (item.Kind == ShelfItemKind.Owned && IsStrictlyInsideShelf(item.Path))
+                Materializer.TryDeleteDir(Path.GetDirectoryName(item.Path)!);
+        }
+    }
+
+    void CopyTemps(IReadOnlyList<string> temps, List<ShelfItem> added)
+    {
+        foreach (var src in temps)
+        {
+            if (Directory.Exists(src)) { Log.Write("temp directory skipped"); continue; }
+            try { TrackOwned(Materializer.CopyFile(ShelfRoot, src), added); }
+            catch (TooLargeException) { throw; }
+            catch (Exception e) { Log.Write("temp copy failed: " + Log.Describe(e)); }
+        }
+    }
+
+    void MaterializeVirtual(nint dobj, List<VirtualDescriptor> descriptors, string? url, List<ShelfItem> added)
+    {
         foreach (var d in descriptors)
         {
-            if (d.Size > Materializer.MaxFileBytes)
-            {
-                Log.Write("virtual file skipped: declared size over the limit");
-                continue;
-            }
             try
             {
                 var path = Materializer.Materialize(ShelfRoot,
-                    fs => OleData.CopyContents(dobj, d.Index, fs, Materializer.MaxFileBytes),
+                    fs => OleData.CopyContents(dobj, d.Index, fs, Materializer.MaxFileBytes, d.Size),
                     head => FileNaming.ForVirtual(d.Name, url, descriptors.Count, head, DateTime.Now));
-                if (Model.Add(path, ShelfItemKind.Owned) != null) added++;
-                else Materializer.TryDeleteDir(Path.GetDirectoryName(path)!);
+                TrackOwned(path, added);
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-            {
-                Log.Write("virtual file failed: " + e.GetType().Name);
-            }
+            catch (TooLargeException) { throw; }
+            catch (Exception e) { Log.Write("virtual file failed: " + Log.Describe(e)); }
         }
-        return added;
     }
 
-    int MaterializeImage(nint dobj, string format)
+    void MaterializeImage(nint dobj, string format, List<ShelfItem> added)
     {
         try
         {
@@ -184,15 +232,13 @@ sealed partial class ShelfService
                 write = fs => fs.Write(png);
             }
             else write = fs => OleData.CopyImage(dobj, format, fs, Materializer.MaxFileBytes);
-            var path = Materializer.Materialize(ShelfRoot, write, _ => FileNaming.ForImage(ext, DateTime.Now));
-            if (Model.Add(path, ShelfItemKind.Owned) != null) return 1;
-            Materializer.TryDeleteDir(Path.GetDirectoryName(path)!);
+            TrackOwned(Materializer.Materialize(ShelfRoot, write, _ => FileNaming.ForImage(ext, DateTime.Now)), added);
         }
+        catch (TooLargeException) { throw; }
         catch (Exception e)   // WinRT-кодеки бросают COMException/ArgumentException/InvalidOperationException
         {
-            Log.Write("image failed: " + e.GetType().Name);
+            Log.Write("image failed: " + Log.Describe(e));
         }
-        return 0;
     }
 
     void OnChanged()
@@ -203,7 +249,7 @@ sealed partial class ShelfService
     void Persist()
     {
         try { _store.Save(Model.Items); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log.Write("shelf save failed: " + e.GetType().Name); }
+        catch (Exception e) { Log.Write("shelf save failed: " + Log.Describe(e)); }
     }
 
     /// <summary>Удаляет каталоги Shelf\&lt;guid&gt;, на которые не ссылается ни один элемент (остатки сбоя, неснятых выносов).</summary>
@@ -226,9 +272,9 @@ sealed partial class ShelfService
                 Materializer.TryDeleteDir(dir);
             }
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e)
         {
-            Log.Write("orphan sweep failed: " + e.GetType().Name);
+            Log.Write("orphan sweep failed: " + Log.Describe(e));
         }
     }
 
@@ -255,9 +301,9 @@ sealed partial class ShelfService
                 if (IsStrictlyInsideShelf(dir) && Guid.TryParse(Path.GetFileName(dir), out _) && !Directory.EnumerateFileSystemEntries(dir).Any())
                     Directory.Delete(dir);
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            catch (Exception e)
             {
-                Log.Write("owned delete failed: " + e.GetType().Name);
+                Log.Write("owned delete failed: " + Log.Describe(e));
             }
             finally
             {

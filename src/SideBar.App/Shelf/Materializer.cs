@@ -31,6 +31,7 @@ static class Materializer
             var name = FileNaming.Sanitize(chooseName(ReadHead(part)));
             if (string.Equals(name, PartName, StringComparison.OrdinalIgnoreCase)) name = "file";
             var final = Path.Combine(dir, name);
+            if (!IsInside(shelfRoot, final)) throw new IOException("final path escapes the shelf root");
             File.Move(part, final);
             return final;
         }
@@ -81,6 +82,12 @@ static class Materializer
         return buf;
     }
 
+    static bool IsInside(string root, string path)
+    {
+        var r = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root)) + Path.DirectorySeparatorChar;
+        return Path.GetFullPath(path).StartsWith(r, StringComparison.OrdinalIgnoreCase);
+    }
+
     static byte[] ReadHead(string path)
     {
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -92,6 +99,6 @@ static class Materializer
     public static void TryDeleteDir(string dir)
     {
         try { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log.Write("cleanup failed: " + e.GetType().Name); }
+        catch (Exception e) { Log.Write("cleanup failed: " + Log.Describe(e)); }
     }
 }

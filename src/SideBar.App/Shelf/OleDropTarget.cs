@@ -29,7 +29,7 @@ internal sealed partial class ShelfDropTarget(ShelfService shelf, Func<bool> isO
             onDragActive(true);
             _accepts = !isOwnDragActive() && OleData.HasDroppable(dataObj);
         }
-        catch (Exception e) { _accepts = false; Log.Write("DragEnter failed: " + e.GetType().Name); }
+        catch (Exception e) { _accepts = false; Log.Write("DragEnter failed: " + Log.Describe(e)); }
         effect = _accepts ? effect & Copy : 0;
         return 0;
     }
@@ -38,7 +38,7 @@ internal sealed partial class ShelfDropTarget(ShelfService shelf, Func<bool> isO
     {
         bool own = false;
         try { own = isOwnDragActive(); }
-        catch (Exception e) { Log.Write("DragOver failed: " + e.GetType().Name); }
+        catch (Exception e) { Log.Write("DragOver failed: " + Log.Describe(e)); }
         effect = _accepts && !own ? effect & Copy : 0;
         return 0;
     }
@@ -47,7 +47,7 @@ internal sealed partial class ShelfDropTarget(ShelfService shelf, Func<bool> isO
     {
         _accepts = false;
         try { onDragActive(false); }
-        catch (Exception e) { Log.Write("DragLeave failed: " + e.GetType().Name); }
+        catch (Exception e) { Log.Write("DragLeave failed: " + Log.Describe(e)); }
         return 0;
     }
 
@@ -58,10 +58,10 @@ internal sealed partial class ShelfDropTarget(ShelfService shelf, Func<bool> isO
         {
             if (_accepts && !isOwnDragActive() && (effect & Copy) != 0) result = shelf.AcceptDrop(dataObj);
         }
-        catch (Exception e) { Log.Write("Drop failed: " + e.GetType().Name); }
+        catch (Exception e) { Log.Write("Drop failed: " + Log.Describe(e)); }
         _accepts = false;
         try { onDragActive(false); }
-        catch (Exception e) { Log.Write("Drop failed: " + e.GetType().Name); }
+        catch (Exception e) { Log.Write("Drop failed: " + Log.Describe(e)); }
         effect = result;
         return 0;
     }
@@ -73,6 +73,7 @@ static unsafe partial class OleDropTarget
     [LibraryImport("ole32.dll")] private static partial int RegisterDragDrop(nint hwnd, nint target);
     [LibraryImport("ole32.dll")] private static partial int RevokeDragDrop(nint hwnd);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static partial bool EnumChildWindows(nint hwnd, nint proc, nint lparam);
+    [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static partial bool IsWindow(nint hwnd);
 
     static readonly Guid IID_IDropTarget = new("00000122-0000-0000-C000-000000000046");
 
@@ -80,40 +81,55 @@ static unsafe partial class OleDropTarget
     /// Регистрирует IDropTarget на верхнем окне и всех его дочерних окнах (WinUI сама регистрирует свои цели на дочерних,
     /// мы их заменяем: карточке нужен только наш приём). Вызывать на UI-потоке после создания содержимого окна.
     /// </summary>
-    public static IDisposable Register(nint topHwnd, ShelfService shelf, Func<bool> isOwnDragActive, Action<bool> onDragActive)
+    public static DropRegistration Register(nint topHwnd, ShelfService shelf, Func<bool> isOwnDragActive, Action<bool> onDragActive)
     {
-        var windows = new List<nint> { topHwnd };
-        var handle = GCHandle.Alloc(windows);
-        try { EnumChildWindows(topHwnd, (nint)(delegate* unmanaged[Stdcall]<nint, nint, int>)&EnumCb, GCHandle.ToIntPtr(handle)); }
-        finally { handle.Free(); }
-
         int hrInit = OleInitialize(0);   // S_OK / S_FALSE (уже инициализировано) — оба годятся
         var wrappers = new StrategyBasedComWrappers();
         var target = new ShelfDropTarget(shelf, isOwnDragActive, onDragActive);
         nint unk = wrappers.GetOrCreateComInterfaceForObject(target, CreateComInterfaceFlags.None);
         Marshal.QueryInterface(unk, in IID_IDropTarget, out nint dt);
-
-        var registered = new List<nint>();
-        foreach (var h in windows)
-        {
-            RevokeDragDrop(h);
-            int hr = RegisterDragDrop(h, dt);
-            if (hr == 0) registered.Add(h);
-            else Log.Write($"RegisterDragDrop failed: 0x{hr:X}");
-        }
-        Log.Write($"drop target registered on {registered.Count} of {windows.Count} window(s), OleInitialize 0x{hrInit:X}");
-        return new Registration(registered, unk, dt, target);
+        var reg = new DropRegistration(topHwnd, unk, dt, target);
+        reg.Refresh();
+        Log.Write($"OleInitialize 0x{hrInit:X}");
+        return reg;
     }
 
-    sealed class Registration(List<nint> windows, nint unk, nint dt, ShelfDropTarget keepAlive) : IDisposable
+    internal sealed class DropRegistration(nint top, nint unk, nint dt, ShelfDropTarget keepAlive) : IDisposable
     {
+        readonly HashSet<nint> _registered = [];
         bool _disposed;
+
+        /// <summary>
+        /// Идемпотентно: окна, уже занятые нами, не трогаем; новые (WinUI пересоздаёт дочерние HWND при смене DPI/дисплея)
+        /// получают нашу цель вместо чужой. Мёртвые HWND забываются.
+        /// </summary>
+        public void Refresh()
+        {
+            if (_disposed) return;
+            _registered.RemoveWhere(h => !IsWindow(h));
+            var windows = new List<nint> { top };
+            var handle = GCHandle.Alloc(windows);
+            try { EnumChildWindows(top, (nint)(delegate* unmanaged[Stdcall]<nint, nint, int>)&EnumCb, GCHandle.ToIntPtr(handle)); }
+            finally { handle.Free(); }
+
+            int added = 0;
+            foreach (var h in windows)
+            {
+                if (_registered.Contains(h)) continue;
+                RevokeDragDrop(h);
+                int hr = RegisterDragDrop(h, dt);
+                if (hr == 0) { _registered.Add(h); added++; }
+                else Log.Write($"RegisterDragDrop failed: 0x{hr:X}");
+            }
+            Log.Write($"drop target: +{added} window(s), {_registered.Count} of {windows.Count} registered");
+        }
 
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
-            foreach (var h in windows) RevokeDragDrop(h);
+            foreach (var h in _registered) RevokeDragDrop(h);
+            _registered.Clear();
             Marshal.Release(dt);
             Marshal.Release(unk);
             GC.KeepAlive(keepAlive);

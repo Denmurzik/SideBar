@@ -6,10 +6,16 @@ namespace SideBar;
 static class Log
 {
     static readonly object Gate = new();
-    static readonly string PathName = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "SideBar", "sidebar.log");
+    // SIDEBAR_DATA_DIR (автотест) уводит и лог в свой каталог, чтобы не трогать лог настоящего экземпляра
+    static readonly string PathName = Environment.GetEnvironmentVariable("SIDEBAR_DATA_DIR") is { Length: > 0 } dataDir
+        ? System.IO.Path.Combine(dataDir, "log", "sidebar.log")
+        : System.IO.Path.Combine(System.IO.Path.GetTempPath(), "SideBar", "sidebar.log");
     const long MaxBytes = 1 << 20;
 
     public static string FilePath => PathName;
+
+    /// <summary>Тип и HResult без Message/ToString: в них бывают пути файлов.</summary>
+    public static string Describe(Exception e) => $"{e.GetType().Name} 0x{e.HResult:X8}";
 
     public static void Write(string message)
     {

@@ -42,13 +42,13 @@ sealed class Driver
 
     readonly string _exe;
     readonly string _work = Path.Combine(Path.GetTempPath(), "SideBarDrive");
-    readonly string _dataDir, _shelfJson, _shelfRoot, _reportPath;
-    readonly string _appLog = Path.Combine(Path.GetTempPath(), "SideBar", "sidebar.log");
-    readonly string _srcDir = Path.Combine(AppContext.BaseDirectory, "drive-src");
+    readonly string _dataDir, _shelfJson, _shelfRoot, _reportPath, _appLog;
+        readonly string _srcDir = Path.Combine(AppContext.BaseDirectory, "drive-src");
     readonly Rectangle _scr = Screen.PrimaryScreen!.Bounds;
     readonly List<string> _report = [];
     Form _src = null!, _other = null!;
-    volatile DataObject? _pending;
+    volatile object? _pending;
+    string _lastLog = "";
     string _lastEffect = "";
     int _fail;
     Process? _app;
@@ -61,6 +61,7 @@ sealed class Driver
         _shelfJson = Path.Combine(_dataDir, "shelf.json");
         _shelfRoot = Path.Combine(_dataDir, "Shelf");
         _reportPath = Path.Combine(_work, "report.txt");
+        _appLog = Path.Combine(_dataDir, "log", "sidebar.log");   // лог изолирован SIDEBAR_DATA_DIR: настоящий %TEMP%\SideBar\sidebar.log не трогаем
     }
 
     public int Run()
@@ -219,10 +220,39 @@ sealed class Driver
         // T10: неподдерживаемое содержимое (только текст) -> DROPEFFECT_NONE, стопка не меняется
         var text = new DataObject();
         text.SetData(DataFormats.UnicodeText, "plain text");
-        DragToPanel(text, W, H);
+        bool opened = DragToPanel(text, W, H);
         Thread.Sleep(500);
         s = ReadShelf();
-        Check("T10 text-only drag -> rejected (effect None), shelf unchanged", _lastEffect == "None" && s.Count == 8, $"effect={_lastEffect}; " + Dump(s));
+        Check("T10 text-only drag -> rejected (effect None), shelf unchanged", opened && _lastEffect == "None" && s.Count == 8, $"effect={_lastEffect}; " + Dump(s));
+
+        // T3b: FileContents как TYMED_ISTREAM (ветка потокового чтения кусками), 3.5 МиБ
+        var streamBytes = new byte[(1 << 20) * 7 / 2 + 77];
+        new Random(2).NextBytes(streamBytes);
+        DragToPanel(new IStreamSource([("stream.bin", streamBytes, streamBytes.Length)]), W, H);
+        s = WaitShelf(x => x.Count == 9);
+        var st = s.Count == 9 ? s[8] : null;
+        Check("T3b FileContents via TYMED_ISTREAM -> [owned] item, same SHA-256, app saw tymed 4",
+            st != null && st.Kind == Owned && st.Name == "stream.bin" && InShelf(st.Path) && SameBytes(st.Path, streamBytes) && NoPartFiles()
+            && _lastLog.Contains("FileContents tymed 4"), Dump(s) + "\n" + _lastLog);
+
+        // T3c: один из файлов объявлен 3 ГиБ -> отклоняется весь drop, ничего не записано
+        int dirs = ShelfDirs();
+        bool opened2 = DragToPanel(new IStreamSource([("ok.bin", [1, 2, 3], 3), ("huge.bin", [4, 5, 6], 3L << 30)]), W, H);
+        Thread.Sleep(500);
+        s = ReadShelf();
+        Check("T3c multi-file drop with one declared size over 2 GiB -> whole drop rejected, nothing written",
+            opened2 && _lastEffect == "None" && s.Count == 9 && ShelfDirs() == dirs && NoPartFiles(), $"effect={_lastEffect}; " + Dump(s));
+
+        // T8b: каталог -> элемент-ссылка
+        var folder = Path.Combine(_srcDir, "folder1");
+        Directory.CreateDirectory(folder);
+        File.WriteAllText(Path.Combine(folder, "inside.txt"), "x");
+        var dirDrop = new DataObject();
+        dirDrop.SetData(DataFormats.FileDrop, new[] { folder });
+        DragToPanel(dirDrop, W, H);
+        s = WaitShelf(x => x.Count == 10);
+        Check("T8b folder drop -> [reference] item to the directory, contents untouched",
+            s.Count == 10 && s[9].Kind == Reference && s[9].Path.TrimEnd('\\').Equals(folder, StringComparison.OrdinalIgnoreCase) && Directory.Exists(folder), Dump(s));
 
         // T11: перезапуск — стопка восстановлена из shelf.json, пропавшая ссылка выпала, осиротевший <guid> удалён
         var before = ReadShelf();
@@ -238,7 +268,7 @@ sealed class Driver
         var after = ReadShelf();
         var expected = before.Where(x => !x.Path.Equals(c, StringComparison.OrdinalIgnoreCase)).ToList();
         Check("T11 restart: shelf restored from shelf.json (same ids/order), vanished reference pruned, owned files intact",
-            restarted && after.Select(x => x.Id).SequenceEqual(expected.Select(x => x.Id)) && after.Count == 7
+            restarted && after.Select(x => x.Id).SequenceEqual(expected.Select(x => x.Id)) && after.Count == 9
             && after.Where(x => x.Kind == Owned).All(x => File.Exists(x.Path)), $"before={before.Count} after={after.Count}\n" + Dump(after));
         Check("T11b restart: orphan Shelf\\<guid> removed, non-guid folder kept",
             !Directory.Exists(orphan) && Directory.Exists(foreign), $"orphanExists={Directory.Exists(orphan)} foreignExists={Directory.Exists(foreign)}");
@@ -280,7 +310,8 @@ sealed class Driver
     static string Dump(List<ShelfEntry> s) => string.Join("\n", s.Select(x => $"  [{(x.Kind == Owned ? "owned" : "reference")}] {x.Name} <- {x.Path}"));
 
     // ---- drag ----
-    void DragToPanel(DataObject data, int W, int H)
+    /// <summary>false (и FAIL в отчёте), если карточка не открылась и drag отменён.</summary>
+    bool DragToPanel(object data, int W, int H)
     {
         _lastEffect = "";
         _pending = data;
@@ -296,15 +327,18 @@ sealed class Driver
         {
             keybd_event(0x1B, 0, 0, 0); keybd_event(0x1B, 0, 2, 0);   // Esc: отмена вместо drop'а на то, что под курсором
             Mouse(0x0004); Thread.Sleep(500);
-            Rep("    card did not open; drag cancelled");
-            return;
+            Rep("FAIL card did not open; drag cancelled");
+            _fail++;
+            return false;
         }
         Thread.Sleep(700);                               // пружина успокаивается
         MoveTo(W - (int)((8 + 108) * _scale), H, 300); Thread.Sleep(400);   // центр карточки
         Mouse(0x0004);                                   // ЛКМ вверх -> drop
         Thread.Sleep(1200);
         MoveTo(W - 700, H, 200); Thread.Sleep(500);      // уходим: карточка закроется, следующий drag откроет её заново
+        _lastLog = AppLog();
         try { File.Delete(_appLog); } catch { }          // чтобы "edge Open" в следующий раз был свежим
+        return true;
     }
 
     static DataObject MakeVirtual(string name, byte[] content)
@@ -368,4 +402,73 @@ sealed class Driver
     }
 
     void Rep(string s) { lock (_report) _report.Add(s); }
+}
+
+/// <summary>
+/// IDataObject, отдающий FileContents как TYMED_ISTREAM (так делают браузеры и мессенджеры; WinForms DataObject отдаёт HGLOBAL).
+/// Размер в дескрипторе задаётся отдельно, чтобы проверять отказ по заявленному размеру.
+/// </summary>
+sealed class IStreamSource : System.Runtime.InteropServices.ComTypes.IDataObject
+{
+    [DllImport("shlwapi.dll")] static extern nint SHCreateMemStream(byte[] init, uint cb);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint RegisterClipboardFormatW(string name);
+    [DllImport("kernel32.dll")] static extern nint GlobalAlloc(uint flags, nuint size);
+    [DllImport("kernel32.dll")] static extern nint GlobalLock(nint h);
+    [DllImport("kernel32.dll")] static extern bool GlobalUnlock(nint h);
+
+    const int TYMED_HGLOBAL = 1, TYMED_ISTREAM = 4;
+    const int DV_E_FORMATETC = unchecked((int)0x80040064);
+
+    readonly (string Name, byte[] Data, long Declared)[] _files;
+    readonly short _cfDescriptor = (short)RegisterClipboardFormatW("FileGroupDescriptorW");
+    readonly short _cfContents = (short)RegisterClipboardFormatW("FileContents");
+
+    public IStreamSource((string, byte[], long)[] files) => _files = files;
+
+    public int QueryGetData(ref System.Runtime.InteropServices.ComTypes.FORMATETC f)
+    {
+        if (f.cfFormat == _cfDescriptor && ((int)f.tymed & TYMED_HGLOBAL) != 0) return 0;
+        if (f.cfFormat == _cfContents && ((int)f.tymed & TYMED_ISTREAM) != 0 && f.lindex >= 0 && f.lindex < _files.Length) return 0;
+        return DV_E_FORMATETC;
+    }
+
+    public void GetData(ref System.Runtime.InteropServices.ComTypes.FORMATETC f, out System.Runtime.InteropServices.ComTypes.STGMEDIUM m)
+    {
+        m = default;
+        if (f.cfFormat == _cfDescriptor && ((int)f.tymed & TYMED_HGLOBAL) != 0)
+        {
+            var fgd = new byte[4 + 592 * _files.Length];
+            BitConverter.GetBytes(_files.Length).CopyTo(fgd, 0);
+            for (int i = 0; i < _files.Length; i++)
+            {
+                int o = 4 + i * 592;
+                BitConverter.GetBytes(0x40).CopyTo(fgd, o);                                         // FD_FILESIZE
+                BitConverter.GetBytes((uint)(_files[i].Declared >> 32)).CopyTo(fgd, o + 64);
+                BitConverter.GetBytes((uint)_files[i].Declared).CopyTo(fgd, o + 68);
+                Encoding.Unicode.GetBytes(_files[i].Name).CopyTo(fgd, o + 72);
+            }
+            nint h = GlobalAlloc(0x2, (nuint)fgd.Length);   // GMEM_MOVEABLE
+            Marshal.Copy(fgd, 0, GlobalLock(h), fgd.Length);
+            GlobalUnlock(h);
+            m.tymed = System.Runtime.InteropServices.ComTypes.TYMED.TYMED_HGLOBAL;
+            m.unionmember = h;
+            return;
+        }
+        if (f.cfFormat == _cfContents && ((int)f.tymed & TYMED_ISTREAM) != 0 && f.lindex >= 0 && f.lindex < _files.Length)
+        {
+            var data = _files[f.lindex].Data;
+            m.tymed = System.Runtime.InteropServices.ComTypes.TYMED.TYMED_ISTREAM;
+            m.unionmember = SHCreateMemStream(data, (uint)data.Length);
+            return;
+        }
+        Marshal.ThrowExceptionForHR(DV_E_FORMATETC);
+    }
+
+    public void GetDataHere(ref System.Runtime.InteropServices.ComTypes.FORMATETC f, ref System.Runtime.InteropServices.ComTypes.STGMEDIUM m) => throw new NotImplementedException();
+    public int GetCanonicalFormatEtc(ref System.Runtime.InteropServices.ComTypes.FORMATETC a, out System.Runtime.InteropServices.ComTypes.FORMATETC b) { b = a; b.ptd = 0; return 0x40130; }
+    public void SetData(ref System.Runtime.InteropServices.ComTypes.FORMATETC f, ref System.Runtime.InteropServices.ComTypes.STGMEDIUM m, bool release) => Marshal.ThrowExceptionForHR(DV_E_FORMATETC);
+    public System.Runtime.InteropServices.ComTypes.IEnumFORMATETC EnumFormatEtc(System.Runtime.InteropServices.ComTypes.DATADIR d) => throw new NotImplementedException();
+    public int DAdvise(ref System.Runtime.InteropServices.ComTypes.FORMATETC f, System.Runtime.InteropServices.ComTypes.ADVF a, System.Runtime.InteropServices.ComTypes.IAdviseSink s, out int c) { c = 0; return unchecked((int)0x80040003); }
+    public void DUnadvise(int c) => throw new NotImplementedException();
+    public int EnumDAdvise(out System.Runtime.InteropServices.ComTypes.IEnumSTATDATA e) { e = null!; return unchecked((int)0x80040003); }
 }

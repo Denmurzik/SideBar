@@ -21,6 +21,8 @@ static unsafe partial class OleData
     [LibraryImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static partial bool GlobalUnlock(nint h);
     [LibraryImport("kernel32.dll")] private static partial nuint GlobalSize(nint h);
 
+    [LibraryImport("kernel32.dll")] private static partial int MultiByteToWideChar(uint codePage, uint flags, byte* src, int srcLen, char* dst, int dstLen);
+
     const int TYMED_HGLOBAL = 1, TYMED_ISTREAM = 4;
     const uint CF_HDROP = 15, CF_DIB = 8, CF_DIBV5 = 17;
     const int Chunk = 1 << 20;
@@ -28,7 +30,7 @@ static unsafe partial class OleData
     const int FD_FILESIZE = 0x40, FD_ATTRIBUTES = 0x4;
     const int FILE_ATTRIBUTE_DIRECTORY = 0x10;
     /// <summary>DIB целиком читается в память для конвертации в PNG; больше — не картинка из мессенджера.</summary>
-    const long MaxDibBytes = 512L << 20;
+    const long MaxDibBytes = 128L << 20;
 
     static readonly uint CF_FILEDESCRIPTORW = RegisterClipboardFormat("FileGroupDescriptorW");
     static readonly uint CF_FILECONTENTS = RegisterClipboardFormat("FileContents");
@@ -90,12 +92,27 @@ static unsafe partial class OleData
             int off = BitConverter.ToInt32(b, 0);
             bool wide = BitConverter.ToInt32(b, 16) != 0;
             if (off < 20 || off > b.Length) return res;
-            var text = wide ? Encoding.Unicode.GetString(b, off, b.Length - off) : Encoding.Default.GetString(b, off, b.Length - off);
+            var text = wide ? Encoding.Unicode.GetString(b, off, b.Length - off) : DecodeAnsi(b, off);
             foreach (var part in text.Split('\0'))
                 if (part.Length > 0) res.Add(part);
         }
         finally { ReleaseStgMedium(&m); }
         return res;
+    }
+
+    /// <summary>ANSI DROPFILES: системная кодовая страница (CP_ACP = 0), а не UTF-8 по умолчанию .NET.</summary>
+    static string DecodeAnsi(byte[] b, int off)
+    {
+        int len = b.Length - off;
+        if (len <= 0) return "";
+        fixed (byte* src = &b[off])
+        {
+            int n = MultiByteToWideChar(0, 0, src, len, null, 0);
+            if (n <= 0) return "";
+            var chars = new char[n];
+            fixed (char* dst = chars) n = MultiByteToWideChar(0, 0, src, len, dst, n);
+            return new string(chars, 0, Math.Max(n, 0));
+        }
     }
 
     /// <summary>FILEGROUPDESCRIPTORW: UINT cItems; FILEDESCRIPTORW[cItems] (592 байта: флаги 0, атрибуты 36, размер 64/68, имя 72). Каталоги пропускаются.</summary>
@@ -122,13 +139,15 @@ static unsafe partial class OleData
 
     /// <summary>
     /// Содержимое виртуального файла: IStream читается кусками по 1 МиБ прямо в <paramref name="dest"/>, HGLOBAL пишется кусками.
-    /// Превышение <paramref name="limit"/> — <see cref="TooLargeException"/>.
+    /// Превышение <paramref name="limit"/> — <see cref="TooLargeException"/>. <paramref name="declaredSize"/> (>= 0) обрезает HGLOBAL:
+    /// GlobalSize бывает больше данных, хвост был бы мусором.
     /// </summary>
-    public static void CopyContents(nint dobj, int index, Stream dest, long limit)
+    public static void CopyContents(nint dobj, int index, Stream dest, long limit, long declaredSize)
     {
         if (!GetData(dobj, CF_FILECONTENTS, index, TYMED_HGLOBAL | TYMED_ISTREAM, out var m))
             throw new IOException("FileContents is not available");
-        try { CopyMedium(m, dest, limit); }
+        Log.Write($"FileContents tymed {m.tymed}");
+        try { CopyMedium(m, dest, limit, declaredSize); }
         finally { ReleaseStgMedium(&m); }
     }
 
@@ -139,7 +158,7 @@ static unsafe partial class OleData
         {
             if (f != format) continue;
             if (!GetData(dobj, cf, -1, TYMED_HGLOBAL | TYMED_ISTREAM, out var m)) throw new IOException("image data is not available");
-            try { CopyMedium(m, dest, limit); }
+            try { CopyMedium(m, dest, limit, -1); }
             finally { ReleaseStgMedium(&m); }
             return;
         }
@@ -218,11 +237,12 @@ static unsafe partial class OleData
         finally { GlobalUnlock(h); }
     }
 
-    static void CopyMedium(STGMEDIUM m, Stream dest, long limit)
+    static void CopyMedium(STGMEDIUM m, Stream dest, long limit, long declaredSize)
     {
         if (m.tymed == TYMED_HGLOBAL)
         {
             long size = (long)GlobalSize(m.pData);
+            if (declaredSize >= 0 && declaredSize < size) size = declaredSize;
             if (size > limit) throw new TooLargeException("HGLOBAL");
             var p = GlobalLock(m.pData);
             if (p == 0) throw new IOException("GlobalLock failed");
