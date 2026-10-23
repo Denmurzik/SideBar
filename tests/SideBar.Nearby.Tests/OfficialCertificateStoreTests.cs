@@ -387,6 +387,29 @@ public class OfficialCertificateStoreTests : IDisposable
     }
 
     [Fact]
+    public void Watcher_buffer_overflow_keeps_the_watcher_and_only_reloads()
+    {
+        var pc = NewDevice("PC");
+        WriteSharingDir(Dir, [pc.Private], [pc.Public]);
+        using var store = NewStore();
+        var raised = 0;
+        store.FilesChanged += () => Interlocked.Increment(ref raised);
+        store.StartWatching();
+        var debounce = _timers.Timers[0];
+        var expiry = _timers.Timers[1];
+
+        store.OnWatcherError(new InternalBufferOverflowException());
+        Assert.Equal(TimeSpan.FromSeconds(2), debounce.Due);
+        debounce.Fire();
+        Assert.Equal(1, raised);
+        debounce.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+
+        // The watcher is still alive, so the tick has nothing to recreate and schedules no extra reload.
+        expiry.Fire();
+        Assert.Equal(Timeout.InfiniteTimeSpan, debounce.Due);
+    }
+
+    [Fact]
     public void Watcher_error_drops_the_watcher_and_the_next_tick_recreates_it_and_reloads()
     {
         var pc = NewDevice("PC");
@@ -398,7 +421,7 @@ public class OfficialCertificateStoreTests : IDisposable
         var debounce = _timers.Timers[0];
         var expiry = _timers.Timers[1];
 
-        store.OnWatcherError();
+        store.OnWatcherError(new IOException());
         Assert.Equal(TimeSpan.FromSeconds(2), debounce.Due);
         debounce.Fire();
         Assert.Equal(1, raised);

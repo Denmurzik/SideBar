@@ -18,8 +18,8 @@ public class SyntheticCertsDirTool
     public void Writes_synthetic_sharing_dirs()
     {
         var root = Path.GetFullPath(Environment.GetEnvironmentVariable(Variable)!);
-        // Lexical check on the full path; %TEMP% is the only place the tool writes to (no UNC, junction or SUBST tricks
-        // into the real Google data directory).
+        // Lexical check on the full path only: %TEMP% is the only place the tool is meant to write to. It does not
+        // resolve junctions or SUBST drives; the target must also be new or empty.
         var temp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
         Assert.True(
             root.StartsWith(temp + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase),

@@ -163,7 +163,7 @@ public sealed class OfficialCertificateStore(
             watcher.Created += OnFileEvent;
             watcher.Deleted += OnFileEvent;
             watcher.Renamed += (s, e) => OnFileEvent(s, e);
-            watcher.Error += (_, _) => OnWatcherError();
+            watcher.Error += (_, e) => OnWatcherError(e.GetException());
             watcher.EnableRaisingEvents = true;
             _watcher = watcher;
         }
@@ -173,15 +173,19 @@ public sealed class OfficialCertificateStore(
         }
     }
 
-    // The watched directory was deleted or recreated, or the buffer overflowed: the watcher may be dead. Drop it so the
+    // The watched directory was deleted or recreated, or another error except a buffer overflow: the watcher may be dead. Drop it so the
     // next expiry tick recreates it and reloads once.
-    internal void OnWatcherError()
+    internal void OnWatcherError(Exception? error)
     {
         lock (_gate)
         {
             if (_disposed) return;
-            _watcher?.Dispose();
-            _watcher = null;
+            // A buffer overflow only loses events: the watcher keeps working, a reload is enough.
+            if (error is not InternalBufferOverflowException)
+            {
+                _watcher?.Dispose();
+                _watcher = null;
+            }
         }
         NotifyFilesChanged();
     }
