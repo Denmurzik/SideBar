@@ -52,7 +52,8 @@ public sealed class VerifiedTests : IDisposable
 
     // Real SendSession against real ReceiveSession.
     private async Task<(TransferResult Send, TransferResult Receive, IncomingTransfer? Offer, bool Asked)> RunPairAsync(
-        IShareIdentity senderIdentity, EndpointInfo? senderRemote, IShareIdentity receiverIdentity, bool rejectUnverified)
+        IShareIdentity senderIdentity, EndpointInfo? senderRemote, IShareIdentity receiverIdentity, bool rejectUnverified,
+        bool requireVerifiedPeer = false)
     {
         using var cts = Timeout();
         using var link = await Link.OpenAsync(cts.Token);
@@ -62,7 +63,7 @@ public sealed class VerifiedTests : IDisposable
             link.Server, new SessionOptions("My PC", Identity: receiverIdentity) { RejectUnverified = rejectUnverified }, _out,
             (o, _) => { asked = true; offer = o; return Task.FromResult(true); }, ct: cts.Token);
         var send = await SendSession.SendFilesAsync(
-            link.Client, new SessionOptions("Sender", Identity: senderIdentity) { RemoteEndpointInfo = senderRemote },
+            link.Client, new SessionOptions("Sender", Identity: senderIdentity) { RemoteEndpointInfo = senderRemote, RequireVerifiedPeer = requireVerifiedPeer },
             [_file], ct: cts.Token);
         return (send, await receive, offer, asked);
     }
@@ -337,5 +338,34 @@ public sealed class VerifiedTests : IDisposable
         Assert.Equal(TransferStatus.RejectedByPeer, result.Status);
         Assert.Equal("unverified", result.Detail);
         Assert.False(asked);
+    }
+
+    [Fact]
+    public async Task Required_verified_peer_sends_nothing_when_an_own_advertisement_was_replayed()
+    {
+        var pair = new OwnPair();
+        // The stranger copied the PC's advertisement (so the sender marks it as own) but holds another key.
+        var replayed = pair.Pc.CreateEndpointInfo("x", DeviceKind.Laptop);
+
+        var (send, receive, _, asked) = await RunPairAsync(
+            pair.Phone, replayed, Stranger(), rejectUnverified: false, requireVerifiedPeer: true);
+
+        Assert.Equal(TransferStatus.Failed, send.Status);
+        Assert.Equal(TransferDetails.Unverified, send.Detail);
+        Assert.False(asked);                                   // the Introduction never reached the receiver
+        Assert.Equal(TransferStatus.CancelledByPeer, receive.Status);
+        Assert.DoesNotContain(Directory.GetFiles(_out, "*", SearchOption.AllDirectories), f => !f.EndsWith("src.bin"));
+    }
+
+    [Fact]
+    public async Task Required_verified_peer_still_sends_to_the_real_own_device()
+    {
+        var pair = new OwnPair();
+
+        var (send, _, offer, _) = await RunPairAsync(
+            pair.Phone, pair.Pc.CreateEndpointInfo("x", DeviceKind.Laptop), pair.Pc, rejectUnverified: false, requireVerifiedPeer: true);
+
+        Assert.Equal(TransferStatus.Completed, send.Status);
+        Assert.True(offer!.Verified);
     }
 }

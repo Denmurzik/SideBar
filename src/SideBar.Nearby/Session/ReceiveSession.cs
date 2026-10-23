@@ -143,7 +143,7 @@ public static class ReceiveSession
                             {
                                 await connection.SendSharingAsync(SharingFrames.Response(
                                     Share.ConnectionResponseFrame.Types.Status.Reject), ct);
-                                return new TransferResult(TransferStatus.RejectedByPeer, saved, "unverified");
+                                return new TransferResult(TransferStatus.RejectedByPeer, saved, TransferDetails.Unverified);
                             }
                             var files = introduction.FileMetadata;
                             var announcedTexts = introduction.TextMetadata;

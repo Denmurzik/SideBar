@@ -184,4 +184,31 @@ public class VisibilityModelTests
         Assert.False(m.ShouldListen(NetworkCategory.Public));
         Assert.False(m.ShouldListen(NetworkCategory.Unknown));
     }
+
+    [Fact]
+    public void Certificates_are_used_in_own_devices_and_everyone_but_only_own_devices_rejects_unverified()
+    {
+        var m = new VisibilityModel(ownDevicesAvailable: true);
+        Assert.True(m.UsesCertificates);
+        Assert.True(m.RejectsUnverified);
+        Assert.False(m.AdvertisesName);
+
+        m.Select(Visibility.Everyone, T0);
+        Assert.True(m.UsesCertificates);
+        Assert.False(m.RejectsUnverified);
+        Assert.True(m.AdvertisesName);
+
+        m.Select(Visibility.Hidden, T0);
+        Assert.False(m.UsesCertificates);
+    }
+
+    [Fact]
+    public void Everyone_without_certificates_is_anonymous_and_asks()
+    {
+        var m = new VisibilityModel(ownDevicesAvailable: false);
+        m.Select(Visibility.Everyone, T0);
+        Assert.False(m.UsesCertificates);
+        Assert.False(m.RejectsUnverified);
+        Assert.True(m.AdvertisesName);
+    }
 }

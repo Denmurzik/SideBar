@@ -41,6 +41,20 @@ public class CertificateIdentityTests
     }
 
     [Fact]
+    public void Named_endpoint_info_for_everyone_carries_the_name_and_is_still_recognised()
+    {
+        var (a, b) = Pair();
+
+        var info = a.CreateEndpointInfo("My PC", DeviceKind.Laptop, named: true);
+
+        Assert.False(info.Hidden);
+        Assert.Equal("My PC", info.Name);
+        Assert.True(EndpointInfo.TryDecode(info.Encode(), out var decoded));
+        Assert.Equal("My PC", decoded!.Name);
+        Assert.True(b.Identify(decoded));
+    }
+
+    [Fact]
     public void Endpoint_info_in_own_devices_has_no_name()
     {
         var (a, _) = Pair();

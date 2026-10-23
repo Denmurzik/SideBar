@@ -10,12 +10,21 @@ namespace SideBar.Sharing;
 sealed class IdentityProvider : IDisposable
 {
     readonly OfficialCertificateStore _store;
+    readonly object _loadGate = new();   // загрузки применяются по порядку: старый результат не затирает новый
     volatile CertificateIdentity? _current;
+    volatile bool _failed;
+    CertLoadFailure _failure;            // под _loadGate; читается через Failure
 
     /// <summary>Поднимается на потоке пула после перезагрузки (успешной или нет). Подписчик читает <see cref="Current"/>.</summary>
     public event Action? Changed;
 
     public CertificateIdentity? Current => _current;
+
+    /// <summary>Причина последней неудачи (null — сертификаты загружены).</summary>
+    public CertLoadFailure? Failure
+    {
+        get { lock (_loadGate) return _failed ? _failure : null; }
+    }
 
     public IdentityProvider()
     {
@@ -47,23 +56,31 @@ sealed class IdentityProvider : IDisposable
 
     void Load()
     {
-        try
+        lock (_loadGate)
         {
-            if (_store.TryLoad(out var identity, out var failure))
+            try
             {
-                _current = identity;
-                Log.Write($"certs loaded peers={_store.Summary?.PeerCount}");
+                if (_store.TryLoad(out var identity, out var failure))
+                {
+                    _current = identity;
+                    _failed = false;
+                    Log.Write($"certs loaded peers={_store.Summary?.PeerCount}");
+                }
+                else
+                {
+                    _current = null;
+                    _failure = failure ?? CertLoadFailure.Unreadable;
+                    _failed = true;
+                    Log.Write($"certs unavailable {failure}");
+                }
             }
-            else
+            catch (Exception e)
             {
                 _current = null;
-                Log.Write($"certs unavailable {failure}");
+                _failure = CertLoadFailure.Unreadable;
+                _failed = true;
+                Log.Write("certs load failed: " + Log.Describe(e));
             }
-        }
-        catch (Exception e)
-        {
-            _current = null;
-            Log.Write("certs load failed: " + Log.Describe(e));
         }
     }
 

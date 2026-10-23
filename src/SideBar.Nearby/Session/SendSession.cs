@@ -118,6 +118,12 @@ public static class SendSession
 
                 if (!introduced && gotKeyEncryption && gotKeyResult)
                 {
+                    if (options.RequireVerifiedPeer && !peerVerified)
+                    {
+                        // The advertisement looked like one of our devices, the key did not prove it: nothing about the files leaves.
+                        if (!connection.WriteFaulted) await TrySendCancelAsync(connection);
+                        return new TransferResult(TransferStatus.Failed, [], TransferDetails.Unverified);
+                    }
                     introduced = true;
                     await connection.SendSharingAsync(SharingFrames.Introduction(entries.Select(e => e.Metadata), texts.Select(t => t.Metadata)), ct);
                     observer.Status("Introduction sent, waiting for the receiver to accept...");

@@ -12,7 +12,7 @@ sealed unsafe class TrayIcon : IDisposable
     const uint NOTIFYICON_VERSION_4 = 4;
     const uint CallbackMessage = 0x8001;   // WM_APP + 1
     const uint WM_CONTEXTMENU = 0x7B, WM_NULL = 0;
-    const uint MF_STRING = 0, MF_CHECKED = 8, MF_GRAYED = 1, MF_BYCOMMAND = 0;
+    const uint MF_STRING = 0, MF_CHECKED = 8, MF_GRAYED = 1, MF_BYCOMMAND = 0, MF_SEPARATOR = 0x800;
     const uint TPM_RIGHTBUTTON = 2, TPM_BOTTOMALIGN = 0x20, TPM_RETURNCMD = 0x100;
     const int SM_CXSMICON = 49;
     const int CmdAutostart = 1, CmdExit = 2, CmdHidden = 3, CmdOwnDevices = 4, CmdEveryone = 5;   // 3..5 — радиогруппа видимости
@@ -37,7 +37,7 @@ sealed unsafe class TrayIcon : IDisposable
     [DllImport("shell32.dll")] static extern bool Shell_NotifyIconW(uint message, NOTIFYICONDATAW* data);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern uint RegisterWindowMessageW(string name);
     [DllImport("user32.dll")] static extern nint CreatePopupMenu();
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool AppendMenuW(nint menu, uint flags, nuint id, string text);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool AppendMenuW(nint menu, uint flags, nuint id, string? text);
     [DllImport("user32.dll")] static extern bool DestroyMenu(nint menu);
     [DllImport("user32.dll")] static extern bool CheckMenuRadioItem(nint menu, uint first, uint last, uint check, uint flags);
     [DllImport("user32.dll")] static extern int TrackPopupMenu(nint menu, uint flags, int x, int y, int reserved, nint hwnd, nint rect);
@@ -114,6 +114,7 @@ sealed unsafe class TrayIcon : IDisposable
         AppendMenuW(menu, MF_STRING, CmdEveryone, Strings.VisibilityEveryone);
         uint current = _mode() switch { Visibility.OwnDevices => CmdOwnDevices, Visibility.Everyone => CmdEveryone, _ => CmdHidden };
         CheckMenuRadioItem(menu, CmdHidden, CmdEveryone, current, MF_BYCOMMAND);
+        AppendMenuW(menu, MF_SEPARATOR, 0, null);
         AppendMenuW(menu, MF_STRING | (_autostart.IsEnabled ? MF_CHECKED : 0), CmdAutostart, Strings.Autostart);
         AppendMenuW(menu, MF_STRING, CmdExit, Strings.Exit);
         SetForegroundWindow(_window.Handle);   // иначе меню не закрывается кликом вне него

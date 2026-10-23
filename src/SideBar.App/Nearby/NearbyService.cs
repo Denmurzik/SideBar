@@ -44,6 +44,7 @@ sealed class NearbyService : IDisposable
     {
         _ui = ui;
         _identity = identity;
+        _identity.Changed += OnIdentityChanged;
         // белый список: тип кадра, размеры, enum-поля; имена файлов и устройств сюда не попадают
         NearbyLog.Log = e => Log.Write($"nearby {e.Kind}{(e.Size is { } n ? " " + n : "")}{(e.Value is { } v ? " " + v : "")}");
     }
@@ -138,13 +139,31 @@ sealed class NearbyService : IDisposable
             if (_lostGrace.Remove(endpoint.InstanceName, out var pending)) pending.Dispose();
         }
         Log.Write($"share: device found, kind {endpoint.Kind}");
-        // своё устройство рекламирует себя без имени: имя берётся из его сертификата; чужое называется по mDNS (имя задаёт пир)
+        var view = ViewOf(endpoint);
+        Post(epoch, () => DeviceFound?.Invoke(view));
+    }
+
+    // своё устройство рекламирует себя без имени: имя берётся из его сертификата; чужое называется по mDNS (имя задаёт пир)
+    DeviceView ViewOf(DiscoveredEndpoint endpoint)
+    {
         var own = OwnIdentity(endpoint);
         string name = own is null
             ? DisplayText.SanitizeName(endpoint.DisplayName, Strings.UnknownDevice)
             : DisplayText.SanitizeName(own.TryGetPeerName(endpoint.Info), Strings.OwnDevice);
-        var view = new DeviceView(endpoint.InstanceName, name, Map(endpoint.Kind), own is not null);
-        Post(epoch, () => DeviceFound?.Invoke(view));
+        return new DeviceView(endpoint.InstanceName, name, Map(endpoint.Kind), own is not null);
+    }
+
+    // сертификаты перечитаны: метка «своё» и имена уже показанных устройств пересчитываются (поток пула)
+    void OnIdentityChanged()
+    {
+        int epoch;
+        List<DiscoveredEndpoint> shown;
+        lock (_gate) { epoch = _epoch; shown = [.. _endpoints.Values]; }
+        foreach (var endpoint in shown)
+        {
+            var view = ViewOf(endpoint);
+            Post(epoch, () => DeviceFound?.Invoke(view));
+        }
     }
 
     /// <summary>Текущая идентичность, если сертификат этого устройства среди наших; иначе null. Сбой проверки = не своё.</summary>
@@ -244,13 +263,19 @@ sealed class NearbyService : IDisposable
                 await client.ConnectAsync(target.Address, target.Port, connectCts.Token).ConfigureAwait(false);
             }
             IShareIdentity identity = OwnIdentity(target) ?? (IShareIdentity)new AnonymousIdentity();   // идентичность фиксируется на старте отправки
-            var options = new SessionOptions(Environment.MachineName, DeviceKind.Laptop, identity) { RemoteEndpointInfo = target.Info };
+            // метка «своё» построена по рекламе, которую можно переиграть: для своих отправка требует проверенного ключа пира
+            var options = new SessionOptions(Environment.MachineName, DeviceKind.Laptop, identity)
+            {
+                RemoteEndpointInfo = target.Info,
+                RequireVerifiedPeer = identity is CertificateIdentity,
+            };
             var observer = new ProgressObserver(f => Post(epoch, () => Progress?.Invoke(f)));
             var result = await SendSession.SendFilesAsync(client.GetStream(), options, files, observer, ct).ConfigureAwait(false);
             Log.Write($"share: result {result.Status}");
             var reason = result.Status switch
             {
                 TransferStatus.Completed => truncated ? Strings.OnlyFirstFiles : null,
+                TransferStatus.Failed when result.Detail == TransferDetails.Unverified => Strings.SendUnverified,
                 TransferStatus.TimedOut => Strings.SendTimedOut,
                 TransferStatus.RejectedByPeer => Strings.SendRejected,
                 TransferStatus.CancelledByPeer => Strings.SendCancelled,
@@ -292,7 +317,11 @@ sealed class NearbyService : IDisposable
         try { browser?.Dispose(); } catch (Exception e) { Log.Write("share: browser dispose failed: " + Log.Describe(e)); }
     }
 
-    public void Dispose() => Cancel();
+    public void Dispose()
+    {
+        _identity.Changed -= OnIdentityChanged;
+        Cancel();
+    }
 
     // событие уходит на UI-поток и там ещё раз сверяется с актуальным сеансом
     void Post(int epoch, Action action) => _ui.TryEnqueue(() =>

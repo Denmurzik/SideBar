@@ -33,7 +33,7 @@ sealed class ReceiveHost : IDisposable
     readonly Timer _timer;
     readonly CancellationTokenSource _lifetime = new();
     readonly NetworkCategoryTracker _network = new();   // под _evaluate
-    bool _blockNoted;                                    // под _gate: заметка «приём выключен» уже показана для этого включения
+    bool _blockNoted = true;                                    // под _gate: заметка «приём выключен» уже показана для этого включения
     bool _degradeNoted;                                  // под _gate: заметка «сертификаты недоступны» уже показана в этом запуске
     int _ticks;
     int _sessions;
@@ -59,13 +59,13 @@ sealed class ReceiveHost : IDisposable
     {
         _ui = ui;
         _identity = identity;
+        identity.Changed += OnIdentityChanged;   // сначала подписка, потом чтение Current: перезагрузка между ними не теряется
         _visibility = new VisibilityModel(identity.Current is not null, VisibilitySettings.Load());
         _notifications = notifications;
         _clipboardOwner = clipboardOwner;
         _bounce = bounce;
         NearbyLog.Log = e => Log.Write($"nearby {e.Kind}{(e.Size is { } s ? " " + s : "")}{(e.Value is null ? "" : " " + e.Value)}");
         NetworkChange.NetworkAddressChanged += OnNetworkChanged;
-        identity.Changed += OnIdentityChanged;
         Log.Write($"visibility {_visibility.Current}");
         NoteDegraded();
         _timer = new Timer(_ => OnTick(), null, TimeSpan.FromSeconds(TickSeconds), TimeSpan.FromSeconds(TickSeconds));
@@ -90,7 +90,7 @@ sealed class ReceiveHost : IDisposable
         lock (_gate)
         {
             if (!_visibility.Select(mode, DateTimeOffset.UtcNow)) return;
-            if (mode != Visibility.Hidden) _blockNoted = false;
+            if (mode == Visibility.Everyone) _blockNoted = false;   // заметка о блокировке — только после явного включения «Все»
             persisted = _visibility.Persisted;
             Log.Write($"visibility {_visibility.Current}");
         }
@@ -115,7 +115,8 @@ sealed class ReceiveHost : IDisposable
     {
         lock (_gate)
         {
-            if (!_visibility.OwnDevicesDegraded || _degradeNoted) return;
+            // Missing: Quick Share не установлен, говорить нечего
+            if (!_visibility.OwnDevicesDegraded || _degradeNoted || _identity.Failure is null or CertLoadFailure.Missing) return;
             _degradeNoted = true;
         }
         Log.Write("own devices unavailable, working as hidden");
@@ -145,10 +146,16 @@ sealed class ReceiveHost : IDisposable
         try
         {
             Visibility visibility;
-            bool anyAccepted;
-            lock (_gate) { visibility = _visibility.Current; anyAccepted = _live.Any(l => l.Accepted); }
-            // реклама «Своих» подписана сертификатом; идентичность читается один раз на проход
-            var identity = visibility == Visibility.OwnDevices ? _identity.Current : null;
+            bool anyAccepted, useCertificates, named;
+            lock (_gate)
+            {
+                visibility = _visibility.Current;
+                useCertificates = _visibility.UsesCertificates;
+                named = _visibility.AdvertisesName;
+                anyAccepted = _live.Any(l => l.Accepted);
+            }
+            // сертификатная идентичность в «Своих» и в «Все» (если сертификаты есть); читается один раз на проход
+            var identity = useCertificates ? _identity.Current : null;
 
             // сеть проверяем и в «Скрыто», пока жива принятая передача: Public/Unknown её обрывает
             (IPAddress Address, int Index)? lan = null;
@@ -173,7 +180,7 @@ sealed class ReceiveHost : IDisposable
             else _network.Reset();
             var decision = ReceivePolicy.Decide(visibility, category, networkChecked);
             CancelSessions(decision);
-            NoteBlocked(ReceiveBlockReason.Of(visibility, lan is not null, category));
+            if (visibility == Visibility.Everyone) NoteBlocked(ReceiveBlockReason.Of(visibility, lan is not null, category));
 
             if (!decision.Listen || lan is null || (visibility == Visibility.OwnDevices && identity is null))
             {
@@ -185,7 +192,7 @@ sealed class ReceiveHost : IDisposable
                 && b.Mode == visibility && ReferenceEquals(b.Identity, identity))
                 return;
             Stop();
-            await StartAsync(lan.Value, visibility, identity);
+            await StartAsync(lan.Value, visibility, identity, named);
         }
         catch (Exception e)
         {
@@ -227,7 +234,7 @@ sealed class ReceiveHost : IDisposable
         _ui.TryEnqueue(() => _notifications.Info("blocked", text));
     }
 
-    async Task StartAsync((IPAddress Address, int Index) lan, Visibility mode, CertificateIdentity? identity)
+    async Task StartAsync((IPAddress Address, int Index) lan, Visibility mode, CertificateIdentity? identity, bool named)
     {
         TcpListener? listener = null;
         QuickShareAdvertiser? advertiser = null;
@@ -237,7 +244,9 @@ sealed class ReceiveHost : IDisposable
             listener.Start();
             int port = ((IPEndPoint)listener.LocalEndpoint).Port;
             // новая соль при каждой регистрации; «Все» — анонимно с именем, «Свои» — без имени, подписано сертификатом
-            var info = ((IShareIdentity?)identity ?? new AnonymousIdentity()).CreateEndpointInfo(_deviceName, DeviceKind.Laptop);
+            var info = identity is null
+                ? new AnonymousIdentity().CreateEndpointInfo(_deviceName, DeviceKind.Laptop)
+                : identity.CreateEndpointInfo(_deviceName, DeviceKind.Laptop, named);
             advertiser = new QuickShareAdvertiser(MdnsName.NewEndpointId(), info.Encode(), port, lan.Address, lan.Index);
             await advertiser.RegisterAsync(_lifetime.Token);
         }
@@ -354,10 +363,9 @@ sealed class ReceiveHost : IDisposable
                 client.NoDelay = true;
                 Log.Write("receive session start");
                 // режим и идентичность фиксируются на старте сессии: смена сертификатов её не трогает
-                Visibility mode;
-                lock (_gate) mode = _visibility.Current;
-                bool own = mode == Visibility.OwnDevices;
-                var options = new SessionOptions(_deviceName) { Identity = own ? _identity.Current : null, RejectUnverified = own };
+                bool useCertificates, reject;
+                lock (_gate) { useCertificates = _visibility.UsesCertificates; reject = _visibility.RejectsUnverified; }
+                var options = new SessionOptions(_deviceName) { Identity = useCertificates ? _identity.Current : null, RejectUnverified = reject };
 #if DEBUG
                 if (int.TryParse(Environment.GetEnvironmentVariable("SIDEBAR_DECISION_TIMEOUT_S"), out var seconds))
                     options = options with { DecisionTimeout = TimeSpan.FromSeconds(seconds) };   // автотест таймаута решения

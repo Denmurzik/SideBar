@@ -38,8 +38,14 @@ public sealed class VisibilityModel
     /// <summary>What to persist: the mode outside Everyone (Everyone is never saved).</summary>
     public Visibility Persisted => _base;
 
-    /// <summary>OwnDevices accepts only verified peers; Everyone and Hidden ask the user as before.</summary>
+    /// <summary>Only OwnDevices rejects unverified peers without asking; Everyone asks the user (verified own devices are accepted in both).</summary>
     public bool RejectsUnverified => Current == Visibility.OwnDevices;
+
+    /// <summary>Sessions and the advertisement use the certificate identity (own devices can be verified): OwnDevices, and Everyone while certificates exist.</summary>
+    public bool UsesCertificates => Current != Visibility.Hidden && _available;
+
+    /// <summary>Everyone advertises the device name; OwnDevices advertises none (the phone reads it from the certificate).</summary>
+    public bool AdvertisesName => Current == Visibility.Everyone;
 
     public event Action? Changed;
 

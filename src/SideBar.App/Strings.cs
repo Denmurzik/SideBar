@@ -60,6 +60,7 @@ static class Strings
     public const string SendRejected = "Получатель отклонил";
     public const string SendCancelled = "Получатель отменил передачу";
     public static readonly string OnlyFirstFiles = $"Отправлены только первые {Nearby.NearbyService.MaxFiles} файлов";
+    public const string SendUnverified = "Не удалось подтвердить устройство";
     public const string SendTimedOut = "Получатель не ответил";
     public const string NothingToSend = "Нечего отправлять";
 }

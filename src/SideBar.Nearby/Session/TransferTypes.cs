@@ -20,6 +20,9 @@ public static class TransferDetails
 {
     public const string NotEnoughSpace = "not-enough-space";
     public const string WifiUnsupported = "wifi-unsupported";
+
+    /// <summary>Receiving: the peer was not verified in a mode that needs it. Sending: <see cref="SessionOptions.RequireVerifiedPeer"/> was not met.</summary>
+    public const string Unverified = "unverified";
 }
 
 public sealed record TransferResult(TransferStatus Status, IReadOnlyList<string> Files, string? Detail = null)
@@ -75,6 +78,12 @@ public sealed record SessionOptions(
 
     /// <summary>Receiving: an incoming transfer from a peer that is not <see cref="IncomingTransfer.Verified"/> is rejected without asking.</summary>
     public bool RejectUnverified { get; init; }
+
+    /// <summary>
+    /// Sending to a device that must be one of ours: if its PairedKey did not verify before our Introduction, nothing is sent
+    /// (Cancel instead) and the result is Failed with <see cref="TransferDetails.Unverified"/>. Guards against a replayed advertisement.
+    /// </summary>
+    public bool RequireVerifiedPeer { get; init; }
 
     public int MaxFilesPerIntroduction { get; init; } = 100;
 
