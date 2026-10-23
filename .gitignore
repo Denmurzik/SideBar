@@ -448,3 +448,4 @@ spikes/**/*.csv
 
 # Superpowers SDD workspaces
 .superpowers/
+HANDOFF.md

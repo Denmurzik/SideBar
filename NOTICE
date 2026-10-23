@@ -1,0 +1,41 @@
+SideBar
+Copyright (C) 2026 Denis Muruev
+
+SideBar is free software, licensed under the GNU General Public License v3.0
+(see LICENSE).
+
+SideBar is an independent project. It is not affiliated with, endorsed by, or
+sponsored by Google LLC. "Quick Share", "Nearby Share" and the Quick Share logo
+are trademarks of Google LLC.
+
+Third-party material
+--------------------
+
+This product includes protocol definitions and is based on protocol behaviour
+from the following projects. Their original license headers are kept in the
+corresponding files under src/SideBar.Nearby/Protos and spikes/.
+
+* Google Nearby (https://github.com/google/nearby)
+  Copyright 2020 Google LLC
+  Licensed under the Apache License, Version 2.0
+  (http://www.apache.org/licenses/LICENSE-2.0).
+  Used: .proto definitions (device_to_device_messages, offline_wire_formats,
+  securegcm, securemessage, ukey) and the documented protocol algorithms.
+  Modifications: the definitions are compiled for C#; the protocol logic is a
+  new C# implementation.
+
+* Chromium (https://chromium.googlesource.com/chromium/src)
+  Copyright 2020 The Chromium Authors
+  Licensed under a BSD-style license.
+  Used: wire_format.proto (Nearby Sharing frames).
+
+* NearDrop (https://github.com/grishka/NearDrop)
+  Released into the public domain under The Unlicense.
+  Used as a reference for the Quick Share protocol flow.
+
+* rquickshare (https://github.com/Martichou/rquickshare)
+  Licensed under the GNU General Public License v3.0.
+  Used as a reference for the Quick Share protocol flow and the BLE
+  Fast Initiation advertisement.
+
+See docs/research/licenses.md for details.
