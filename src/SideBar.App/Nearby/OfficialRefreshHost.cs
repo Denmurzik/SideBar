@@ -1,5 +1,6 @@
 using SideBar.Core.Nearby;
 using SideBar.Core.Official;
+using SideBar.Core.Settings;
 using SideBar.Official;
 
 namespace SideBar.Sharing;
@@ -14,6 +15,8 @@ sealed class OfficialRefreshHost : IDisposable
     static readonly TimeSpan ResidentThreshold = TimeSpan.FromMinutes(10);
 
     readonly RefreshService _service;
+    readonly OfficialAppController _app;
+    readonly SettingsStore _settings;
     readonly Notifications _notes;
     readonly OfficialAppWatcher _watcher;
     readonly ResidentAppDetector _resident = new(ResidentThreshold);
@@ -21,12 +24,16 @@ sealed class OfficialRefreshHost : IDisposable
     Timer? _residentTimer;
 
     /// <param name="stackBusy">Идёт приём или отправка: плановый цикл ждёт (ручной запуск из трея не спрашивает).</param>
-    /// <param name="officialExePath">Путь из настроек (Settings Task 3: <c>AppSettings.OfficialExePath</c>); null — стандартный. В Debug перекрывается SIDEBAR_OFFICIAL_EXE.</param>
-    public OfficialRefreshHost(IStackPause stack, IdentityProvider identity, Notifications notes, OfficialAppWatcher watcher, Func<bool>? stackBusy = null, string? officialExePath = null)
+    /// <param name="settings">Путь <c>AppSettings.OfficialExePath</c> (null — стандартный) читается сейчас и при каждой смене. В Debug перекрывается SIDEBAR_OFFICIAL_EXE.</param>
+    public OfficialRefreshHost(IStackPause stack, IdentityProvider identity, Notifications notes, OfficialAppWatcher watcher, SettingsStore settings, Func<bool>? stackBusy = null)
     {
+        _settings = settings;
         _notes = notes;
         _watcher = watcher;
-        var app = OfficialAppController.ForApp(officialExePath, Log.Write);
+        var app = OfficialAppController.ForApp(settings.Current.OfficialExePath, Log.Write);
+        _app = app;
+        _lastExePath = settings.Current.OfficialExePath;
+        settings.Changed += OnSettingsChanged;
         var hooks = new RefreshHooks
         {
             PauseStack = () => { stack.Pause(); return Task.CompletedTask; },
@@ -46,6 +53,17 @@ sealed class OfficialRefreshHost : IDisposable
         if (string.IsNullOrWhiteSpace(dir)) dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SideBar");
         return Path.Combine(dir, "state.json");
     }
+
+    // путь к exe сменился: следующая проверка и цикл идут по новому; пока файла нет, цикл возвращает NotInstalled и ничего не запускает
+    void OnSettingsChanged(AppSettings s)
+    {
+        if (s.OfficialExePath == _lastExePath) return;
+        _lastExePath = s.OfficialExePath;
+        _app.UseSettingsPath(s.OfficialExePath);
+        Log.Write("official: exe path changed");
+    }
+
+    volatile string? _lastExePath;
 
     /// <summary>Идёт цикл обновления (пункт трея недоступен).</summary>
     public bool Busy => _service.IsBusy;
@@ -99,6 +117,7 @@ sealed class OfficialRefreshHost : IDisposable
 
     public void Dispose()
     {
+        _settings.Changed -= OnSettingsChanged;
         _residentTimer?.Dispose();
         _service.Dispose();
     }

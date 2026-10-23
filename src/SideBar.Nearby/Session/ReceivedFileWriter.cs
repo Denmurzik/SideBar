@@ -103,11 +103,13 @@ public sealed partial class ReceivedFileWriter(string directory)
         return totalSize <= free - FreeSpaceMargin;
     }
 
+    /// <summary>SIDEBAR_DOWNLOADS_DIR: действует и в Release (автотесты, e2e); относительные и «полуотносительные» значения игнорируются.</summary>
+    public static string? DownloadsOverride() =>
+        Environment.GetEnvironmentVariable(DownloadsOverrideVariable) is { Length: > 0 } overridden && Path.IsPathFullyQualified(overridden) ? overridden : null;
+
     public static string DownloadsFolder()
     {
-        // действует и в Release (автотесты, e2e); относительные и «полуотносительные» значения игнорируются
-        if (Environment.GetEnvironmentVariable(DownloadsOverrideVariable) is { Length: > 0 } overridden && Path.IsPathFullyQualified(overridden))
-            return overridden;
+        if (DownloadsOverride() is { } overridden) return overridden;
         var fallback = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
         var id = new Guid("374DE290-123F-4565-9164-39C4925E467B");
         if (SHGetKnownFolderPath(in id, 0, 0, out var buffer) != 0)

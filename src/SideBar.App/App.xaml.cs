@@ -6,6 +6,7 @@ using SideBar.Core.Layout;
 using SideBar.Core.Nearby;
 using SideBar.Edge;
 using SideBar.Core.Settings;
+using SideBar.Core.Shelf;
 using SideBar.Core.Updates;
 using SideBar.Nearby;
 using SideBar.Settings;
@@ -46,6 +47,10 @@ public partial class App : Application
     OfficialAppWatcher? _official;
     IdentityProvider? _identity;
     OfficialRefreshHost? _refresh;
+    volatile bool _showInFullscreen, _bounceOnIncoming = true;   // настройки «Панель»: читает рабочий поток хука
+    ShelfRetention _lastRetention;   // читает и пишет только OnSettingsChanged, но вызывается с разных потоков
+    readonly object _retentionGate = new();
+    DispatcherTimer? _retentionTimer;
     readonly BumpGate _bump = new();
     readonly AttentionBounce _attention = new();
     readonly ReceiveTileModel _recv = new();
@@ -106,6 +111,11 @@ public partial class App : Application
         _primary = primary;
         _window.Initialize(layout, mode, scale);
         _machine = new EdgeStateMachine(layout, mode);
+        ApplySettings(_settings.Current);
+        _lastRetention = _settings.Current.ShelfRetention;
+        _settings.Changed += OnSettingsChanged;
+        _settings.HandlerFailed += e => Log.Write("settings handler failed: " + Log.Describe(e));
+        InitRetention();
         CardHidden();
         // после первого Show (его ставит в очередь Initialize): к этому времени у окна есть дочерние HWND WinUI
         _ui.TryEnqueue(() =>
@@ -147,7 +157,7 @@ public partial class App : Application
         _official.Poll();   // первое решение приёма уже учитывает процесс
         _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack, _settings);
         _official.Start();
-        _refresh = new OfficialRefreshHost(_stack, _identity, _notifications, _official, () => _receive.Busy || (_nearby?.Busy ?? false));   // Settings Task 3: передать AppSettings.OfficialExePath
+        _refresh = new OfficialRefreshHost(_stack, _identity, _notifications, _official, _settings, () => _receive.Busy || (_nearby?.Busy ?? false));
         _refresh.Start();
         SettingsWindow.RefreshCertificatesNow = RefreshCertificatesNow;   // кнопка «Обновить» в настройках
 #if DEBUG
@@ -190,6 +200,65 @@ public partial class App : Application
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) CardHidden(); }), null, 2000, Timeout.Infinite);
     }
 
+    /// <summary>Настройки, которые применяются сразу и без перезапуска: любой поток (Changed приходит с вызывающего Update).</summary>
+    void OnSettingsChanged(AppSettings s)
+    {
+        ApplySettings(s);
+        bool retentionChanged;
+        lock (_retentionGate)
+        {
+            retentionChanged = s.ShelfRetention != _lastRetention;
+            _lastRetention = s.ShelfRetention;
+        }
+        if (retentionChanged) _ui?.TryEnqueue(ExpireShelf);   // новый срок действует сразу, не через час
+    }
+
+    void ApplySettings(AppSettings s)
+    {
+        lock (_gate) { if (_machine is not null) _machine.OpenDelayMs = s.EdgeOpenDelayMs; }
+        _showInFullscreen = s.ShowInFullscreen;
+        _bounceOnIncoming = s.BounceOnIncoming;
+    }
+
+    // «Показывать в полноэкранных приложениях» выключает подавление края (и прыжков) полноэкранным окном; перетаскивание и так работает
+    bool FullscreenBusy(PxRect primary) => !_showInFullscreen && FullscreenProbe.IsBusy(primary);
+
+    /// <summary>Автоудаление из буфера: при старте, при смене срока и раз в час.</summary>
+    void InitRetention()
+    {
+        ExpireShelf();
+        _retentionTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(1) };
+        _retentionTimer.Tick += (_, _) => ExpireShelf();
+        _retentionTimer.Start();
+    }
+
+    DispatcherTimer? _expireRetry;
+
+    void RetryExpire(object? sender, object e)
+    {
+        _expireRetry?.Stop();
+        ExpireShelf();
+    }
+
+    // UI-поток. Тот же путь, что у корзины: Reference только уходят с полки, Owned получают отложенное удаление
+    void ExpireShelf()
+    {
+        if (_shelf is null || _settings is null) return;
+        if (DragOut.IsActive)
+        {
+            // во время переноса из карточки полку не трогаем; повтор сразу после его конца
+            _expireRetry ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _expireRetry.Tick -= RetryExpire;
+            _expireRetry.Tick += RetryExpire;
+            if (!_expireRetry.IsEnabled) _expireRetry.Start();
+            return;
+        }
+        var ids = ShelfRetentionPolicy.ExpiredIds(_shelf.Model.Items, _settings.Current.ShelfRetention, DateTimeOffset.Now);
+        if (ids.Count == 0) return;
+        _shelf.Expire(ids);
+        _fan?.Hide();
+    }
+
     /// <summary>Проверка обновлений (M7): таймер раз в час, пункт трея, кнопка «Проверить сейчас» в настройках.</summary>
     void InitUpdates()
     {
@@ -221,7 +290,7 @@ public partial class App : Application
     {
         if (_settings is null || _receive is null || _identity is null || _shelf is null) return;
         SettingsWindow.ShowOrActivate(new SettingsDeps(_settings, new Autostart(), Environment.ProcessPath!, _receive, _identity,
-            () => { _shelf.Clear(); _fan?.Hide(); }, _trimmer.OnShown, _trimmer.OnHidden), section);
+            () => { _shelf.Clear(); _fan?.Hide(); }, _trimmer.Hold, _trimmer.Release), section);
     }
 
     // пока карточка открыта (в том числе удерживается запросом), обрезка working set не идёт: OnShown снимает таймер
@@ -230,7 +299,7 @@ public partial class App : Application
     void InitShare()
     {
         _share = new ShareTileModel();
-        _nearby = new NearbyService(_ui!, _identity!, _stack);
+        _nearby = new NearbyService(_ui!, _identity!, _stack, _settings!);
         _window!.BindShare(_share, _recv, (id, accept) => _notifications?.Decide(id, accept));
         _window.OwnItemsDropped += OnShareDrop;
         _share.Changed += OnShareChanged;
@@ -293,7 +362,8 @@ public partial class App : Application
         PanelState state;
         PxRect primary;
         lock (_gate) { state = machine.State; primary = _primary; }
-        if (!_attention.Due(Environment.TickCount64, _recv.HasConsent, state, () => FullscreenProbe.IsBusy(primary))) return;
+        if (!_bounceOnIncoming) return;   // «Подпрыгивать при входящих» выключено: запрос ждёт в плитке без прыжков
+        if (!_attention.Due(Environment.TickCount64, _recv.HasConsent, state, () => FullscreenBusy(primary))) return;
         if (_window.StartAttention())
         {
             Log.Write("edge attention cue");
@@ -381,7 +451,7 @@ public partial class App : Application
         if (machine is null || _window is null) return;
         PxRect primary;
         lock (_gate) { if (machine.State != PanelState.Hidden) return; primary = _primary; }
-        if (FullscreenProbe.IsBusy(primary)) return;   // то же подавление, что у края
+        if (!_bounceOnIncoming || FullscreenBusy(primary)) return;   // выключено в настройках либо то же подавление, что у края
         if (!_bump.TryBump(Environment.TickCount64)) return;
         if (!_window.StartAttention()) return;   // карточка уже в движении
         Log.Write("edge attention cue (incoming)");
@@ -488,7 +558,7 @@ public partial class App : Application
             CardLayout layout;
             lock (_gate) layout = _layout;
             var b = layout.ActivationBand;
-            if (y >= b.Top && y <= b.Bottom && x >= b.Left && x < b.Right) busy = FullscreenProbe.IsBusy(primary);
+            if (y >= b.Top && y <= b.Bottom && x >= b.Left && x < b.Right) busy = FullscreenBusy(primary);
         }
 
         PanelState? changed;
@@ -501,7 +571,7 @@ public partial class App : Application
             // без движения мыши автомату нужны таймеры: задержка скрытия (Open) и dwell in-place (Hidden у края)
             var band = _layout.ActivationBand;
             bool inBand = y >= band.Top && y <= band.Bottom && x >= band.Left && x < band.Right;
-            fast = machine.State == PanelState.Open || (_mode == EdgeMode.InPlace && inBand);
+            fast = machine.State == PanelState.Open || (inBand && (_mode == EdgeMode.InPlace || machine.EffectiveOpenDelayMs > 0));   // InPlace: dwell у края; Slide: только пока есть задержка касания
         }
         if (hook is not null) hook.FastTick = fast;
 

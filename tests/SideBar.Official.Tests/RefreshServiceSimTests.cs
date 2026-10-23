@@ -16,19 +16,23 @@ public sealed class RefreshServiceSimTests : IDisposable
     readonly string _dir = Path.Combine(Path.GetTempPath(), "SideBar.Tests", Guid.NewGuid().ToString("N"));
     readonly List<string> _log = [];
     readonly List<string> _hooks = [];
+    readonly List<RefreshService> _services = [];
     DateTimeOffset _now = T0;
     readonly Stopwatch _sw = Stopwatch.StartNew();
 
     public RefreshServiceSimTests()
     {
         Directory.CreateDirectory(_dir);
+        CloseSims();   // остатки прошлого теста (в CI закрытие окна иногда не успевает)
         Assert.Empty(SimProcesses());   // чужих симуляторов быть не должно
     }
 
     public void Dispose()
     {
         Environment.SetEnvironmentVariable("SIDEBAR_SIM_MODE", null);
+        foreach (var svc in _services) { try { svc.Dispose(); } catch (Exception) { } }   // цикл сервиса мог ещё держать симулятор
         CloseSims();
+        for (var i = 0; i < 100 && SimProcesses().Length > 0; i++) Thread.Sleep(100);
         try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
     }
 
@@ -52,7 +56,11 @@ public sealed class RefreshServiceSimTests : IDisposable
         foreach (var p in SimProcesses())
         {
             foreach (var w in Native.WindowsOf(p.Id)) PostMessageW(w.Hwnd, 0x0010, 0, 0);
-            p.WaitForExit(5000);
+            if (!p.WaitForExit(2000))
+            {
+                try { p.Kill(entireProcessTree: true); } catch (Exception) { }   // свой симулятор теста; закрытие окном не сработало
+                p.WaitForExit(5000);
+            }
             p.Dispose();
         }
     }
@@ -94,7 +102,9 @@ public sealed class RefreshServiceSimTests : IDisposable
             ExitWait = TimeSpan.FromSeconds(5),
             RetryDelay = TimeSpan.FromSeconds(1),
         };
-        return new RefreshService(app, new AppStateStore(StatePath), hooks, s => _log.Add($"{_sw.ElapsedMilliseconds}ms " + s), t, () => _now, idle);
+        var made = new RefreshService(app, new AppStateStore(StatePath), hooks, s => _log.Add($"{_sw.ElapsedMilliseconds}ms " + s), t, () => _now, idle);
+        _services.Add(made);
+        return made;
     }
 
     [Fact]
@@ -361,6 +371,7 @@ public sealed class RefreshServiceSimTests : IDisposable
         };
         var svc = new RefreshService(app, new AppStateStore(StatePath), hooks, s => _log.Add(s),
             new RefreshTimings { MarkerTimeout = TimeSpan.FromSeconds(10), Settle = TimeSpan.FromMilliseconds(100), ExitWait = TimeSpan.FromSeconds(5) }, () => _now, () => TimeSpan.FromMinutes(10));
+        _services.Add(svc);
         await svc.TickAsync();
         Assert.Empty(_hooks);   // сессия идёт: ждём
         Assert.Equal(RefreshOutcome.Succeeded, await svc.RunOnceAsync());   // ручной запуск не спрашивает
@@ -381,6 +392,7 @@ public sealed class RefreshServiceSimTests : IDisposable
         var app = OfficialAppController.FromEnvironment(s => _log.Add(s), null, NeverRuns);
         var hooks = new RefreshHooks { WarnStale = () => _hooks.Add("warn"), UserAppResident = () => resident };
         var svc = new RefreshService(app, new AppStateStore(StatePath), hooks, s => _log.Add(s), null, () => _now);
+        _services.Add(svc);
         await svc.TickAsync();   // FirstSeen
         _now = T0.AddHours(80);
         await svc.TickAsync();
@@ -461,6 +473,38 @@ public sealed class RefreshServiceSimTests : IDisposable
         Assert.Equal(RefreshOutcome.NotInstalled, await svc.RunOnceAsync());
         Assert.Empty(_hooks);
         Assert.Empty(SimProcesses());
+    }
+
+    [Fact]
+    public async Task Official_path_missing_is_not_installed()
+    {
+        var oldExe = Environment.GetEnvironmentVariable("SIDEBAR_OFFICIAL_EXE");   // другие тесты оставляют его в процессе; в Debug он приоритетнее настройки
+        Environment.SetEnvironmentVariable("SIDEBAR_OFFICIAL_EXE", null);
+        try { await OfficialPathMissingScenario(); }
+        finally { Environment.SetEnvironmentVariable("SIDEBAR_OFFICIAL_EXE", oldExe); }
+    }
+
+    async Task OfficialPathMissingScenario()
+    {
+        var present = Path.Combine(_dir, "nearby_share.exe");
+        File.WriteAllText(present, "x");
+        var missing = Path.Combine(_dir, "gone", "nearby_share.exe");
+
+        var app = OfficialAppController.FromEnvironment(s => _log.Add(s), present, NeverRuns);
+        Assert.True(app.IsInstalled);
+        app.UseSettingsPath(missing);   // настройка сменилась на ходу
+        Assert.False(app.IsInstalled);
+        Assert.Equal(missing, app.ExePath);
+        app.UseSettingsPath(@"nearby_share.exe");   // относительный путь не считается установленным
+        Assert.False(app.IsInstalled);
+        app.UseSettingsPath(present);
+        Assert.True(app.IsInstalled);
+        Assert.Equal("nearby_share", OfficialAppController.UserProcessName);   // процесс пользователя не зависит от пути
+
+        var svc = Make("normal", exe: missing);
+        Assert.Equal(RefreshOutcome.NotInstalled, await svc.RunOnceAsync());
+        Assert.Empty(_hooks);
+        Assert.Empty(SimProcesses());   // ничего не запускалось
     }
 
     [Fact]

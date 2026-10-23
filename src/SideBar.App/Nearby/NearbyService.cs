@@ -1,6 +1,7 @@
 using System.Net.Sockets;
 using Microsoft.UI.Dispatching;
 using SideBar.Core.Nearby;
+using SideBar.Core.Settings;
 using SideBar.Nearby;
 using SideBar.Nearby.Discovery;
 using SideBar.Nearby.Identity;
@@ -27,6 +28,7 @@ sealed class NearbyService : IDisposable
     readonly DispatcherQueue _ui;
     readonly IdentityProvider _identity;
     readonly IStackPause _pause;
+    readonly SettingsStore _settings;
     readonly object _gate = new();
     readonly Dictionary<string, DiscoveredEndpoint> _endpoints = new(StringComparer.OrdinalIgnoreCase);
     QuickShareBrowser? _browser;
@@ -41,8 +43,9 @@ sealed class NearbyService : IDisposable
     public event Action<double>? Progress;
     public event Action<bool, string?>? Finished;
 
-    public NearbyService(DispatcherQueue ui, IdentityProvider identity, IStackPause pause)
+    public NearbyService(DispatcherQueue ui, IdentityProvider identity, IStackPause pause, SettingsStore settings)
     {
+        _settings = settings;
         _ui = ui;
         _pause = pause;
         _identity = identity;
@@ -287,7 +290,7 @@ sealed class NearbyService : IDisposable
             }
             IShareIdentity identity = OwnIdentity(target) ?? (IShareIdentity)new AnonymousIdentity();   // идентичность фиксируется на старте отправки
             // метка «своё» построена по рекламе, которую можно переиграть: для своих отправка требует проверенного ключа пира
-            var options = new SessionOptions(Environment.MachineName, DeviceKind.Laptop, identity)
+            var options = new SessionOptions(DeviceNames.Resolve(_settings.Current, Environment.MachineName), DeviceKind.Laptop, identity)   // имя берётся на старте отправки
             {
                 RemoteEndpointInfo = target.Info,
                 RequireVerifiedPeer = identity is CertificateIdentity,

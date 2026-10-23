@@ -31,7 +31,7 @@ sealed class ReceiveHost : IDisposable
     readonly Notifications _notifications;
     readonly Action _bounce;
     readonly nint _clipboardOwner;
-    readonly string _deviceName = Environment.MachineName;
+    string PcName => DeviceNames.Resolve(_settings.Current, Environment.MachineName);   // настройка «Имя этого ПК»; читается при каждой регистрации и сессии
     readonly SemaphoreSlim _evaluate = new(1, 1);
     readonly Timer _timer;
     readonly CancellationTokenSource _lifetime = new();
@@ -56,7 +56,7 @@ sealed class ReceiveHost : IDisposable
     TcpListener? _listener;
     QuickShareAdvertiser? _advertiser;
     // под какое состояние зарегистрирована реклама: смена адреса, режима или идентичности (перезагрузка сертификатов) — новая регистрация со свежей солью
-    (IPAddress Address, int Index, Visibility Mode, CertificateIdentity? Identity)? _bound;
+    (IPAddress Address, int Index, Visibility Mode, CertificateIdentity? Identity, string? AdvertisedName)? _bound;
 
     public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action bounce, IdentityProvider identity, IStackPause pause, SettingsStore settings)
     {
@@ -73,6 +73,8 @@ sealed class ReceiveHost : IDisposable
         // модель уже создана; подписка, затем повторное чтение Current: перезагрузка между чтением и подпиской не теряется
         identity.Changed += OnIdentityChanged;
         pause.Changed += OnPauseChanged;
+        _settings.Changed += OnSettingsChanged;
+        _lastPcName = settings.Current.PcName;
         lock (_gate) _visibility.SetOwnDevicesAvailable(identity.Current is not null);
         Log.Write($"visibility {_visibility.Current}");
         NoteDegraded();
@@ -110,6 +112,18 @@ sealed class ReceiveHost : IDisposable
         _ = Task.Run(() => EvaluateAsync());
     }
 
+    /// <summary>
+    /// Папка для новой передачи: SIDEBAR_DOWNLOADS_DIR, затем папка из настроек, иначе «Загрузки». Существование проверяется с таймаутом
+    /// (сетевой диск не должен подвесить приём). Смена папки в настройках действует только на передачи, начатые после неё.
+    /// </summary>
+    string ReceiveDirectory()
+    {
+        var target = ReceiveFolders.Resolve(ReceivedFileWriter.DownloadsOverride(), _settings.Current.ReceiveFolder,
+            ReceivedFileWriter.DownloadsFolder, SideBar.Settings.PathProbe.DirectoryWritable);
+        if (target.FellBack) Log.Write("receive: chosen folder unavailable, using Downloads");
+        return target.Path;
+    }
+
     /// <summary>Режим видимости изменился (выбор, смена сертификатов, истечение «Все»); поднимается не на UI-потоке.</summary>
     public event Action? ModeChanged;
 
@@ -117,6 +131,17 @@ sealed class ReceiveHost : IDisposable
     {
         try { ModeChanged?.Invoke(); }
         catch (Exception e) { Log.Write("mode changed handler failed: " + Log.Describe(e)); }
+    }
+
+    volatile string? _lastPcName;
+
+    // имя ПК изменилось: реклама с именем регистрируется заново (новая соль), идущие сессии не трогаем
+    void OnSettingsChanged(AppSettings s)
+    {
+        if (s.PcName == _lastPcName) return;
+        _lastPcName = s.PcName;
+        Log.Write("receive: pc name changed");
+        _ = Task.Run(() => EvaluateAsync());
     }
 
     // сертификаты перечитаны (файлы изменились или истёк срок): доступность режима и свежая реклама
@@ -220,7 +245,7 @@ sealed class ReceiveHost : IDisposable
             }
             // реклама не перерегистрируется, пока адрес, режим и идентичность те же: иначе ПК мигает в списке телефона
             if (_listener is not null && _bound is { } b && b.Address.Equals(lan.Value.Address) && b.Index == lan.Value.Index
-                && b.Mode == visibility && ReferenceEquals(b.Identity, identity))
+                && b.Mode == visibility && ReferenceEquals(b.Identity, identity) && b.AdvertisedName == AdvertisedNameFor(identity, named))
                 return;
             Stop();
             await StartAsync(lan.Value, visibility, identity, named);
@@ -281,10 +306,14 @@ sealed class ReceiveHost : IDisposable
         _ui.TryEnqueue(() => _notifications.Info("blocked", text));
     }
 
+    // имя попадает в рекламу в «Все» (анонимно) и в «Своих» с named; без имени смена настройки рекламу не трогает
+    string? AdvertisedNameFor(CertificateIdentity? identity, bool named) => identity is null || named ? PcName : null;
+
     async Task StartAsync((IPAddress Address, int Index) lan, Visibility mode, CertificateIdentity? identity, bool named)
     {
         TcpListener? listener = null;
         QuickShareAdvertiser? advertiser = null;
+        var deviceName = PcName;
         try
         {
             listener = new TcpListener(lan.Address, 0);
@@ -292,8 +321,8 @@ sealed class ReceiveHost : IDisposable
             int port = ((IPEndPoint)listener.LocalEndpoint).Port;
             // новая соль при каждой регистрации; «Все» — анонимно с именем, «Свои» — без имени, подписано сертификатом
             var info = identity is null
-                ? new AnonymousIdentity().CreateEndpointInfo(_deviceName, DeviceKind.Laptop)
-                : identity.CreateEndpointInfo(_deviceName, DeviceKind.Laptop, named);
+                ? new AnonymousIdentity().CreateEndpointInfo(deviceName, DeviceKind.Laptop)
+                : identity.CreateEndpointInfo(deviceName, DeviceKind.Laptop, named);
             advertiser = new QuickShareAdvertiser(MdnsName.NewEndpointId(), info.Encode(), port, lan.Address, lan.Index);
             await advertiser.RegisterAsync(_lifetime.Token);
         }
@@ -306,7 +335,7 @@ sealed class ReceiveHost : IDisposable
         }
         _listener = listener;
         _advertiser = advertiser;
-        _bound = (lan.Address, lan.Index, mode, identity);
+        _bound = (lan.Address, lan.Index, mode, identity, identity is null || named ? deviceName : null);
         Log.Write($"receive listening {mode}");
         _ = AcceptLoopAsync(listener, _lifetime.Token);
     }
@@ -423,12 +452,12 @@ sealed class ReceiveHost : IDisposable
                 // режим и идентичность фиксируются на старте сессии: смена сертификатов её не трогает
                 bool useCertificates, reject;
                 lock (_gate) { useCertificates = _visibility.UsesCertificates; reject = _visibility.RejectsUnverified; }
-                var options = new SessionOptions(_deviceName) { Identity = useCertificates ? _identity.Current : null, RejectUnverified = reject };
+                var options = new SessionOptions(PcName) { Identity = useCertificates ? _identity.Current : null, RejectUnverified = reject };
 #if DEBUG
                 if (int.TryParse(Environment.GetEnvironmentVariable("SIDEBAR_DECISION_TIMEOUT_S"), out var seconds))
                     options = options with { DecisionTimeout = TimeSpan.FromSeconds(seconds) };   // автотест таймаута решения
 #endif
-                var result = await ReceiveSession.ReceiveAsync(client.GetStream(), options, ReceivedFileWriter.DownloadsFolder(),
+                var result = await ReceiveSession.ReceiveAsync(client.GetStream(), options, ReceiveDirectory(),
                     async (o, token) => { offer = o; accepted = await ConsentAsync(o, token); live.Accepted = accepted; return accepted; }, saved, cts.Token);
                 Log.Write($"receive session {result.Status} files={result.Files.Count} texts={result.ReceivedTexts.Count}");
                 _ui.TryEnqueue(() => ShowResult(result, offer, accepted));
@@ -538,6 +567,7 @@ sealed class ReceiveHost : IDisposable
         NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
         _identity.Changed -= OnIdentityChanged;
         _pause.Changed -= OnPauseChanged;
+        _settings.Changed -= OnSettingsChanged;
         _timer.Dispose();
         try { _lifetime.Cancel(); } catch (Exception) { }   // прерывает идущий StartAsync/RegisterAsync и все сессии
         // тот же затвор, что у Evaluate: Stop не гоняется с StartAsync

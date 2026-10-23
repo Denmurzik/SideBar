@@ -285,6 +285,15 @@ sealed partial class ShelfService
         return ids.Count;
     }
 
+    /// <summary>Автоудаление по сроку: тот же путь, что у корзины (Reference не трогаем, Owned — отложенное удаление), одно сохранение.</summary>
+    public int Expire(IReadOnlyCollection<Guid> ids)
+    {
+        if (ids.Count == 0) return 0;
+        RemoveAfterDragOut(ids);
+        Log.Write($"shelf expired n={ids.Count}");
+        return ids.Count;
+    }
+
     DropPayload ReadPayload(nint dobj, out List<VirtualDescriptor> descriptors)
     {
         var paths = Safe(() => OleData.ReadHDrop(dobj), []).Select(NormalizePath).ToList();

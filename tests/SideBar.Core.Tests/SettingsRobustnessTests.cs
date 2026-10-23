@@ -144,4 +144,63 @@ public sealed class SettingsRobustnessTests : IDisposable
         Assert.Equal(Language.English, new SettingsStore(FilePath).Current.Language);
         Assert.Empty(Directory.GetFiles(_dir, "settings.bad-*.json"));
     }
+
+    [Fact]
+    public void Edits_made_while_file_was_locked_survive_the_reload()
+    {
+        File.WriteAllText(FilePath, """{ "language": "Russian", "pcName": "Файл" }""");
+        SettingsStore store;
+        using (new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            store = new SettingsStore(FilePath);
+            store.Update(s => s with { ShowInFullscreen = true });
+            store.Update(s => s with { EdgeOpenDelay = EdgeOpenDelay.Ms300 });
+            store.Update(s => s with { BounceOnIncoming = false });
+            store.Update(s => s with { BounceOnIncoming = true });   // вернули к значению по умолчанию: всё равно правка пользователя
+        }
+        store.Update(s => s with { CheckForUpdates = false });
+        Assert.Equal(Language.Russian, store.Current.Language);   // из файла
+        Assert.Equal("Файл", store.Current.PcName);
+        Assert.True(store.Current.ShowInFullscreen);              // из памяти, не только последняя правка
+        Assert.Equal(EdgeOpenDelay.Ms300, store.Current.EdgeOpenDelay);
+        Assert.True(store.Current.BounceOnIncoming);
+        Assert.False(store.Current.CheckForUpdates);
+        Assert.Equal(store.Current, new SettingsStore(FilePath).Current);
+    }
+
+    [Fact]
+    public void Merge_that_changes_state_is_saved_and_raised_even_if_the_edit_is_a_noop()
+    {
+        File.WriteAllText(FilePath, """{ "language": "Russian" }""");
+        SettingsStore store;
+        using (new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            store = new SettingsStore(FilePath);
+            store.Update(s => s with { ShowInFullscreen = true });
+        }
+        AppSettings? seen = null;
+        store.Changed += s => seen = s;
+        store.Update(s => s);   // правка ничего не меняет, но слияние с файлом изменило состояние
+        Assert.NotNull(seen);
+        Assert.Equal(Language.Russian, seen!.Language);
+        Assert.True(seen.ShowInFullscreen);
+        Assert.False(store.LastSaveFailed);
+        Assert.Equal(store.Current, new SettingsStore(FilePath).Current);
+    }
+
+    [Fact]
+    public void Throwing_Changed_handler_does_not_break_other_subscribers_or_the_queue()
+    {
+        var store = new SettingsStore(FilePath);
+        var seen = new List<string?>();
+        var failures = 0;
+        store.HandlerFailed += _ => failures++;
+        store.Changed += _ => throw new InvalidOperationException("boom");
+        store.Changed += s => seen.Add(s.ReceiveFolder);
+        store.Update(s => s with { ReceiveFolder = "1" });
+        store.Update(s => s with { ReceiveFolder = "2" });
+        Assert.Equal(["1", "2"], seen);
+        Assert.Equal(2, failures);
+        Assert.Equal("2", new SettingsStore(FilePath).Current.ReceiveFolder);
+    }
 }
