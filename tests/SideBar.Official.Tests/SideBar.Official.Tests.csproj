@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Проверки цикла официального приложения на симуляторе (tools/SideBar.OfficialSim): исходники App/Official подключены ссылками, без WinUI. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);xUnit1051</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3.mtp-v2" Version="4.0.2" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\SideBar.App\Official\*.cs" LinkBase="Official" />
+    <ProjectReference Include="..\..\src\SideBar.Core\SideBar.Core.csproj" />
+    <ProjectReference Include="..\..\tools\SideBar.OfficialSim\SideBar.OfficialSim.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

@@ -11,6 +11,19 @@ public sealed record AppState
 
     /// <summary>Когда показано предупреждение «не удаётся обновить сертификаты» (раз за период без успеха).</summary>
     [JsonPropertyName("lastWarned")] public DateTimeOffset? LastWarned { get; init; }
+
+    /// <summary>Когда SideBar впервые увидел это состояние: опора для 72-часового предупреждения, пока успеха ещё не было.</summary>
+    [JsonPropertyName("firstSeen")] public DateTimeOffset? FirstSeen { get; init; }
+
+    /// <summary>Будущие времена (часы ушли назад) приводит к <paramref name="now"/>: иначе «успех из будущего» блокировал бы цикл.</summary>
+    public AppState ClampedTo(DateTimeOffset now) => this with
+    {
+        LastSuccess = Min(LastSuccess, now),
+        LastWarned = Min(LastWarned, now),
+        FirstSeen = Min(FirstSeen, now),
+    };
+
+    static DateTimeOffset? Min(DateTimeOffset? v, DateTimeOffset now) => v is { } t && t > now ? now : v;
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true)]
