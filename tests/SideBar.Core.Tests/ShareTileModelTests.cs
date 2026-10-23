@@ -11,7 +11,7 @@ public class ShareTileModelTests
 
     static ShareTileModel Searching()
     {
-        var m = new ShareTileModel();
+        var m = new ShareTileModel(SideBar.Core.Localization.UiTexts.Ru);
         m.BeginShare(Files, T0);
         return m;
     }
@@ -27,7 +27,7 @@ public class ShareTileModelTests
     [Fact]
     public void Starts_idle()
     {
-        var m = new ShareTileModel();
+        var m = new ShareTileModel(SideBar.Core.Localization.UiTexts.Ru);
         Assert.Equal(ShareTileState.Idle, m.State);
         Assert.False(m.KeepsCardOpen);
     }
@@ -44,7 +44,7 @@ public class ShareTileModelTests
     [Fact]
     public void BeginShare_with_no_paths_is_ignored()
     {
-        var m = new ShareTileModel();
+        var m = new ShareTileModel(SideBar.Core.Localization.UiTexts.Ru);
         m.BeginShare([], T0);
         Assert.Equal(ShareTileState.Idle, m.State);
     }
@@ -222,7 +222,7 @@ public class ShareTileModelTests
     [Fact]
     public void KeepsCardOpen_true_while_searching_choosing_sending()
     {
-        var m = new ShareTileModel();
+        var m = new ShareTileModel(SideBar.Core.Localization.UiTexts.Ru);
         Assert.False(m.KeepsCardOpen);
         m.BeginShare(Files, T0);
         Assert.True(m.KeepsCardOpen);
@@ -246,7 +246,7 @@ public class ShareTileModelTests
     [Fact]
     public void Changed_is_raised_on_state_and_content_changes()
     {
-        var m = new ShareTileModel();
+        var m = new ShareTileModel(SideBar.Core.Localization.UiTexts.Ru);
         int n = 0;
         m.Changed += () => n++;
         m.BeginShare(Files, T0);
@@ -303,7 +303,7 @@ public class ShareTileModelTests
     public void Choose_timeout_does_not_run_while_a_consent_covers_the_tile()
     {
         var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
-        var m = new ShareTileModel();
+        var m = new ShareTileModel(SideBar.Core.Localization.UiTexts.Ru);
         m.BeginShare(["a"], t0);
         m.Tick(t0.AddSeconds(30));
         m.Covered = true;
@@ -321,7 +321,7 @@ public class ShareTileModelTests
     [Fact]
     public void Tile_marks_own_devices()
     {
-        var m = new ShareTileModel();
+        var m = new ShareTileModel(SideBar.Core.Localization.UiTexts.Ru);
         m.BeginShare(["a.txt"], T0);
         m.DeviceFound(new DeviceView("pixel", "Pixel 9", ShareDeviceKind.Phone, IsOwn: true));
         m.DeviceFound(new DeviceView("stranger", "Pixel 9", ShareDeviceKind.Phone));

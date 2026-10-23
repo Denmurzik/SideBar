@@ -25,8 +25,8 @@ public sealed class ShareTileModel
     IReadOnlyList<string> _paths = [];
     DateTimeOffset _startedAt, _finishedAt, _clock;
 
-    /// <param name="text">Язык подсказок плитки; по умолчанию русский.</param>
-    public ShareTileModel(UiText? text = null) => _text = text ?? UiTexts.Ru;
+    /// <param name="text">Таблица строк языка подсказок плитки.</param>
+    public ShareTileModel(UiText text) => _text = text;
 
     public ShareTileState State { get; private set; }
 

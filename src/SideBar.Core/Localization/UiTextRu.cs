@@ -5,6 +5,7 @@ static class UiTextRu
 {
     public static readonly UiText Table = new()
     {
+        Plural = PluralRule.Russian,
         Autostart = "Запускать при входе в Windows",
         Exit = "Выход",
         VisibilityHidden = "Скрыто",

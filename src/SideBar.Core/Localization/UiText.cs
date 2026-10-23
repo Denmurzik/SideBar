@@ -131,12 +131,17 @@ public sealed record UiText
     public required string CertsLoadedFmt { get; init; }
     public required string CertsFailedFmt { get; init; }
 
-    /// <summary>Число с формой слова: русский — файл/файла/файлов, английский — file/files (Few и Many совпадают).</summary>
-    public string Files(int n, bool russianPlural)
+    /// <summary>Правило множественного числа языка: живёт в таблице, чтобы язык и правило не расходились.</summary>
+    public required PluralRule Plural { get; init; }
+
+    /// <summary>Число с формой слова: русский — файл/файла/файлов, английский — file/files.</summary>
+    public string Files(int n)
     {
         int m100 = n % 100, m10 = n % 10;
-        string f = !russianPlural ? (n == 1 ? FilesOneFmt : FilesManyFmt)
+        string f = Plural == PluralRule.English ? (n == 1 ? FilesOneFmt : FilesManyFmt)
             : m100 is >= 11 and <= 14 ? FilesManyFmt : m10 == 1 ? FilesOneFmt : m10 is >= 2 and <= 4 ? FilesFewFmt : FilesManyFmt;
         return string.Format(f, n);
     }
 }
+
+public enum PluralRule { English, Russian }

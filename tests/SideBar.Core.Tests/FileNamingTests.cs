@@ -9,25 +9,25 @@ public class FileNamingTests
     [Fact]
     public void Generic_name_without_http_url_becomes_Izobrazhenie() =>
         Assert.Equal("Изображение 2026-10-23 12-00-00.jpg",
-            FileNaming.ForVirtual("Без имени.jpg", "data:image/jpeg;base64,AAAA", 1, default, Now));
+            FileNaming.ForVirtual("Без имени.jpg", "data:image/jpeg;base64,AAAA", 1, default, Now, SideBar.Core.Localization.UiTexts.Ru.ImageFileStem));
 
     [Fact]
     public void Generic_name_without_extension_uses_magic() =>
         Assert.Equal("Изображение 2026-10-23 12-00-00.png",
-            FileNaming.ForVirtual("Untitled", null, 1, [0x89, 0x50, 0x4E, 0x47, 0], Now));
+            FileNaming.ForVirtual("Untitled", null, 1, [0x89, 0x50, 0x4E, 0x47, 0], Now, SideBar.Core.Localization.UiTexts.Ru.ImageFileStem));
 
     [Fact]
     public void Http_url_last_segment_wins_for_single_virtual() =>
         Assert.Equal("cat photo.jpg",
-            FileNaming.ForVirtual("Без имени.jpg", "https://x.com/a/cat%20photo.jpg?x=1", 1, default, Now));
+            FileNaming.ForVirtual("Без имени.jpg", "https://x.com/a/cat%20photo.jpg?x=1", 1, default, Now, SideBar.Core.Localization.UiTexts.Ru.ImageFileStem));
 
     [Fact]
     public void Url_is_ignored_for_multiple_virtual() =>
-        Assert.Equal("b.png", FileNaming.ForVirtual("b.png", "https://x.com/a/cat.jpg", 2, default, Now));
+        Assert.Equal("b.png", FileNaming.ForVirtual("b.png", "https://x.com/a/cat.jpg", 2, default, Now, SideBar.Core.Localization.UiTexts.Ru.ImageFileStem));
 
     [Fact]
     public void Missing_extension_is_added_from_magic() =>
-        Assert.Equal("pic.gif", FileNaming.ForVirtual("pic", null, 1, "GIF89a"u8, Now));
+        Assert.Equal("pic.gif", FileNaming.ForVirtual("pic", null, 1, "GIF89a"u8, Now, SideBar.Core.Localization.UiTexts.Ru.ImageFileStem));
 
     [Theory]
     [InlineData("Без имени.jpg")]

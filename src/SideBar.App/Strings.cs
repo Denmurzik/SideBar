@@ -12,7 +12,6 @@ static class Strings
     public const string LanguageRu = "\u0420\u0443\u0441\u0441\u043A\u0438\u0439";   // Русский
     public const string LanguageEn = "English";
 
-    static bool _russian = true;
     public static UiText T { get; private set; } = UiTexts.Ru;
 
     /// <summary>Вызывается один раз в начале OnLaunched; смена языка в настройках действует после перезапуска.</summary>
@@ -23,11 +22,10 @@ static class Strings
         // скриншоты: SIDEBAR_UI_LANG=ru|en перекрывает и настройку, и язык Windows
         lang = Environment.GetEnvironmentVariable("SIDEBAR_UI_LANG") switch { "en" => Language.English, "ru" => Language.Russian, _ => lang };
 #endif
-        _russian = lang == Language.Russian;
-        T = UiTexts.For(_russian ? "ru" : "en");
+        T = UiTexts.For(lang == Language.Russian ? "ru" : "en");
     }
 
-    public static string Files(int n) => T.Files(n, _russian);
+    public static string Files(int n) => T.Files(n);
     public static string Autostart => T.Autostart;
     public static string Exit => T.Exit;
     public static string VisibilityHidden => T.VisibilityHidden;

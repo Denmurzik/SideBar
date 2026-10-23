@@ -19,7 +19,7 @@ public static class FileNaming
         "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
     };
 
-    public static string ForVirtual(string sourceName, string? url, int virtualCount, ReadOnlySpan<byte> head, DateTime now, string? imageStem = null)
+    public static string ForVirtual(string sourceName, string? url, int virtualCount, ReadOnlySpan<byte> head, DateTime now, string imageStem)
     {
         var name = Sanitize(sourceName);
         var magicExt = ExtensionFromMagic(head);
@@ -30,7 +30,7 @@ public static class FileNaming
         {
             var ext = Path.GetExtension(name);
             if (ext.Length == 0) ext = magicExt ?? "";
-            name = Sanitize($"{imageStem ?? Localization.UiTexts.Ru.ImageFileStem} {now.ToString(Stamp, CultureInfo.InvariantCulture)}{ext}");
+            name = Sanitize($"{imageStem} {now.ToString(Stamp, CultureInfo.InvariantCulture)}{ext}");
         }
 
         if (Path.GetExtension(name).Length == 0 && magicExt != null)

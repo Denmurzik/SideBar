@@ -210,7 +210,7 @@ public class LocalizationTests
     [InlineData(0, "0 файлов", "0 files")]
     public void Files_plural_forms(int n, string ru, string en)
     {
-        Assert.Equal(ru, UiTexts.Ru.Files(n, russianPlural: true));
-        Assert.Equal(en, UiTexts.En.Files(n, russianPlural: false));
+        Assert.Equal(ru, UiTexts.Ru.Files(n));
+        Assert.Equal(en, UiTexts.En.Files(n));
     }
 }
