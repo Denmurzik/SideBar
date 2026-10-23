@@ -15,7 +15,10 @@ public sealed record PrivateCertificateData(
 
 /// <summary>
 /// A device's public certificate (from the official app's leveldb), already decoded.
-/// <paramref name="EncryptedMetadata"/> (optional) lets <see cref="CertificateIdentity.TryGetPeerName"/> name the device.
+/// <paramref name="EncryptedMetadata"/> (optional) lets <see cref="CertificateIdentity.TryGetPeerName"/> name the device
+/// and <see cref="CertificateIdentity.TryGetBluetoothTarget"/> read its Bluetooth MAC from an observed advertisement.
+/// <paramref name="MetadataEncryptionKey"/> (optional) decrypts that metadata without any advertisement, so
+/// <see cref="CertificateIdentity.FindBluetoothTargets"/> can list the device and make an endpoint info for it.
 /// </summary>
 public sealed record PublicCertificateData(
     byte[] SecretId, byte[] SecretKey, byte[] PublicKeySpki, byte[] KeyTag, byte[]? EncryptedMetadata = null,
@@ -135,8 +138,9 @@ public sealed class CertificateIdentity(
     public sealed record BluetoothTarget(string Key, string? DeviceName, byte[] Mac, EndpointInfo RemoteInfo);
 
     /// <summary>
-    /// Peer certificates that advertise a Bluetooth MAC (certificate metadata field 4), one entry per MAC. Lets Task 2
-    /// connect over Bluetooth to a device that is not reachable over Wi-Fi LAN (locked screen, no mDNS).
+    /// Peer certificates that advertise a Bluetooth MAC (certificate metadata field 4), one entry per MAC (the first
+    /// certificate wins, which is not necessarily the one the device advertises now: to connect to a device that was
+    /// actually seen, use <see cref="TryGetBluetoothTarget"/>).
     /// </summary>
     public IReadOnlyList<BluetoothTarget> FindBluetoothTargets()
     {
@@ -144,18 +148,32 @@ public sealed class CertificateIdentity(
         foreach (var cert in peers)
         {
             if (cert.MetadataEncryptionKey is not { Length: > 0 } metadataKey) continue;
-            if (cert.EncryptedMetadata is not { Length: >= 16 } encrypted) continue;
-            if (DecryptMetadata(cert.SecretKey, metadataKey, encrypted) is not { } metadata) continue;
-            if (!TryReadMetadataFields(metadata, out var mac, out var name) || mac is not { Length: 6 }) continue;
-
-            var macKey = Convert.ToHexString(mac);
-            if (byMac.ContainsKey(macKey)) continue;
-
             var salt = RandomNumberGenerator.GetBytes(2);
             var remoteInfo = new EndpointInfo { Metadata = [.. salt, .. NearbyCrypto.Ctr(cert.SecretKey, salt, metadataKey)] };
-            byMac[macKey] = new BluetoothTarget(Convert.ToHexString(cert.SecretId), name, mac, remoteInfo);
+            if (TargetOf(cert, metadataKey, remoteInfo) is { } target) byMac.TryAdd(Convert.ToHexString(target.Mac), target);
         }
         return byMac.Values.ToList();
+    }
+
+    /// <summary>
+    /// Bluetooth target of the device that advertised <paramref name="observed"/> (mDNS or BLE), built from the very
+    /// certificate that decrypts that advertisement. A phone holds several valid certificates at once (E3 in
+    /// docs/research/ble-locked-phone.md) and the PairedKey exchange must use the one it advertises now.
+    /// Null when the advertiser is unknown or its certificate carries no 6-byte MAC.
+    /// </summary>
+    public BluetoothTarget? TryGetBluetoothTarget(EndpointInfo observed)
+    {
+        if (FindPeer(observed) is not { } cert) return null;
+        var metadataKey = NearbyCrypto.Ctr(cert.SecretKey, observed.Metadata[..2], observed.Metadata[2..]);
+        return TargetOf(cert, metadataKey, observed);
+    }
+
+    private static BluetoothTarget? TargetOf(PublicCertificateData cert, byte[] metadataKey, EndpointInfo remoteInfo)
+    {
+        if (cert.EncryptedMetadata is not { Length: >= 16 } encrypted) return null;
+        if (DecryptMetadata(cert.SecretKey, metadataKey, encrypted) is not { } metadata) return null;
+        if (!TryReadMetadataFields(metadata, out var mac, out var name) || mac is not { Length: 6 }) return null;
+        return new BluetoothTarget(Convert.ToHexString(cert.SecretId), name, mac, remoteInfo);
     }
 
     /// <summary>Stable identifier of a peer advertising with one of our known certificates, for dedup across transports.</summary>
@@ -166,20 +184,23 @@ public sealed class CertificateIdentity(
     internal static string? DeviceName(byte[]? metadata) =>
         metadata is not null && TryReadMetadataFields(metadata, out _, out var name) ? name : null;
 
-    // Parses EncryptedMetadata once and reads both fields callers care about; malformed input (bad protobuf or
-    // non-UTF8 name) makes the certificate unreadable, not an error for the caller to propagate.
+    // Parses EncryptedMetadata once and reads both fields callers care about; malformed protobuf makes the certificate
+    // unreadable (not an error for the caller to propagate), a non-UTF8 name costs only the name, not the MAC.
     private static bool TryReadMetadataFields(byte[] metadata, out byte[]? mac, out string? name)
     {
         mac = null;
         name = null;
+        byte[]? rawName;
         try
         {
             var fields = ProtoReader.Parse(metadata);
             mac = ProtoReader.Bytes(fields, 4);
-            name = ProtoReader.Bytes(fields, 1) is { } raw ? new UTF8Encoding(false, true).GetString(raw) : null;
-            return true;
+            rawName = ProtoReader.Bytes(fields, 1);
         }
         catch (Exception e) when (e is InvalidDataException or ArgumentException) { return false; }
+        try { name = rawName is null ? null : new UTF8Encoding(false, true).GetString(rawName); }
+        catch (DecoderFallbackException) { }
+        return true;
     }
 
     internal static byte[]? DecryptMetadata(byte[] secretKey, byte[] metadataKey, byte[] encrypted)

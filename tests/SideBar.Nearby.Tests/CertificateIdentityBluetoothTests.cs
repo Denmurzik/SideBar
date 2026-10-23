@@ -50,14 +50,70 @@ public class CertificateIdentityBluetoothTests
         Assert.Equal(mac, targets[0].Mac);
     }
 
+    private static CertificateIdentity NewIdentity(params PublicCertificateData[] peers) => new(
+        new PrivateCertificateData(RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(14), NewOwnKeyPair()),
+        peers);
+
+    [Fact]
+    public void TryGetBluetoothTarget_uses_the_certificate_that_was_actually_advertised()
+    {
+        // E3 (docs/research/ble-locked-phone.md): one phone, several valid certificates at once, one MAC.
+        var mac = Convert.FromHexString("0A1B2C3D4E5F");
+        var first = CertFixtures.NewDevice("Pixel 9", bluetoothMac: mac);
+        var second = CertFixtures.NewDevice("Pixel 9", bluetoothMac: mac);
+        var identity = NewIdentity(ToPublicCertificateData(first), ToPublicCertificateData(second));
+        // What the phone advertises right now: an endpoint info made with the SECOND certificate.
+        var observed = NewIdentity(ToPublicCertificateData(second)).FindBluetoothTargets()[0].RemoteInfo;
+
+        var target = identity.TryGetBluetoothTarget(observed);
+
+        Assert.NotNull(target);
+        Assert.Equal(Convert.ToHexString(second.Public.SecretId), target.Key);
+        Assert.NotEqual(Convert.ToHexString(first.Public.SecretId), target.Key);
+        Assert.Equal(identity.TryGetPeerKey(observed), target.Key);
+        Assert.Equal(mac, target.Mac);
+        Assert.Equal("Pixel 9", target.DeviceName);
+        Assert.Equal(target.Key, identity.TryGetPeerKey(target.RemoteInfo));
+    }
+
+    [Fact]
+    public void TryGetBluetoothTarget_returns_null_for_an_unknown_advertiser()
+    {
+        var identity = NewIdentity(ToPublicCertificateData(CertFixtures.NewDevice("Pixel 9", bluetoothMac: Convert.FromHexString("AABBCCDDEEFF"))));
+        var stranger = NewIdentity(ToPublicCertificateData(CertFixtures.NewDevice("Other", bluetoothMac: Convert.FromHexString("AABBCCDDEEFF"))))
+            .FindBluetoothTargets()[0].RemoteInfo;
+
+        Assert.Null(identity.TryGetBluetoothTarget(stranger));
+    }
+
+    [Fact]
+    public void A_name_that_is_not_utf8_does_not_cost_the_mac()
+    {
+        var mac = Convert.FromHexString("C0FFEE123456");
+        byte[] plain = [0x0A, 2, 0xC3, 0x28, (4 << 3) | 2, 6, .. mac];   // C3 28: invalid UTF-8 sequence
+        var cert = NewCertWithMetadata(plain);
+        var identity = NewIdentity(cert);
+
+        var targets = identity.FindBluetoothTargets();
+
+        Assert.Single(targets);
+        Assert.Equal(mac, targets[0].Mac);
+        Assert.Null(targets[0].DeviceName);
+        var observed = identity.TryGetBluetoothTarget(targets[0].RemoteInfo);
+        Assert.NotNull(observed);
+        Assert.Equal(mac, observed.Mac);
+        Assert.Null(observed.DeviceName);
+    }
+
     // The AEAD tag verifies (so DecryptMetadata succeeds) but the plaintext is not valid protobuf: wire type 6 does
     // not exist, so ProtoReader.Parse throws InvalidDataException. One such certificate must not stop the search.
-    private static PublicCertificateData NewCertWithUnparsableMetadata()
+    private static PublicCertificateData NewCertWithUnparsableMetadata() => NewCertWithMetadata([0x0E]);
+
+    private static PublicCertificateData NewCertWithMetadata(byte[] plain)
     {
         var secretKey = RandomNumberGenerator.GetBytes(32);
         var metadataKey = RandomNumberGenerator.GetBytes(14);
         using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        byte[] plain = [0x0E];
         var aesKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, metadataKey, 32, [], []);
         var nonce = HKDF.DeriveKey(HashAlgorithmName.SHA256, secretKey, 12, [], []);
         var cipher = new byte[plain.Length];

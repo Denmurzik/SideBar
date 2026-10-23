@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using Google.Protobuf;
+using SideBar.Nearby.Identity;
 using SideBar.Nearby.Session;
 using SideBar.Nearby.Wire;
 using Bwu = SideBar.Nearby.Protocol.Connections.BandwidthUpgradeNegotiationFrame.Types.EventType;
@@ -19,12 +20,27 @@ public sealed class BandwidthUpgradeTests : IDisposable
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "sidebar-nearby-bwu-" + Guid.NewGuid().ToString("N"));
     private readonly TcpListener _wifi = new(IPAddress.Loopback, 0);
     private readonly List<IPEndPoint> _dialed = [];
+    // The upgrade is only ever taken from a peer whose PairedKey verified: the phone and the PC are own devices.
+    private readonly CertificateIdentity _phone;
+    private readonly CertificateIdentity _pc;
+    private readonly EndpointInfo _phoneAdvertisement;
 
     public BandwidthUpgradeTests()
     {
         Directory.CreateDirectory(_dir);
         _wifi.Start();
+        var phone = CertFixtures.NewDevice("Pixel 9");
+        var pc = CertFixtures.NewDevice("My PC");
+        _phone = new CertificateIdentity(PrivateOf(phone), [PublicOf(pc)]);
+        _pc = new CertificateIdentity(PrivateOf(pc), [PublicOf(phone)]);
+        _phoneAdvertisement = _phone.CreateEndpointInfo("Pixel 9", DeviceKind.Phone);
     }
+
+    private static PrivateCertificateData PrivateOf(CertFixtures.Device d) =>
+        new(d.Private.SecretKey, d.Private.MetadataEncryptionKey, d.Private.KeyPairPkcs8);
+
+    private static PublicCertificateData PublicOf(CertFixtures.Device d) =>
+        new(d.Public.SecretId, d.Public.SecretKey, d.Public.PublicKey, d.Public.KeyTag, d.Public.EncryptedMetadata);
 
     public void Dispose()
     {
@@ -44,8 +60,11 @@ public sealed class BandwidthUpgradeTests : IDisposable
         return (path, content);
     }
 
-    private SessionOptions Options(bool refuse = false) => new("PC")
+    // As NearbyService.SendBluetoothAsync: own device, verification required, a Wi-Fi LAN connector.
+    private SessionOptions Options(bool refuse = false) => new("PC", Identity: _pc)
     {
+        RemoteEndpointInfo = _phoneAdvertisement,
+        RequireVerifiedPeer = true,
         ConnectWifiLanUpgradeAsync = async (endpoint, ct) =>
         {
             lock (_dialed) _dialed.Add(endpoint);
@@ -66,10 +85,11 @@ public sealed class BandwidthUpgradeTests : IDisposable
     private static bool IsIntroduction(List<Share.Frame> frames) =>
         frames.Any(f => f.V1?.Type == Share.V1Frame.Types.FrameType.Introduction);
 
-    private static async Task<RawReceiver> AcceptTransferAsync(Stream old, FileSink sink, CancellationToken ct)
+    // signer null: the peer's key does not verify.
+    private async Task<RawReceiver> AcceptTransferAsync(Stream old, FileSink sink, CancellationToken ct, bool verified = true)
     {
         var peer = await RawReceiver.HandshakeAsync(old, ct);
-        await peer.SendPairedKeyEncryptionAsync(old, ct);
+        await peer.SendPairedKeyEncryptionAsync(old, ct, verified ? _phone : null);
         await peer.SendPairedKeyResultAsync(old, ct);
         var sharing = new List<Share.Frame>();
         await peer.ReadUntilAsync(old, _ => IsIntroduction(sharing), sink, ct, sharing);
@@ -138,7 +158,7 @@ public sealed class BandwidthUpgradeTests : IDisposable
         var send = SendSession.SendFilesAsync(link.Client, Options(), [file], null, ct);
 
         var peer = await RawReceiver.HandshakeAsync(old, ct);
-        await peer.SendPairedKeyEncryptionAsync(old, ct);
+        await peer.SendPairedKeyEncryptionAsync(old, ct, _phone);
         await peer.SendAsync(old, TestFrames.UpgradePathAvailable(WifiEndpoint, ack: false), ct);
         // The peer is not checked yet: the offer must not make the sender dial anything.
         await Task.Delay(300, ct);
@@ -174,8 +194,7 @@ public sealed class BandwidthUpgradeTests : IDisposable
         var (file, _) = MakeFile(100);
         using var link = await Link.OpenAsync(ct);
         var old = link.Server;
-        var options = Options() with { RequireVerifiedPeer = true };
-        var send = SendSession.SendFilesAsync(link.Client, options, [file], null, ct);
+        var send = SendSession.SendFilesAsync(link.Client, Options(), [file], null, ct);
 
         var peer = await RawReceiver.HandshakeAsync(old, ct);
         await peer.SendPairedKeyEncryptionAsync(old, ct);
@@ -213,6 +232,37 @@ public sealed class BandwidthUpgradeTests : IDisposable
         Assert.Equal(TransferStatus.Completed, (await send).Status);
         Assert.Equal(content, sink.Bytes);
         Assert.False(bwuFromSender);
+        Assert.False(_wifi.Pending());
+    }
+
+    [Fact]
+    public async Task Connector_without_a_verified_peer_is_never_used_even_if_verification_is_not_required()
+    {
+        // Defense in depth: a future caller that sets a connector but not RequireVerifiedPeer must not reopen the
+        // unauthenticated "dial this address" oracle.
+        var ct = Token();
+        var (file, content) = MakeFile(OfflineFrames.PayloadChunkSize * 2 + 9);
+        using var link = await Link.OpenAsync(ct);
+        var old = link.Server;
+        var send = SendSession.SendFilesAsync(link.Client, Options() with { RequireVerifiedPeer = false }, [file], null, ct);
+
+        var sink = new FileSink();
+        var peer = await AcceptTransferAsync(old, sink, ct, verified: false);
+        await peer.SendAsync(old, TestFrames.UpgradePathAvailable(WifiEndpoint, ack: true), ct);
+        var bwuFromSender = false;
+        await peer.ReadUntilAsync(old, f =>
+        {
+            bwuFromSender |= f.V1?.Type == Conn.V1Frame.Types.FrameType.BandwidthUpgradeNegotiation;
+            return sink.Done;
+        }, sink, ct);
+        await peer.SendAsync(old, OfflineFrames.Disconnection(), ct);
+
+        var result = await send;
+        Assert.Equal(TransferStatus.Completed, result.Status);
+        Assert.False(result.PeerVerified);
+        Assert.Equal(content, sink.Bytes);
+        Assert.False(bwuFromSender);
+        Assert.Empty(_dialed);
         Assert.False(_wifi.Pending());
     }
 

@@ -35,8 +35,15 @@ sealed class NearbyService : IDisposable
     QuickShareBrowser? _browser;
     CancellationTokenSource? _cts;
     readonly Dictionary<string, Timer> _lostGrace = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Свои устройства из mDNS (по InstanceName): ключ сертификата и MAC, по ним они сверяются с BLE.</summary>
+    readonly Dictionary<string, OwnDevice> _ownEndpoints = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Свои устройства, увиденные по BLE (Bluetooth-плитки "ble:" + Key), не по mDNS.</summary>
     readonly Dictionary<string, CertificateIdentity.BluetoothTarget> _bleTargets = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Все свои устройства, слышные сейчас по BLE, включая подавленные (уже показаны по mDNS или тем же MAC с другим
+    /// сертификатом): наблюдатель не повторяет Found, пока устройство слышно, так что помнить их надо здесь.
+    /// </summary>
+    readonly Dictionary<string, CertificateIdentity.BluetoothTarget> _blePresent = new(StringComparer.Ordinal);
     BleOwnDeviceWatcher? _ble;
     Task<(List<string> Files, bool Truncated)> _files = Task.FromResult((new List<string>(), false));
     CancellationTokenSource? _expandCts;
@@ -91,7 +98,7 @@ sealed class NearbyService : IDisposable
     /// <summary>Идёт поиск устройств или отправка.</summary>
     public bool Busy
     {
-        get { lock (_gate) return _browser is not null || _cts is not null; }
+        get { lock (_gate) return _browser is not null || _ble is not null || _cts is not null; }
     }
 
     /// <summary>Начинает поиск устройств; предыдущий сеанс отменяется. UI-поток.</summary>
@@ -112,7 +119,9 @@ sealed class NearbyService : IDisposable
         {
             epoch = ++_epoch;
             _endpoints.Clear();
+            _ownEndpoints.Clear();
             _bleTargets.Clear();
+            _blePresent.Clear();
             _expandCts = new CancellationTokenSource();
             var token = _expandCts.Token;
             // перечисление каталогов может быть долгим: не на UI-потоке, отменяется вместе с сеансом
@@ -176,50 +185,93 @@ sealed class NearbyService : IDisposable
     {
         if (!IncludeLocal && QuickShareAdvertiser.IsLocalAddress(endpoint.Address)) return;   // свои же объявления
         if (!PassesDebugNameFilter(endpoint.DisplayName)) return;
-        var view = ViewOf(endpoint);   // не трогает _gate-состояние: крипто-проверка идёт до критической секции
+        // крипто-проверки идут до критической секции и не трогают _gate-состояние
+        var view = ViewOf(endpoint);
+        var own = OwnDeviceOf(endpoint);
         lock (_gate)
         {
             if (epoch != _epoch) return;
             _endpoints[endpoint.InstanceName] = endpoint;
+            if (own is { } device) _ownEndpoints[endpoint.InstanceName] = device;
+            else _ownEndpoints.Remove(endpoint.InstanceName);
             if (_lostGrace.Remove(endpoint.InstanceName, out var pending)) pending.Dispose();
-            // mDNS увидел то же своё устройство, что уже показано по BLE: mDNS в приоритете, BLE-тайл убирается.
+            // mDNS увидел то же своё устройство, что уже показано по BLE: mDNS в приоритете, BLE-тайл убирается
+            // (сама BLE-presence помнится в _blePresent: устройство вернётся по BLE, если пропадёт из mDNS).
             // Post здесь же, под тем же _gate, что и мутация _bleTargets/_endpoints: иначе порядок доставки на
             // UI-поток мог разойтись с порядком захвата лока между потоками mDNS и BLE (два независимых
             // источника могут захватить лок в одном порядке, но позвать Post — в другом).
-            if (KeyOf(endpoint) is { } bleKey && _bleTargets.Remove(bleKey))
-                Post(epoch, () => DeviceLost?.Invoke("ble:" + bleKey));
+            if (own is { } shown)
+                foreach (var bleKey in _bleTargets.Where(p => SameDevice(shown, p.Value)).Select(p => p.Key).ToList())
+                {
+                    _bleTargets.Remove(bleKey);
+                    Post(epoch, () => DeviceLost?.Invoke("ble:" + bleKey));
+                }
             Post(epoch, () => DeviceFound?.Invoke(view));
         }
         Log.Write($"share: device found, kind {endpoint.Kind}");
     }
 
-    // устройство из mDNS как "своё" (для сравнения с BLE-presence по общему Key, не по InstanceName)
-    string? KeyOf(DiscoveredEndpoint endpoint) => OwnIdentity(endpoint)?.TryGetPeerKey(endpoint.Info);
+    /// <summary>Своё устройство из mDNS: ключ сертификата и MAC (null, если сертификат его не несёт).</summary>
+    readonly record struct OwnDevice(string Key, string? Mac);
+
+    // устройство из mDNS как "своё" (для сравнения с BLE-presence по ключу или MAC, не по InstanceName): у телефона
+    // несколько действующих сертификатов сразу (E3), по mDNS и BLE он может рекламироваться разными
+    OwnDevice? OwnDeviceOf(DiscoveredEndpoint endpoint)
+    {
+        if (OwnIdentity(endpoint) is not { } identity) return null;
+        if (identity.TryGetBluetoothTarget(endpoint.Info) is { } target) return new OwnDevice(target.Key, Convert.ToHexString(target.Mac));
+        return identity.TryGetPeerKey(endpoint.Info) is { } key ? new OwnDevice(key, null) : null;
+    }
+
+    static bool SameDevice(OwnDevice device, CertificateIdentity.BluetoothTarget target) =>
+        device.Key == target.Key || device.Mac == Convert.ToHexString(target.Mac);
+
+    static bool SameMac(CertificateIdentity.BluetoothTarget a, CertificateIdentity.BluetoothTarget b) => a.Mac.AsSpan().SequenceEqual(b.Mac);
 
     // рабочий поток BLE-наблюдателя: своё устройство увидено по рекламе Nearby (FEF3), не по mDNS — обычно экран
-    // заблокирован. mDNS в приоритете: если устройство уже показано через него, BLE-тайл не создаётся (дедуп).
+    // заблокирован. Цель строится по тому сертификату, которым телефон рекламируется сейчас (не по первому
+    // попавшемуся с тем же MAC): с ним же потом идёт PairedKey.
     void OnBlePresenceFound(int epoch, BlePresence presence)
     {
-        var view = new DeviceView("ble:" + presence.Key, DisplayText.SanitizeName(presence.DeviceName, Strings.OwnDevice), ShareDeviceKind.Phone, IsOwn: true);
+        var target = _identity.Current?.TryGetBluetoothTarget(presence.Info);
+        if (target is null)
+        {
+            Log.Write("share: device over bluetooth has no usable address");
+            return;
+        }
+        bool shown;
         lock (_gate)
         {
-            if (epoch != _epoch) return;
-            if (_endpoints.Values.Any(e => KeyOf(e) == presence.Key)) return;
-            var target = _identity.Current?.FindBluetoothTargets().FirstOrDefault(t => t.Key == presence.Key);
-            if (target is null) return;
-            _bleTargets[presence.Key] = target;
-            Post(epoch, () => DeviceFound?.Invoke(view));   // внутри лока по той же причине, что в OnFound
+            // отправка уже идёт (_cts): наблюдатель остановлен, запоздалое событие не должно рисовать плитку
+            if (epoch != _epoch || _cts is not null) return;
+            _blePresent[target.Key] = target;
+            shown = TryShowBleLocked(epoch, target);
         }
-        Log.Write("share: device found over bluetooth");
+        if (shown) Log.Write("share: device found over bluetooth");
     }
 
     void OnBleLost(int epoch, string key)
     {
         lock (_gate)
         {
-            if (epoch != _epoch || !_bleTargets.Remove(key)) return;
+            if (epoch != _epoch || !_blePresent.Remove(key, out var gone) || !_bleTargets.Remove(key)) return;
             Post(epoch, () => DeviceLost?.Invoke("ble:" + key));
+            // тот же телефон может быть ещё слышен с другим своим сертификатом: его плитка была подавлена этой
+            foreach (var other in _blePresent.Values.Where(p => SameMac(p, gone)).ToList())
+                TryShowBleLocked(epoch, other);
         }
+    }
+
+    // только под _gate. BLE-плитка не показывается, если устройство уже есть по mDNS (mDNS в приоритете) или по BLE
+    // с другим своим сертификатом того же MAC. Post внутри лока по той же причине, что в OnFound.
+    bool TryShowBleLocked(int epoch, CertificateIdentity.BluetoothTarget target)
+    {
+        if (_ownEndpoints.Values.Any(d => SameDevice(d, target))) return false;
+        if (_bleTargets.Values.Any(t => SameMac(t, target))) return false;
+        _bleTargets[target.Key] = target;
+        var view = new DeviceView("ble:" + target.Key, DisplayText.SanitizeName(target.DeviceName, Strings.OwnDevice), ShareDeviceKind.Phone, IsOwn: true);
+        Post(epoch, () => DeviceFound?.Invoke(view));
+        return true;
     }
 
     // своё устройство рекламирует себя без имени: имя берётся из его сертификата; чужое называется по mDNS (имя задаёт пир)
@@ -269,8 +321,13 @@ sealed class NearbyService : IDisposable
                     if (epoch != _epoch || !_lostGrace.Remove(name, out var t)) return;
                     t.Dispose();
                     _endpoints.Remove(name);
+                    Post(epoch, () => DeviceLost?.Invoke(name));
+                    // экран телефона заблокировали посреди поиска: mDNS пропал, а BLE-реклама шла всё время и была
+                    // подавлена mDNS-плиткой; наблюдатель её Found не повторит, поэтому плитка по BLE появляется сейчас
+                    if (_ownEndpoints.Remove(name, out var gone))
+                        foreach (var present in _blePresent.Values.Where(p => SameDevice(gone, p)).ToList())
+                            TryShowBleLocked(epoch, present);
                 }
-                Post(epoch, () => DeviceLost?.Invoke(name));
             }, null, LostGrace, Timeout.InfiniteTimeSpan);
         }
     }
@@ -309,6 +366,7 @@ sealed class NearbyService : IDisposable
         CancellationToken ct;
         Task<(List<string> Files, bool Truncated)> files;
         QuickShareBrowser? browser;
+        BleOwnDeviceWatcher? ble;
         lock (_gate)
         {
             if (_cts is not null) return;   // отправка уже идёт
@@ -329,11 +387,15 @@ sealed class NearbyService : IDisposable
             }
             files = _files;
             browser = _browser;
+            ble = _ble;
             _browser = null;
+            _ble = null;
+            _blePresent.Clear();   // наблюдатель остановлен: его presence больше не обновится
             _cts = new CancellationTokenSource();
             ct = _cts.Token;
         }
         try { browser?.Dispose(); } catch (Exception e) { Log.Write("share: browser dispose failed: " + Log.Describe(e)); }
+        try { ble?.Dispose(); } catch (Exception e) { Log.Write("share: ble dispose failed: " + Log.Describe(e)); }
         _ = Task.Run(() => SendAsync(epoch, target, files, ct));
     }
 
@@ -367,6 +429,7 @@ sealed class NearbyService : IDisposable
             ble = _ble;
             _browser = null;
             _ble = null;
+            _blePresent.Clear();   // наблюдатель остановлен: его presence больше не обновится
             _cts = new CancellationTokenSource();
             ct = _cts.Token;
         }
@@ -421,7 +484,7 @@ sealed class NearbyService : IDisposable
             }
             using (stream)
             {
-                // цель из FindBluetoothTargets: своё устройство, верификация обязательна, как для mDNS own
+                // цель из TryGetBluetoothTarget: своё устройство, верификация обязательна, как для mDNS own
                 var options = new SessionOptions(DeviceNames.Resolve(_settings.Current, Environment.MachineName), DeviceKind.Laptop, _identity.Current)
                 {
                     RemoteEndpointInfo = target.RemoteInfo,
@@ -479,7 +542,9 @@ sealed class NearbyService : IDisposable
             _ble = null;
             _cts = null;
             _endpoints.Clear();
+            _ownEndpoints.Clear();
             _bleTargets.Clear();
+            _blePresent.Clear();
             foreach (var t in _lostGrace.Values) t.Dispose();
             _lostGrace.Clear();
         }

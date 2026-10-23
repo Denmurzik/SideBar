@@ -100,7 +100,7 @@ public sealed record SessionOptions(
     /// Sending: opens the Wi-Fi LAN socket the receiver offers in a bandwidth upgrade (normally
     /// <see cref="SendSession.ConnectWifiLanAsync"/>). Null (the default) ignores such offers: set it only for a slow
     /// transport such as Bluetooth, a session already on Wi-Fi LAN has no use for it. Offers are acted on only after
-    /// the paired-key exchange (and its verification when <see cref="RequireVerifiedPeer"/>).
+    /// the paired-key exchange, and only from a peer whose key verified (whatever <see cref="RequireVerifiedPeer"/> says).
     /// </summary>
     public Func<IPEndPoint, CancellationToken, Task<Stream>>? ConnectWifiLanUpgradeAsync { get; init; }
 

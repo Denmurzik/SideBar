@@ -127,8 +127,10 @@ public static class SendSession
                         if (!connection.WriteFaulted) await TrySendCancelAsync(connection);
                         return new TransferResult(TransferStatus.Failed, [], TransferDetails.Unverified);
                     }
-                    // Only now may the receiver move us to the Wi-Fi LAN address it names (an earlier offer waits until here).
-                    if (options.ConnectWifiLanUpgradeAsync is { } connect)
+                    // Only now, and only for a verified peer, may the receiver move us to the Wi-Fi LAN address it names
+                    // (an earlier offer waits until here). Not tied to RequireVerifiedPeer: an unverified peer would turn
+                    // the connector into a "dial any address" oracle whatever the caller's options say.
+                    if (peerVerified && options.ConnectWifiLanUpgradeAsync is { } connect)
                         connection.AllowBandwidthUpgrade(endpointId, connect);
                     introduced = true;
                     await connection.SendSharingAsync(SharingFrames.Introduction(entries.Select(e => e.Metadata), texts.Select(t => t.Metadata)), ct);

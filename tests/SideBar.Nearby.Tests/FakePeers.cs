@@ -276,9 +276,10 @@ internal sealed class RawReceiver
         await SendAsync(stream, OfflineFrames.PayloadChunk(header, data.Length, [], last: true), ct);
     }
 
-    public Task SendPairedKeyEncryptionAsync(Stream stream, CancellationToken ct) =>
+    /// <summary><paramref name="signer"/> null: an anonymous key the sender cannot verify.</summary>
+    public Task SendPairedKeyEncryptionAsync(Stream stream, CancellationToken ct, IShareIdentity? signer = null) =>
         SendSharingAsync(stream, SharingFrames.PairedKeyEncryption(
-            new AnonymousIdentity().CreatePairedKeyEncryption(_authString, PairedKeyRole.Receiver, null)), ct);
+            (signer ?? new AnonymousIdentity()).CreatePairedKeyEncryption(_authString, PairedKeyRole.Receiver, null)), ct);
 
     public Task SendPairedKeyResultAsync(Stream stream, CancellationToken ct) =>
         SendSharingAsync(stream, SharingFrames.PairedKeyResult(Share.PairedKeyResultFrame.Types.Status.Unable), ct);

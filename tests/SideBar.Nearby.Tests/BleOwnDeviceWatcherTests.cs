@@ -33,11 +33,12 @@ public class BleOwnDeviceWatcherTests
         // 1 ведущий байт обёртки (игнорируется), затем ровно 16-байтовое Metadata на смещении 0.
         byte[] serviceData = [.. Uuid(0xFEF3), 0x00, .. target.RemoteInfo.Metadata];
 
-        var found = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData, out var key, out var name);
+        var presence = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData);
 
-        Assert.True(found);
-        Assert.Equal(target.Key, key);
-        Assert.Equal("Pixel 9", name);
+        Assert.NotNull(presence);
+        Assert.Equal(target.Key, presence.Key);
+        Assert.Equal(target.RemoteInfo.Metadata, presence.Info.Metadata);
+        Assert.Equal("Pixel 9", identity.TryGetBluetoothTarget(presence.Info)?.DeviceName);
     }
 
     [Fact]
@@ -50,10 +51,30 @@ public class BleOwnDeviceWatcherTests
         byte[] wrapper = RandomNumberGenerator.GetBytes(8);
         byte[] serviceData = [.. Uuid(0xFEF3), .. wrapper, 0x00, .. target.RemoteInfo.Metadata];
 
-        var found = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData, out var key, out _);
+        var presence = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData);
 
-        Assert.True(found);
-        Assert.Equal(target.Key, key);
+        Assert.NotNull(presence);
+        Assert.Equal(target.Key, presence.Key);
+    }
+
+    [Fact]
+    public void Presence_of_the_second_of_two_same_mac_certificates_resolves_to_that_certificate()
+    {
+        // E3: the phone holds several valid certificates and advertises one of them, not necessarily the first.
+        var mac = Convert.FromHexString("0A1B2C3D4E5F");
+        var first = CertFixtures.NewDevice("Pixel 9", bluetoothMac: mac);
+        var second = CertFixtures.NewDevice("Pixel 9", bluetoothMac: mac);
+        var identity = NewIdentity(first, second);
+        var advertised = NewIdentity(second).FindBluetoothTargets()[0].RemoteInfo;
+        byte[] serviceData = [.. Uuid(0xFEF3), 0x00, .. advertised.Metadata];
+
+        var presence = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData);
+        var target = identity.TryGetBluetoothTarget(presence!.Info);
+
+        Assert.Equal(Convert.ToHexString(second.Public.SecretId), presence.Key);
+        Assert.NotNull(target);
+        Assert.Equal(presence.Key, target.Key);
+        Assert.Equal(mac, target.Mac);
     }
 
     [Fact]
@@ -64,9 +85,9 @@ public class BleOwnDeviceWatcherTests
         var target = identity.FindBluetoothTargets()[0];
         byte[] serviceData = [.. Uuid(0xFE2C), 0x00, .. target.RemoteInfo.Metadata];   // Fast Init, не Nearby Connections
 
-        var found = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData, out _, out _);
+        var found = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData);
 
-        Assert.False(found);
+        Assert.Null(found);
     }
 
     [Fact]
@@ -75,9 +96,9 @@ public class BleOwnDeviceWatcherTests
         var identity = NewIdentity(CertFixtures.NewDevice("Other", bluetoothMac: Convert.FromHexString("AABBCCDDEEFF")));
         byte[] serviceData = [.. Uuid(0xFEF3), .. RandomNumberGenerator.GetBytes(27)];   // len=27, как в E2, но чужое тело
 
-        var found = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData, out _, out _);
+        var found = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData);
 
-        Assert.False(found);
+        Assert.Null(found);
     }
 
     [Fact]
@@ -86,8 +107,8 @@ public class BleOwnDeviceWatcherTests
         var identity = NewIdentity(CertFixtures.NewDevice("Pixel 9", bluetoothMac: Convert.FromHexString("AABBCCDDEEFF")));
         byte[] serviceData = [.. Uuid(0xFEF3), .. new byte[16]];   // body.Length = 16, нужно минимум 17
 
-        var found = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData, out _, out _);
+        var found = BleOwnDeviceWatcher.TryParseAdvertisement(identity, serviceData);
 
-        Assert.False(found);
+        Assert.Null(found);
     }
 }

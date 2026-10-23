@@ -9,7 +9,7 @@ using SideBar.Nearby.Wire;
 namespace SideBar.Nearby.Discovery;
 
 /// <summary>Своё устройство, увиденное по BLE-рекламе, а не по mDNS.</summary>
-public sealed record BlePresence(string Key, string? DeviceName);
+public sealed record BlePresence(string Key, EndpointInfo Info);
 
 /// <summary>
 /// Слушает BLE-рекламу Nearby Connections и поднимает <see cref="Found"/>/<see cref="Lost"/> по устройствам,
@@ -51,7 +51,7 @@ public sealed class BleOwnDeviceWatcher(Func<CertificateIdentity?> identity) : I
         foreach (var section in args.Advertisement.DataSections)
         {
             if (section.DataType != ServiceData16) continue;
-            if (TryParseAdvertisement(id, section.Data.ToArray(), out var key, out var name)) Touch(key, name);
+            if (TryParseAdvertisement(id, section.Data.ToArray()) is { } presence) Touch(presence);
         }
     }
 
@@ -61,28 +61,25 @@ public sealed class BleOwnDeviceWatcher(Func<CertificateIdentity?> identity) : I
     /// (ble-locked-phone.md §2.2), поэтому, как и E2, перебираются все смещения, с которых может начинаться этот
     /// 16-байтовый кусок (один ведущий байт обёртки перед ним на каждом смещении).
     /// </summary>
-    internal static bool TryParseAdvertisement(CertificateIdentity identity, byte[] serviceData, out string key, out string? deviceName)
+    internal static BlePresence? TryParseAdvertisement(CertificateIdentity identity, byte[] serviceData)
     {
-        key = "";
-        deviceName = null;
-        if (serviceData.Length < 2) return false;
-        if ((ushort)(serviceData[0] | (serviceData[1] << 8)) != NearbyConnectionsUuid) return false;
+        if (serviceData.Length < 2) return null;
+        if ((ushort)(serviceData[0] | (serviceData[1] << 8)) != NearbyConnectionsUuid) return null;
 
         var body = serviceData.AsSpan(2);
         for (var o = 0; o + 1 + EndpointInfo.MetadataLength <= body.Length; o++)
         {
             var candidate = new EndpointInfo { Metadata = body.Slice(o + 1, EndpointInfo.MetadataLength).ToArray() };
-            if (!identity.Identify(candidate)) continue;
-            if (identity.TryGetPeerKey(candidate) is not { } foundKey) continue;
-            key = foundKey;
-            deviceName = identity.TryGetPeerName(candidate);
-            return true;
+            // сам кадр, а не ключ: у телефона бывает несколько действующих сертификатов (E3), и цель для Bluetooth
+            // строится по тому, которым он рекламируется сейчас (CertificateIdentity.TryGetBluetoothTarget)
+            if (identity.TryGetPeerKey(candidate) is { } key) return new BlePresence(key, candidate);
         }
-        return false;
+        return null;
     }
 
-    private void Touch(string key, string? name)
+    private void Touch(BlePresence presence)
     {
+        var key = presence.Key;
         bool isNew;
         lock (_gate)
         {
@@ -90,7 +87,7 @@ public sealed class BleOwnDeviceWatcher(Func<CertificateIdentity?> identity) : I
             if (_presence.TryGetValue(key, out var existing)) { existing.Change(PresenceTimeout, Timeout.InfiniteTimeSpan); isNew = false; }
             else { _presence[key] = new Timer(_ => OnTimeout(key), null, PresenceTimeout, Timeout.InfiniteTimeSpan); isNew = true; }
         }
-        if (isNew) Found?.Invoke(new BlePresence(key, name));
+        if (isNew) Found?.Invoke(presence);
     }
 
     private void OnTimeout(string key)

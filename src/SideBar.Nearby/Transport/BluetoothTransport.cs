@@ -20,6 +20,7 @@ public static class RfcommClient
     /// </summary>
     public static async Task<Stream> ConnectAsync(byte[] mac6, CancellationToken ct)
     {
+        if (mac6.Length != 6) throw new ArgumentException("A Bluetooth MAC is 6 bytes.", nameof(mac6));
         ulong address = 0;
         foreach (var b in mac6) address = (address << 8) | b;
 
