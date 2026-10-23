@@ -1,13 +1,15 @@
 <Window x:Class="SideBar.CardWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:shelf="using:SideBar.Shelf">
+        xmlns:shelf="using:SideBar.Shelf"
+        xmlns:nearby="using:SideBar.Nearby">
   <Grid x:Name="Root" Background="Transparent">
     <Border x:Name="Panel" CornerRadius="8" BorderThickness="1">
       <Grid x:Name="Fill" CornerRadius="8">
         <Grid Margin="12" RowDefinitions="*,12,*">
-          <Border x:Name="QsTile" Grid.Row="0" CornerRadius="4" Background="#14FFFFFF" BorderThickness="1">
-            <Viewbox Width="40" Height="40" Opacity="0.4" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <Border x:Name="QsTile" Grid.Row="0" CornerRadius="4" AllowDrop="True" DragOver="QsTile_DragOver" Drop="QsTile_Drop" Background="#14FFFFFF" BorderThickness="1">
+            <Grid>
+            <Viewbox x:Name="QsLogo" Width="40" Height="40" Opacity="0.4" HorizontalAlignment="Center" VerticalAlignment="Center">
               <Canvas Width="160" Height="160">
               <Path Data="M183.827 110.596c-3.629 0-6.738-2.738-7.119-6.405-3.466-33.6-31.716-58.936-65.706-58.936-27.54 0-51.718 16.758-61.499 41.657h43.47l-3.517-3.502a6.312 6.312 0 0 1 0-8.956 6.388 6.388 0 0 1 9.004 0l15.17 15.098a6.314 6.314 0 0 1 0 8.961l-15.17 15.098a6.384 6.384 0 0 1-8.999 0 6.315 6.315 0 0 1 0-8.961l3.493-3.475H40.305c-2.195 0-4.589-1.168-5.95-2.885-1.363-1.725-1.93-4.34-1.406-6.467C41.801 56.011 73.9 31 111.002 31c41.361 0 75.736 30.843 79.96 71.737.404 3.914-2.46 7.418-6.396 7.82a8.026 8.026 0 0 1-.739.039Z" Fill="{ThemeResource TextFillColorPrimaryBrush}">
                 <Path.RenderTransform><TranslateTransform X="-31" Y="-31"/></Path.RenderTransform>
@@ -17,6 +19,8 @@
               </Path>
               </Canvas>
             </Viewbox>
+            <nearby:ShareTileView x:Name="Share"/>
+            </Grid>
           </Border>
           <Rectangle x:Name="ShelfDash" Grid.Row="2" RadiusX="4" RadiusY="4" StrokeThickness="1" StrokeDashArray="4 3"/>
           <FontIcon x:Name="ShelfEmptyIcon" Grid.Row="2" Glyph="&#xE8C8;" FontFamily="Segoe Fluent Icons" FontSize="40" Opacity="0.4" Foreground="{ThemeResource TextFillColorPrimaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"/>

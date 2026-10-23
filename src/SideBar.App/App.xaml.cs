@@ -3,7 +3,9 @@ using Microsoft.UI.Xaml;
 using SideBar.Core;
 using SideBar.Core.Edge;
 using SideBar.Core.Layout;
+using SideBar.Core.Nearby;
 using SideBar.Edge;
+using SideBar.Nearby;
 using SideBar.Shelf;
 using SideBar.Tray;
 using WinRT.Interop;
@@ -31,6 +33,10 @@ public partial class App : Application
     ShelfService? _shelf;
     OleDropTarget.DropRegistration? _dropTarget;
     FanWindow? _fan;
+    ShareTileModel? _share;
+    NearbyService? _nearby;
+    DispatcherTimer? _shareTimer;
+    volatile bool _shareActive;   // KeepsCardOpen для рабочего потока хука (клик вне карточки отменяет отправку)
     PxRect? _fanZone;   // под _gate: зона веера для проверки клика вне (рабочий поток хука)
 
     public App()
@@ -48,6 +54,7 @@ public partial class App : Application
         _window = new CardWindow();
         _window.BindShelf(_shelf);
         _window.FanRequested += OnFanRequested;
+        InitShare();
         _window.Settled += s =>
         {
             if (s != PanelState.Hidden) return;
@@ -68,7 +75,7 @@ public partial class App : Application
         {
             try
             {
-                _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => DragOut.IsActive, OnForeignDrag);
+                _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => DragOut.IsActive, OnForeignDrag, IsOverShareTile, OnShareDrop);
             }
             catch (Exception e)
             {
@@ -87,11 +94,54 @@ public partial class App : Application
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) _trimmer.OnHidden(); }), null, 2000, Timeout.Infinite);
     }
 
+    void InitShare()
+    {
+        _share = new ShareTileModel();
+        _nearby = new NearbyService(_ui!);
+        _window!.BindShare(_share);
+        _window.OwnItemsDropped += OnShareDrop;
+        _share.Changed += OnShareChanged;
+        _nearby.DeviceFound += _share.DeviceFound;
+        _nearby.DeviceLost += _share.DeviceLost;
+        _nearby.Progress += _share.Progress;
+        _nearby.Finished += _share.Finished;
+        _window.ShareDeviceChosen += id =>
+        {
+            _share.Choose(id);
+            if (_share.State == ShareTileState.Sending) _nearby.Choose(id);
+        };
+        _shareTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _shareTimer.Tick += (_, _) => _share.Tick(DateTimeOffset.UtcNow);
+    }
+
+    bool IsOverShareTile(int x, int y) => _window?.QsTileScreenRect() is { } r && r.Contains(x, y);
+
+    /// <summary>Drop файлов (или переносимых элементов стопки) на плитку Quick Share: UI-поток.</summary>
+    void OnShareDrop(IReadOnlyList<string> paths)
+    {
+        if (_share is null || _nearby is null) return;
+        _share.BeginShare(paths, DateTimeOffset.UtcNow);
+        if (_share.State == ShareTileState.Searching) _nearby.StartShare(paths);
+    }
+
+    void OnShareChanged()
+    {
+        bool keep = _share!.KeepsCardOpen;
+        _shareActive = keep;
+        lock (_gate) { if (_machine is not null) _machine.HoldOpen = keep; }
+        if (_share.State == ShareTileState.Idle) _shareTimer?.Stop();
+        else _shareTimer?.Start();
+        // поиск и соединение больше не нужны ни при итоге, ни при отмене; Cancel идемпотентна
+        if (!keep) _nearby?.Cancel();
+        Log.Write($"share tile {_share.State}");
+    }
+
     // порядок важен: сначала снять хук, затем убрать иконку
     void ExitApp()
     {
         try
         {
+            try { _nearby?.Dispose(); } catch { }
             try { _hook?.Dispose(); } catch { }
             try { _dropTarget?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
@@ -165,8 +215,9 @@ public partial class App : Application
             zone = _fanZone;
             card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
         }
-        if (zone is not { } z || z.Contains(x, y) || card.Contains(x, y)) return;
-        _ui?.TryEnqueue(() => _fan?.Hide());
+        if (card.Contains(x, y) || (zone is { } z && z.Contains(x, y))) return;
+        if (_shareActive) _ui?.TryEnqueue(() => _share?.Cancel());   // клик вне карточки отменяет поиск и передачу
+        if (zone is not null) _ui?.TryEnqueue(() => _fan?.Hide());
     }
 
     /// <summary>Пересчёт по WM_DISPLAYCHANGE / WM_DPICHANGED / WM_SETTINGCHANGE. Только из UI-потока.</summary>
@@ -186,6 +237,7 @@ public partial class App : Application
             _machine.Relayout(layout, mode);
         }
         _fan?.Hide();
+        _share?.Cancel();
         _window.Relayout(layout, mode, scale);
         _dropTarget?.Refresh();   // WinUI может пересоздать дочерние HWND при смене DPI/дисплея
         _trimmer.OnHidden();   // Relayout не поднимает Settled
