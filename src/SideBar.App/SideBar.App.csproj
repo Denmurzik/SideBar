@@ -27,7 +27,7 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="Assets\SideBar.ico" Link="Assets\SideBar.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\SideBar.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\SideBar.Core\SideBar.Core.csproj" />

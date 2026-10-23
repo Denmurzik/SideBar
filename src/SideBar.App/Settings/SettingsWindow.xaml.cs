@@ -152,14 +152,18 @@ public sealed partial class SettingsWindow : Window
 #endif
         Root.ActualThemeChanged += (_, _) => ApplyCaptionColors();
         Root.SizeChanged += (_, _) => UpdateCaptionInset();
+        Root.Loaded += (_, _) =>
+        {
+            if (Root.XamlRoot is { } xr) xr.Changed += (_, _) => UpdateCaptionInset();   // смена DPI при переезде на другой монитор
+            UpdateCaptionInset();
+        };
         ApplyCaptionColors();
     }
 
     void UpdateCaptionInset()
     {
-        if (_closed) return;
-        var scale = Root.XamlRoot?.RasterizationScale ?? 1.0;
-        CaptionInset.Width = new GridLength(AppWindow.TitleBar.RightInset / scale);
+        if (_closed || Root.XamlRoot is not { } xr) return;
+        CaptionInset.Width = new GridLength(AppWindow.TitleBar.RightInset / xr.RasterizationScale);
     }
 
     void ApplyCaptionColors()
