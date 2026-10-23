@@ -63,7 +63,7 @@ public partial class App : Application
             case "file": _notifications?.Received(["C:/x/photo.jpg"], "Pixel 9"); break;
             case "unsafe": _notifications?.Received(["C:/x/setup.exe"], "Pixel 9"); break;
             case "link": _notifications?.SharedText("Pixel 9", SideBar.Nearby.Session.TextKind.Url, "https://example.com/page"); break;
-            case "text": _notifications?.SharedText("Pixel 9", SideBar.Nearby.Session.TextKind.Text, "Привет с телефона"); break;
+            case "text": _notifications?.SharedText("Pixel 9", SideBar.Nearby.Session.TextKind.Text, "Hello from the phone"); break;
             case "cancel": _notifications?.Info("cancelled", Strings.SenderCancelled); break;
         }
     }
@@ -89,6 +89,7 @@ public partial class App : Application
         _shelf = new ShelfService();
         _shelf.Load();
         _settings = new SettingsStore(SettingsPath());
+        Strings.Initialize(_settings.Current);   // язык UI выбирается один раз; строки до этого места не используются
         VisibilitySettings.MigrateLegacy(_settings);   // режим видимости M4 из реестра: один раз, до создания ReceiveHost
         _window = new CardWindow();
         _window.BindShelf(_shelf);
@@ -298,7 +299,7 @@ public partial class App : Application
 
     void InitShare()
     {
-        _share = new ShareTileModel();
+        _share = new ShareTileModel(Strings.T);
         _nearby = new NearbyService(_ui!, _identity!, _stack, _settings!);
         _window!.BindShare(_share, _recv, (id, accept) => _notifications?.Decide(id, accept));
         _window.OwnItemsDropped += OnShareDrop;

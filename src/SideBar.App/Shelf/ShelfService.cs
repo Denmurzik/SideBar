@@ -364,7 +364,7 @@ sealed partial class ShelfService
             {
                 var path = Materializer.Materialize(ShelfRoot,
                     fs => OleData.CopyContents(dobj, d.Index, fs, Materializer.MaxFileBytes, d.Size),
-                    head => FileNaming.ForVirtual(d.Name, url, descriptors.Count, head, DateTime.Now));
+                    head => FileNaming.ForVirtual(d.Name, url, descriptors.Count, head, DateTime.Now, Strings.T.ImageFileStem));
                 TrackOwned(path, added);
             }
             catch (TooLargeException) { throw; }
