@@ -106,7 +106,7 @@ public partial class App : Application
                     _prompt = new PromptWindow();
                     _prompt.SetAnchor(() =>
                     {
-                        lock (_gate) return new PromptAnchor(_layout.CardRectAt(_layout.LeftFor(PanelState.Open)), _scale, _primary, _fanZone);
+                        lock (_gate) return new PromptAnchor(_layout.CardRectAt(_layout.LeftFor(PanelState.Open)), _scale, Displays.PrimaryWorkArea(), _fanZone);
                     });
                     _prompt.ZoneChanged += z => { lock (_gate) _promptZone = z; };
                 }
@@ -271,7 +271,7 @@ public partial class App : Application
             zone = _fanZone;
             card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
         }
-        if (card.Contains(x, y) || (zone is { } z && z.Contains(x, y))) return;
+        if (card.Contains(x, y) || (zone is { } z && z.Contains(x, y)) || (promptZone is { } p && p.Contains(x, y))) return;   // клик по панели запроса — не «снаружи»: веер и отправка остаются
         if (_shareActive) _ui?.TryEnqueue(() => _share?.Cancel());   // клик вне карточки отменяет поиск и передачу
         if (zone is not null) _ui?.TryEnqueue(() => _fan?.Hide());
     }

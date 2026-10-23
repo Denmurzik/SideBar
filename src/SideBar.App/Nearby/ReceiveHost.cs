@@ -32,13 +32,21 @@ sealed class ReceiveHost : IDisposable
     int _ticks;
     int _sessions;
     readonly HashSet<Task> _running = [];   // под _gate
+
+    /// <summary>Живая сессия: её токен отменяется по <see cref="ReceivePolicy"/>; Accepted — пользователь уже согласился.</summary>
+    sealed class Live(CancellationTokenSource cts)
+    {
+        public CancellationTokenSource Cts { get; } = cts;
+        public volatile bool Accepted;
+    }
+
+    readonly List<Live> _live = [];   // под _gate
     bool _disposed;
 
     // состояние слушателя — только под _evaluate
     TcpListener? _listener;
     QuickShareAdvertiser? _advertiser;
     (IPAddress Address, int Index)? _bound;
-    CancellationTokenSource? _sessionsCts;
 
     public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action peek)
     {
@@ -90,28 +98,30 @@ sealed class ReceiveHost : IDisposable
         catch (OperationCanceledException) { return; }
         try
         {
-            bool everyone;
-            lock (_gate) everyone = _visibility.Current == Visibility.Everyone;
+            Visibility visibility;
+            bool anyAccepted;
+            lock (_gate) { visibility = _visibility.Current; anyAccepted = _live.Any(l => l.Accepted); }
 
+            // сеть проверяем и в «Скрыто», пока жива принятая передача: Public/Unknown её обрывает
             (IPAddress Address, int Index)? lan = null;
-            var allowed = false;
-            if (everyone)
+            NetworkCategory? category = null;
+            if (visibility == Visibility.Everyone || anyAccepted)
             {
                 var route = Route();
                 if (route is { } r)
                 {
                     lan = (r.Address, r.InterfaceIndex);
-                    var category = NetworkInfo.CategoryOf(r.InterfaceIndex);
-                    lock (_gate) allowed = _visibility.ShouldListen(category);
+                    category = NetworkInfo.CategoryOf(r.InterfaceIndex);
                     Log.Write($"receive network {category}");
                 }
                 else Log.Write("receive network none");
             }
+            var decision = ReceivePolicy.Decide(visibility, category);
+            CancelSessions(decision);
 
-            if (!allowed || lan is null)
+            if (!decision.Listen || lan is null)
             {
-                // «Скрыто» намеренно не рвёт уже принятые передачи (слушатель и реклама закрываются, сессии доживают); сеть Public/Unknown или пропавший маршрут при «Все» рвёт их
-                Stop(cancelSessions: everyone);
+                Stop();
                 return;
             }
             if (_listener is not null && _bound is { } b && b.Address.Equals(lan.Value.Address) && b.Index == lan.Value.Index)
@@ -119,7 +129,7 @@ sealed class ReceiveHost : IDisposable
                 if (reannounce) await ReannounceAsync();
                 return;
             }
-            Stop(cancelSessions: true);
+            Stop();
             await StartAsync(lan.Value);
         }
         catch (Exception e)
@@ -178,25 +188,30 @@ sealed class ReceiveHost : IDisposable
         _listener = listener;
         _advertiser = advertiser;
         _bound = lan;
-        _sessionsCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         Log.Write("receive listening");
-        _ = AcceptLoopAsync(listener, _sessionsCts.Token);
+        _ = AcceptLoopAsync(listener, _lifetime.Token);
     }
 
-    void Stop(bool cancelSessions)
+    void Stop()
     {
         if (_listener is null && _advertiser is null) return;
         var listener = _listener;
         var advertiser = _advertiser;
-        var sessions = _sessionsCts;
         _listener = null;
         _advertiser = null;
         _bound = null;
-        _sessionsCts = null;
         try { listener?.Stop(); } catch (Exception) { }
         try { advertiser?.Dispose(); } catch (Exception) { }
-        if (cancelSessions) { try { sessions?.Cancel(); } catch (Exception) { } }
         Log.Write("receive stopped");
+    }
+
+    void CancelSessions(ReceiveDecision decision)
+    {
+        if (!decision.CancelUnaccepted && !decision.CancelAccepted) return;
+        List<Live> victims;
+        lock (_gate) victims = _live.Where(l => l.Accepted ? decision.CancelAccepted : decision.CancelUnaccepted).ToList();
+        foreach (var l in victims) { try { l.Cts.Cancel(); } catch (ObjectDisposedException) { } }
+        if (victims.Count > 0) Log.Write($"receive sessions cancelled {victims.Count}");
     }
 
     async Task AcceptLoopAsync(TcpListener listener, CancellationToken ct)
@@ -227,6 +242,9 @@ sealed class ReceiveHost : IDisposable
     {
         IncomingTransfer? offer = null;
         var accepted = false;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var live = new Live(cts);
+        lock (_gate) _live.Add(live);
         try
         {
             using (client)
@@ -239,7 +257,7 @@ sealed class ReceiveHost : IDisposable
                     options = options with { DecisionTimeout = TimeSpan.FromSeconds(seconds) };   // автотест таймаута решения
 #endif
                 var result = await ReceiveSession.ReceiveAsync(client.GetStream(), options, ReceivedFileWriter.DownloadsFolder(),
-                    async (o, token) => { offer = o; accepted = await ConsentAsync(o, token); return accepted; }, null, ct);
+                    async (o, token) => { offer = o; accepted = await ConsentAsync(o, token); live.Accepted = accepted; return accepted; }, null, cts.Token);
                 Log.Write($"receive session {result.Status} files={result.Files.Count} texts={result.ReceivedTexts.Count}");
                 _ui.TryEnqueue(() => ShowResult(result, offer, accepted));
             }
@@ -248,7 +266,11 @@ sealed class ReceiveHost : IDisposable
         {
             Log.Write("receive session failed: " + Log.Describe(e));
         }
-        finally { Interlocked.Decrement(ref _sessions); }
+        finally
+        {
+            lock (_gate) _live.Remove(live);
+            Interlocked.Decrement(ref _sessions);
+        }
     }
 
     static string DeviceName(string? raw) => DisplayText.SanitizeName(raw, Strings.UnknownDevice);
@@ -313,7 +335,7 @@ sealed class ReceiveHost : IDisposable
         // тот же затвор, что у Evaluate: Stop не гоняется с StartAsync
         var gated = false;
         try { gated = _evaluate.Wait(TimeSpan.FromSeconds(2)); } catch (Exception) { }
-        try { Stop(cancelSessions: true); } catch (Exception) { }
+        try { Stop(); } catch (Exception) { }
         if (gated) _evaluate.Release();
         // сессии успевают удалить .part-файлы до Environment.Exit
         Task[] running;

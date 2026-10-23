@@ -9,9 +9,13 @@ public static class DisplayText
     public const int MaxNameLength = 40;
     public const int MaxPreviewLength = 100;
 
-    static readonly HashSet<string> ExecutableExtensions = new(StringComparer.OrdinalIgnoreCase)
+    // allow-list: only these are opened directly; everything else is shown in its folder
+    static readonly HashSet<string> SafeExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".exe", ".msi", ".bat", ".cmd", ".com", ".scr", ".ps1", ".vbs", ".js", ".lnk", ".url", ".hta", ".cpl", ".reg", ".jar",
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp", ".tif", ".tiff", ".avif",
+        ".mp4", ".mov", ".mkv", ".webm", ".avi",
+        ".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus",
+        ".pdf", ".txt", ".md", ".csv", ".rtf", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
     };
 
     /// <summary>One line without control/format characters (bidi overrides included), whitespace collapsed, capped at <paramref name="max"/> UTF-16 units without splitting a surrogate pair.</summary>
@@ -61,6 +65,6 @@ public static class DisplayText
         return false;
     }
 
-    /// <summary>Extensions that run code or follow a shortcut when opened: such files are shown in the folder, not launched.</summary>
-    public static bool IsExecutableLike(string path) => ExecutableExtensions.Contains(Path.GetExtension(path));
+    /// <summary>Known-safe media and document types may be opened from a notification; anything else (executables, shortcuts, scripts, unknown) is only shown in the folder.</summary>
+    public static bool IsSafeToOpen(string path) => SafeExtensions.Contains(Path.GetExtension(path));
 }

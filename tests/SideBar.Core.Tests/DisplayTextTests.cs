@@ -15,7 +15,7 @@ public class DisplayTextTests
     public void Name_strips_bidi_override_and_format_chars()
     {
         Assert.Equal("evil", DisplayText.SanitizeName("\u202Eevil\u202C\u200B", "x"));
-        Assert.Equal("ab", DisplayText.SanitizeName("a\u2028b", "x") is "a b" ? "ab" : "bad");
+        Assert.Equal("a b", DisplayText.SanitizeName("a\u2028b", "x"));
     }
 
     [Fact]
@@ -77,17 +77,25 @@ public class DisplayTextTests
     }
 
     [Theory]
-    [InlineData(@"C:\d\a.exe", true)]
-    [InlineData(@"C:\d\A.MSI", true)]
-    [InlineData(@"C:\d\a.lnk", true)]
-    [InlineData(@"C:\d\a.url", true)]
-    [InlineData(@"C:\d\a.ps1", true)]
-    [InlineData(@"C:\d\a.jar", true)]
-    [InlineData(@"C:\d\a.txt", false)]
-    [InlineData(@"C:\d\a.pdf", false)]
+    [InlineData(@"C:\d\a.jpg", true)]
+    [InlineData(@"C:\d\a.HEIC", true)]
+    [InlineData(@"C:\d\a.mp4", true)]
+    [InlineData(@"C:\d\a.flac", true)]
+    [InlineData(@"C:\d\a.pdf", true)]
+    [InlineData(@"C:\d\a.docx", true)]
+    [InlineData(@"C:\d\a.exe", false)]
+    [InlineData(@"C:\d\a.msi", false)]
+    [InlineData(@"C:\d\a.lnk", false)]
+    [InlineData(@"C:\d\a.url", false)]
+    [InlineData(@"C:\d\a.ps1", false)]
+    [InlineData(@"C:\d\a.jar", false)]
+    [InlineData(@"C:\d\a.svg", false)]
+    [InlineData(@"C:\d\a.html", false)]
+    [InlineData(@"C:\d\a.zip", false)]
+    [InlineData(@"C:\d\a.unknownext", false)]
     [InlineData(@"C:\d\noext", false)]
-    public void Executable_like_extensions_are_flagged(string path, bool risky)
+    public void Only_allow_listed_extensions_are_safe_to_open(string path, bool safe)
     {
-        Assert.Equal(risky, DisplayText.IsExecutableLike(path));
+        Assert.Equal(safe, DisplayText.IsSafeToOpen(path));
     }
 }

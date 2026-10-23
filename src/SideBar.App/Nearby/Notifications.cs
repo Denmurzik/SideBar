@@ -173,8 +173,9 @@ sealed partial class Notifications : IDisposable
     {
         if (paths.Count == 0) return;
         string path = paths[0];
-        (string, Action)[] buttons = paths.Count == 1
-            ? [(Strings.Open, () => { if (DisplayText.IsExecutableLike(path)) ShowInFolder(path); else Launch(path); }), (Strings.ShowInFolder, () => ShowInFolder(path))]
+        // «Открыть» только для известных безопасных типов; остальное (исполняемые, ярлыки, скрипты, неизвестное) — лишь показать в папке
+        (string, Action)[] buttons = paths.Count == 1 && DisplayText.IsSafeToOpen(path)
+            ? [(Strings.Open, () => Launch(path)), (Strings.ShowInFolder, () => ShowInFolder(path))]
             : [(Strings.ShowInFolder, () => ShowInFolder(path))];
         Notify("received", [Strings.Received(paths.Count)], buttons, sticky: false);
     }
@@ -185,7 +186,7 @@ sealed partial class Notifications : IDisposable
         string preview = DisplayText.Preview(value);
         (string, Action) copy = (Strings.Copy, () => ClipboardText.Set(value, _clipboardOwner));
         if (kind == TextKind.Url && DisplayText.TryHttpUri(value, out var uri))
-            Notify("link", [Strings.SharedLink(device, uri.Host), preview], [(Strings.Open, () => Launch(uri.AbsoluteUri)), copy], sticky: false);
+            Notify("link", [Strings.SharedLink(device, uri.IdnHost), preview], [(Strings.Open, () => Launch(uri.AbsoluteUri)), copy], sticky: false);
         else
             Notify("text", [Strings.SharedText(device), preview], [copy], sticky: false);
     }

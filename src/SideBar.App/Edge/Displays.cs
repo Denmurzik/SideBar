@@ -27,6 +27,14 @@ static unsafe class Displays
         return new PxRect(mi.rcMonitor.Left, mi.rcMonitor.Top, mi.rcMonitor.Right, mi.rcMonitor.Bottom);
     }
 
+    /// <summary>Рабочая область основного монитора (без панели задач), физические px.</summary>
+    public static PxRect PrimaryWorkArea()
+    {
+        var mi = new MONITORINFO { cbSize = sizeof(MONITORINFO) };
+        GetMonitorInfoW(PrimaryHandle(), ref mi);
+        return new PxRect(mi.rcWork.Left, mi.rcWork.Top, mi.rcWork.Right, mi.rcWork.Bottom);
+    }
+
     static nint PrimaryHandle() => MonitorFromPoint(default, MONITOR_DEFAULTTOPRIMARY);
 
     public static PxRect Primary() => Rect(PrimaryHandle());

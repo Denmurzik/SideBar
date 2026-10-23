@@ -16,8 +16,8 @@ namespace SideBar.Sharing;
 /// </summary>
 sealed record PromptSpec(string[] Lines, string? Pin, (string Label, Action Act)[] Buttons, TimeSpan? AutoHide);
 
-/// <summary>Где стоит открытая карточка (физические px), масштаб, основной экран и зона веера, которую панель обходит.</summary>
-readonly record struct PromptAnchor(PxRect Card, double Scale, PxRect Primary, PxRect? Avoid);
+/// <summary>Где стоит открытая карточка (физические px), масштаб, рабочая область основного экрана и зона веера, которую панель обходит.</summary>
+readonly record struct PromptAnchor(PxRect Card, double Scale, PxRect Work, PxRect? Avoid);
 
 /// <summary>
 /// Запасной путь, когда уведомления Windows недоступны: панель того же стиля, что карточка, слева от неё.
@@ -39,6 +39,7 @@ public sealed partial class PromptWindow : Window
     }
 
     readonly List<Entry> _entries = [];   // порядок прихода
+    readonly Dictionary<Entry, Border> _views = [];   // элементы живут, пока жива запись: пересборка не пересоздаёт кнопки под курсором
     nint _hwnd;
     bool _initialized, _shown;
     AlwaysActiveAcrylicBackdrop? _backdrop;
@@ -75,14 +76,15 @@ public sealed partial class PromptWindow : Window
             timer.Start();
         }
         _entries.Add(entry);
-        Rebuild();
+        _views[entry] = Build(entry);
+        Sync();
     }
 
     void Dismiss(Entry entry)
     {
         if (!_entries.Contains(entry)) return;
         Remove(entry);
-        Rebuild();
+        Sync();
     }
 
     void Remove(Entry entry)
@@ -90,6 +92,7 @@ public sealed partial class PromptWindow : Window
         entry.Timer?.Stop();
         entry.Registration.Dispose();
         _entries.Remove(entry);
+        _views.Remove(entry);
     }
 
     /// <summary>Положение пересчитывается при смене зоны веера.</summary>
@@ -127,21 +130,30 @@ public sealed partial class PromptWindow : Window
         Panel.BorderBrush = new SolidColorBrush(dark ? Windows.UI.Color.FromArgb(0x70, 0x8C, 0x8C, 0x8C) : Windows.UI.Color.FromArgb(0x50, 0x40, 0x40, 0x40));
     }
 
-    void Rebuild()
+    /// <summary>Приводит стопку к порядку «запросы, затем заметки (новые выше)»: меняются только затронутые элементы.</summary>
+    void Sync()
     {
         if (_entries.Count == 0)
         {
+            Body.Children.Clear();
             HideWindow();
             return;
         }
         EnsureInitialized();
-        Body.Children.Clear();
-        // запросы сверху (свежие ниже среди запросов), под ними заметки, новые выше
-        var ordered = _entries.Where(e => e.Sticky).Concat(_entries.Where(e => !e.Sticky).Reverse()).ToList();
+        var ordered = _entries.Where(e => e.Sticky).Concat(_entries.Where(e => !e.Sticky).Reverse()).Select(e => _views[e]).ToList();
+        foreach (var stale in Body.Children.Where(c => !ordered.Contains(c)).ToList()) Body.Children.Remove(stale);
         for (int i = 0; i < ordered.Count; i++)
         {
-            if (i > 0) Body.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x30, 0x80, 0x80, 0x80)) });
-            Body.Children.Add(Build(ordered[i]));
+            if (i < Body.Children.Count && ReferenceEquals(Body.Children[i], ordered[i])) continue;
+            Body.Children.Remove(ordered[i]);
+            Body.Children.Insert(i, ordered[i]);
+        }
+        var line = new SolidColorBrush(Windows.UI.Color.FromArgb(0x30, 0x80, 0x80, 0x80));
+        for (int i = 0; i < ordered.Count; i++)
+        {
+            ordered[i].BorderBrush = line;
+            ordered[i].BorderThickness = new Thickness(0, i == 0 ? 0 : 1, 0, 0);
+            ordered[i].Padding = new Thickness(0, i == 0 ? 0 : 8, 0, 0);
         }
         Place();
         // шаблоны кнопок применяются только после первого показа: размер по содержимому уточняем в следующем такте
@@ -149,7 +161,7 @@ public sealed partial class PromptWindow : Window
         DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => { if (_shown && _entries.Count == snapshot) Place(); });
     }
 
-    FrameworkElement Build(Entry entry)
+    Border Build(Entry entry)
     {
         var panel = new StackPanel { Spacing = 6 };
         for (int i = 0; i < entry.Spec.Lines.Length; i++)
@@ -185,12 +197,12 @@ public sealed partial class PromptWindow : Window
             }
             panel.Children.Add(row);
         }
-        return panel;
+        return new Border { Child = panel };
     }
 
     void Place()
     {
-        var a = _anchor?.Invoke() ?? new PromptAnchor(default, 1.0, default, null);
+        var a = _anchor?.Invoke() ?? new PromptAnchor(default, 1.0, new PxRect(0, 0, 1920, 1080), null);
         Root.UpdateLayout();
         Root.Measure(new Windows.Foundation.Size(WidthEpx, double.PositiveInfinity));
         int w = (int)Math.Round(WidthEpx * a.Scale), h = (int)Math.Round(Root.DesiredSize.Height * a.Scale);
@@ -201,8 +213,11 @@ public sealed partial class PromptWindow : Window
         {
             // веер занимает тот же столбец: панель выше него, а если места нет — ниже
             top = fan.Top - gap - h;
-            if (top < a.Primary.Top) top = fan.Bottom + gap;
+            if (top < a.Work.Top) top = fan.Bottom + gap;
         }
+        // окно не выходит за рабочую область (4 записи, размещение под веером)
+        top = Math.Max(a.Work.Top + gap, Math.Min(top, a.Work.Bottom - gap - h));
+        left = Math.Max(a.Work.Left, left);
         AppWindow.MoveAndResize(new RectInt32(left, top, w, h));
         if (!_shown)
         {
