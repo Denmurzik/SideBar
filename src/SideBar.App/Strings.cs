@@ -12,7 +12,7 @@ static class Strings
     public const string SendFailed = "Не удалось отправить";
     public const string SendRejected = "Получатель отклонил";
     public const string SendCancelled = "Получатель отменил передачу";
-    public const string OnlyFirstFiles = "Отправлены только первые 100 файлов";
+    public static readonly string OnlyFirstFiles = $"Отправлены только первые {Nearby.NearbyService.MaxFiles} файлов";
     public const string SendTimedOut = "Получатель не ответил";
     public const string NothingToSend = "Нечего отправлять";
 }
