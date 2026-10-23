@@ -146,14 +146,14 @@ public sealed class CertificateIdentity(
             if (cert.MetadataEncryptionKey is not { Length: > 0 } metadataKey) continue;
             if (cert.EncryptedMetadata is not { Length: >= 16 } encrypted) continue;
             if (DecryptMetadata(cert.SecretKey, metadataKey, encrypted) is not { } metadata) continue;
-            if (ProtoReader.Bytes(ProtoReader.Parse(metadata), 4) is not { Length: 6 } mac) continue;
+            if (!TryReadMetadataFields(metadata, out var mac, out var name) || mac is not { Length: 6 }) continue;
 
             var macKey = Convert.ToHexString(mac);
             if (byMac.ContainsKey(macKey)) continue;
 
             var salt = RandomNumberGenerator.GetBytes(2);
             var remoteInfo = new EndpointInfo { Metadata = [.. salt, .. NearbyCrypto.Ctr(cert.SecretKey, salt, metadataKey)] };
-            byMac[macKey] = new BluetoothTarget(Convert.ToHexString(cert.SecretId), DeviceName(metadata), mac, remoteInfo);
+            byMac[macKey] = new BluetoothTarget(Convert.ToHexString(cert.SecretId), name, mac, remoteInfo);
         }
         return byMac.Values.ToList();
     }
@@ -161,17 +161,25 @@ public sealed class CertificateIdentity(
     /// <summary>Stable identifier of a peer advertising with one of our known certificates, for dedup across transports.</summary>
     public string? TryGetPeerKey(EndpointInfo info) => FindPeer(info) is { } cert ? Convert.ToHexString(cert.SecretId) : null;
 
-    // EncryptedMetadata: field 1 = device name (the only field ever read; accounts and e-mails are not touched).
-    internal static string? DeviceName(byte[]? metadata)
+    // EncryptedMetadata: field 1 = device name, field 4 = Bluetooth MAC (the only fields ever read; accounts and
+    // e-mails are not touched).
+    internal static string? DeviceName(byte[]? metadata) =>
+        metadata is not null && TryReadMetadataFields(metadata, out _, out var name) ? name : null;
+
+    // Parses EncryptedMetadata once and reads both fields callers care about; malformed input (bad protobuf or
+    // non-UTF8 name) makes the certificate unreadable, not an error for the caller to propagate.
+    private static bool TryReadMetadataFields(byte[] metadata, out byte[]? mac, out string? name)
     {
-        if (metadata is null) return null;
+        mac = null;
+        name = null;
         try
         {
-            return ProtoReader.Bytes(ProtoReader.Parse(metadata), 1) is { } name
-                ? new UTF8Encoding(false, true).GetString(name)
-                : null;
+            var fields = ProtoReader.Parse(metadata);
+            mac = ProtoReader.Bytes(fields, 4);
+            name = ProtoReader.Bytes(fields, 1) is { } raw ? new UTF8Encoding(false, true).GetString(raw) : null;
+            return true;
         }
-        catch (Exception e) when (e is InvalidDataException or ArgumentException) { return null; }
+        catch (Exception e) when (e is InvalidDataException or ArgumentException) { return false; }
     }
 
     internal static byte[]? DecryptMetadata(byte[] secretKey, byte[] metadataKey, byte[] encrypted)
