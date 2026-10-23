@@ -9,6 +9,8 @@ using SideBar.Edge;
 using SideBar.Nearby.Identity;
 using SideBar.Sharing;
 using Windows.Graphics;
+using Windows.UI;
+using Microsoft.UI;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
 using CoreVisibility = SideBar.Core.Nearby.Visibility;
@@ -84,7 +86,8 @@ public sealed partial class SettingsWindow : Window
         _ui = DispatcherQueue.GetForCurrentThread();
         InitializeComponent();
         Title = Strings.SettingsTitle;
-        SystemBackdrop = new MicaBackdrop();
+        SystemBackdrop = new DesktopAcrylicBackdrop();
+        SetUpTitleBar();
         _titles = [Strings.NavGeneral, Strings.NavQuickShare, Strings.NavPanel, Strings.NavShelf, Strings.NavAbout];
         NavGeneral.Content = _titles[0];
         NavQuickShare.Content = _titles[1];
@@ -128,6 +131,55 @@ public sealed partial class SettingsWindow : Window
             Unsubscribe();
             throw;
         }
+    }
+
+    // заголовок в стиле окна: акрил под ним, системные кнопки прозрачные и в цвет темы
+    void SetUpTitleBar()
+    {
+        TitleText.Text = Strings.SettingsTitle;
+        try
+        {
+            var ico = Path.Combine(AppContext.BaseDirectory, "Assets", "SideBar.ico");
+            if (File.Exists(ico)) TitleIcon.Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(ico));
+        }
+        catch (Exception e) { Log.Write("title icon failed: " + Log.Describe(e)); }
+        ExtendsContentIntoTitleBar = true;
+        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Standard;
+        SetTitleBar(TitleBar);
+#if DEBUG
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_THEME") is { } t)
+            Root.RequestedTheme = t == "light" ? ElementTheme.Light : t == "dark" ? ElementTheme.Dark : ElementTheme.Default;
+#endif
+        Root.ActualThemeChanged += (_, _) => ApplyCaptionColors();
+        Root.SizeChanged += (_, _) => UpdateCaptionInset();
+        Root.Loaded += (_, _) =>
+        {
+            if (Root.XamlRoot is { } xr) xr.Changed += (_, _) => UpdateCaptionInset();   // смена DPI при переезде на другой монитор
+            UpdateCaptionInset();
+        };
+        ApplyCaptionColors();
+    }
+
+    void UpdateCaptionInset()
+    {
+        if (_closed || Root.XamlRoot is not { } xr) return;
+        CaptionInset.Width = new GridLength(AppWindow.TitleBar.RightInset / xr.RasterizationScale);
+    }
+
+    void ApplyCaptionColors()
+    {
+        var tb = AppWindow.TitleBar;
+        var dark = Root.ActualTheme != ElementTheme.Light;
+        var fg = dark ? Colors.White : Colors.Black;
+        var clear = Colors.Transparent;
+        tb.ButtonBackgroundColor = clear;
+        tb.ButtonInactiveBackgroundColor = clear;
+        tb.ButtonForegroundColor = fg;
+        tb.ButtonHoverForegroundColor = fg;
+        tb.ButtonPressedForegroundColor = fg;
+        tb.ButtonInactiveForegroundColor = dark ? Color.FromArgb(0x80, 255, 255, 255) : Color.FromArgb(0x80, 0, 0, 0);
+        tb.ButtonHoverBackgroundColor = dark ? Color.FromArgb(0x1A, 255, 255, 255) : Color.FromArgb(0x09, 0, 0, 0);
+        tb.ButtonPressedBackgroundColor = dark ? Color.FromArgb(0x10, 255, 255, 255) : Color.FromArgb(0x06, 0, 0, 0);
     }
 
     void Unsubscribe()
