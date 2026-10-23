@@ -20,6 +20,9 @@ sealed class IdentityProvider : IDisposable
 
     public CertificateIdentity? Current => _current;
 
+    /// <summary>Сводка последней успешной загрузки (счётчики и срок; null — ещё не было).</summary>
+    public CertificateSummary? Summary => _store.Summary;
+
     /// <summary>Причина последней неудачи (null — сертификаты загружены).</summary>
     public CertLoadFailure? Failure
     {

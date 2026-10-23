@@ -9,6 +9,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="src/**/*.cs" />
+    <!-- In-memory leveldb reader from the product (no temp copy on disk) for the identify option of watch. -->
+    <Compile Include="..\..\src\SideBar.Nearby\Certs\LevelDbReader.cs" Link="Product\LevelDbReader.cs" />
+    <Compile Include="..\..\src\SideBar.Nearby\Certs\Snappy.cs" Link="Product\Snappy.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\nearby\SideBar.Nearby\SideBar.Nearby.csproj" />

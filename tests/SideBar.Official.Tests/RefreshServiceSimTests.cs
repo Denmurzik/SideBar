@@ -10,6 +10,7 @@ namespace SideBar.Official.Tests;
 public sealed class RefreshServiceSimTests : IDisposable
 {
     const string SimName = "nearby_share_sim";
+    const string NeverRuns = "sidebar_test_never_runs";   // вместо nearby_share: настоящий Quick Share на машине не влияет на тесты
     static readonly DateTimeOffset T0 = new(2026, 10, 23, 12, 0, 0, TimeSpan.Zero);
 
     readonly string _dir = Path.Combine(Path.GetTempPath(), "SideBar.Tests", Guid.NewGuid().ToString("N"));
@@ -78,7 +79,7 @@ public sealed class RefreshServiceSimTests : IDisposable
     RefreshService Make(string mode, RefreshTimings? timings = null, string? exe = null, Func<TimeSpan>? idle = null)
     {
         SetEnv(mode, SharingDir, exe ?? SimExe());
-        var app = OfficialAppController.FromEnvironment(s => _log.Add($"{_sw.ElapsedMilliseconds}ms " + s));
+        var app = OfficialAppController.FromEnvironment(s => _log.Add($"{_sw.ElapsedMilliseconds}ms " + s), null, NeverRuns);
         var hooks = new RefreshHooks
         {
             PauseStack = () => { _hooks.Add("pause"); return Task.CompletedTask; },
@@ -238,7 +239,7 @@ public sealed class RefreshServiceSimTests : IDisposable
     public void Quit_is_scoped_to_our_pid_and_leaves_another_instance_alone()
     {
         SetEnv("normal", SharingDir, SimExe());
-        var app = OfficialAppController.FromEnvironment(s => _log.Add(s));
+        var app = OfficialAppController.FromEnvironment(s => _log.Add(s), null, NeverRuns);
         using var other = Process.Start(new ProcessStartInfo(SimExe()) { UseShellExecute = false, CreateNoWindow = true })!;   // «чужой» экземпляр
         using var ours = app.Launch()!;
         Assert.True(WaitFor(() => Native.WindowsOf(ours.Pid).Any(w => w.ClassName == OfficialAppController.WindowClass)));
@@ -350,7 +351,7 @@ public sealed class RefreshServiceSimTests : IDisposable
     {
         var busy = true;
         SetEnv("normal", SharingDir, SimExe());
-        var app = OfficialAppController.FromEnvironment(s => _log.Add(s));
+        var app = OfficialAppController.FromEnvironment(s => _log.Add(s), null, NeverRuns);
         var hooks = new RefreshHooks
         {
             PauseStack = () => { _hooks.Add("pause"); return Task.CompletedTask; },
@@ -377,7 +378,7 @@ public sealed class RefreshServiceSimTests : IDisposable
     {
         var resident = true;
         SetEnv("normal", SharingDir, Path.Combine(_dir, "missing", "nearby_share.exe"));
-        var app = OfficialAppController.FromEnvironment(s => _log.Add(s));
+        var app = OfficialAppController.FromEnvironment(s => _log.Add(s), null, NeverRuns);
         var hooks = new RefreshHooks { WarnStale = () => _hooks.Add("warn"), UserAppResident = () => resident };
         var svc = new RefreshService(app, new AppStateStore(StatePath), hooks, s => _log.Add(s), null, () => _now);
         await svc.TickAsync();   // FirstSeen
@@ -387,6 +388,43 @@ public sealed class RefreshServiceSimTests : IDisposable
         resident = false;
         await svc.TickAsync();
         Assert.Equal(["warn"], _hooks);
+    }
+
+    [Fact]
+    public async Task Stale_warning_is_decided_after_the_cycle_attempt()
+    {
+        new AppStateStore(StatePath).Save(new AppState { LastSuccess = T0, FirstSeen = T0 });
+        _now = T0.AddHours(80);   // > 72 ч без успеха, но цикл сейчас удастся
+        var svc = Make("normal", idle: () => TimeSpan.FromMinutes(10));
+        await svc.TickAsync();
+        Assert.Equal(["pause", "reload", "resume"], _hooks);   // без warn: успех отменил предупреждение
+        Assert.Equal(_now, new AppStateStore(StatePath).Load().LastSuccess);
+
+        // а если цикл не удался, предупреждение приходит в том же тике
+        _hooks.Clear();
+        new AppStateStore(StatePath).Save(new AppState { LastSuccess = T0, FirstSeen = T0 });
+        var failing = Make("silent", new RefreshTimings
+        {
+            MarkerTimeout = TimeSpan.FromSeconds(1),
+            Settle = TimeSpan.FromMilliseconds(100),
+            ExitWait = TimeSpan.FromSeconds(5),
+            RetryDelay = TimeSpan.FromSeconds(1),
+        }, idle: () => TimeSpan.FromMinutes(10));
+        await failing.TickAsync();
+        Assert.Equal(["pause", "reload", "resume", "warn"], _hooks);
+    }
+
+    [Fact]
+    public void Is_running_sees_the_other_process_name_when_configured_exe_is_named_differently()
+    {
+        SetEnv("normal", SharingDir, SimExe());
+        var starter = OfficialAppController.FromEnvironment(_ => { }, null, NeverRuns);
+        using var running = starter.Launch()!;
+        Assert.True(WaitFor(() => Native.WindowsOf(running.Pid).Count > 0));   // окно уже есть: Dispose теста сможет закрыть симулятор
+        var custom = Path.Combine(_dir, "custom_name.exe");
+        Assert.True(new OfficialAppController(custom, SharingDir, _ => { }, SimName).IsRunning());   // процесс назван SimName, настроенный exe - custom_name
+        Assert.False(new OfficialAppController(custom, SharingDir, _ => { }, NeverRuns).IsRunning());
+        Assert.False(new OfficialAppController(custom, SharingDir, _ => { }, null).IsRunning());
     }
 
     [Fact]

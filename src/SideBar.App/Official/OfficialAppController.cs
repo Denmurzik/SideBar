@@ -34,14 +34,16 @@ internal sealed class LaunchedProcess(nint handle, int pid) : IDisposable
 /// Путь к exe и каталог данных переопределяются <c>SIDEBAR_OFFICIAL_EXE</c> / <c>SIDEBAR_SHARING_DIR</c> (для симулятора).
 /// Процесс не убивается никогда; чужие экземпляры не трогаются.
 /// </summary>
-internal sealed class OfficialAppController(string exePath, string sharingDir, Action<string> log)
+internal sealed class OfficialAppController(string exePath, string sharingDir, Action<string> log, string? userProcessName = OfficialAppController.UserProcessName)
 {
     public const string WindowClass = "Google.Windows.NearbyShare";
+    /// <summary>Имя процесса exe пользователя; тесты подставляют несуществующее, чтобы не зависеть от настоящего Quick Share на машине.</summary>
+    public const string UserProcessName = "nearby_share";
 
-    public static OfficialAppController FromEnvironment(Action<string> log, string? exePathOverride = null) => new(
+    public static OfficialAppController FromEnvironment(Action<string> log, string? exePathOverride = null, string? userProcessName = UserProcessName) => new(
         Env("SIDEBAR_OFFICIAL_EXE") ?? (exePathOverride is { Length: > 0 } ? exePathOverride : DefaultExe),
         Env("SIDEBAR_SHARING_DIR") ?? DefaultSharingDir,
-        log);
+        log, userProcessName);
 
     /// <summary>Для приложения: путь из настроек (null — по умолчанию); переопределения окружением — только в Debug.</summary>
     public static OfficialAppController ForApp(string? exePathOverride, Action<string> log)
@@ -65,7 +67,7 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
 
     /// <summary>Любой экземпляр (в том числе пользовательский) этого приложения.</summary>
     public bool IsRunning() =>
-        AnyProcess(ProcessName) || (!ProcessName.Equals("nearby_share", StringComparison.OrdinalIgnoreCase) && AnyProcess("nearby_share"));   // настроенный exe может называться иначе, чем exe пользователя
+        AnyProcess(ProcessName) || (userProcessName is { Length: > 0 } && !ProcessName.Equals(userProcessName, StringComparison.OrdinalIgnoreCase) && AnyProcess(userProcessName));   // настроенный exe может называться иначе, чем exe пользователя
 
     static bool AnyProcess(string name)
     {

@@ -96,7 +96,7 @@ internal sealed class RefreshService : IDisposable
         catch (Exception e) { _log($"official: loop stopped, {Describe(e)}"); }
     }
 
-    /// <summary>Один шаг расписания: 72-часовое предупреждение и, если пора, цикл. Не бросает (кроме отмены).</summary>
+    /// <summary>Один шаг расписания: если пора, цикл, затем 72-часовое предупреждение (после попытки: удачный цикл предупреждение отменяет). Не бросает (кроме отмены).</summary>
     public async Task TickAsync(CancellationToken ct = default)
     {
         try
@@ -109,29 +109,36 @@ internal sealed class RefreshService : IDisposable
                 state = Merge(loaded.ClampedTo(now), now);
                 if (state.FirstSeen is null) state = state with { FirstSeen = now };
                 if (state != loaded) Save(state);   // зажатые «будущие» времена сохраняем, иначе они снова зажмутся к следующему now
-
-                // Без успехов опорой служит первое наблюдение: иначе при отсутствии приложения предупреждения не будет никогда.
-                var anchor = state.LastSuccess ?? state.FirstSeen;
-                var warned = (state.LastWarned, _lastWarned) switch { ({ } x, { } y) => x > y ? x : y, var (x, y) => x ?? y };   // и в памяти: сбой Save не должен повторять уведомление каждые 5 мин
-                // Пока чужой экземпляр живёт в трее, он сам обновляет сертификаты, а наш LastSuccess стоит на месте.
-                if (_scheduler.ShouldWarn(now, anchor, warned) && !Query(_hooks.UserAppResident, "resident"))
-                {
-                    _lastWarned = now;
-                    _log("official: no successful refresh for 72h, warning");
-                    try { _hooks.WarnStale?.Invoke(); } catch (Exception e) { _log($"official: warn hook {Describe(e)}"); }
-                    state = state with { LastWarned = now };
-                    Save(state);
-                }
             }
 
             var decision = _scheduler.Decide(now, state.LastSuccess, _idle(), _app.IsInstalled, _app.IsRunning());
-            if (decision != RefreshDecision.RunNow) return;
-            if (RefreshScheduler.InBackoff(now, state.LastAttempt, state.FailedAttempts)) return;   // после неудачи не чаще, чем раз в 1-2-4-8-16-20 ч
-            if (Query(_hooks.StackBusy, "busy")) return;   // живая сессия приёма/отправки: цикл позже, не сейчас
-            await RunOnceAsync(ct);
+            if (decision == RefreshDecision.RunNow
+                && !RefreshScheduler.InBackoff(now, state.LastAttempt, state.FailedAttempts)   // после неудачи не чаще, чем раз в 1-2-4-8-16-20 ч
+                && !Query(_hooks.StackBusy, "busy"))   // живая сессия приёма/отправки: цикл позже, не сейчас
+                await RunOnceAsync(ct);
+
+            WarnIfStale();
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception e) { _log($"official: tick failed, {Describe(e)}"); }
+    }
+
+    void WarnIfStale()
+    {
+        var now = _now();
+        lock (_stateGate)
+        {
+            var state = Merge(_store.Load().ClampedTo(now), now);   // заново: цикл мог только что удаться
+            // Без успехов опорой служит первое наблюдение: иначе при отсутствии приложения предупреждения не будет никогда.
+            var anchor = state.LastSuccess ?? state.FirstSeen;
+            var warned = (state.LastWarned, _lastWarned) switch { ({ } x, { } y) => x > y ? x : y, var (x, y) => x ?? y };   // и в памяти: сбой Save не должен повторять уведомление каждые 5 мин
+            // Пока чужой экземпляр живёт в трее, он сам обновляет сертификаты, а наш LastSuccess стоит на месте.
+            if (!_scheduler.ShouldWarn(now, anchor, warned) || Query(_hooks.UserAppResident, "resident")) return;
+            _lastWarned = now;
+            _log("official: no successful refresh for 72h, warning");
+            try { _hooks.WarnStale?.Invoke(); } catch (Exception e) { _log($"official: warn hook {Describe(e)}"); }
+            Save(state with { LastWarned = now });
+        }
     }
 
     /// <summary>

@@ -3,6 +3,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using Microsoft.UI.Dispatching;
 using SideBar.Core.Nearby;
+using SideBar.Core.Settings;
 using SideBar.Nearby;
 using SideBar.Nearby.Discovery;
 using SideBar.Nearby.Identity;
@@ -23,6 +24,7 @@ sealed class ReceiveHost : IDisposable
 
     readonly VisibilityModel _visibility;
     readonly IdentityProvider _identity;
+    readonly SettingsStore _settings;
     readonly IStackPause _pause;
     readonly object _gate = new();   // _visibility
     readonly DispatcherQueue _ui;
@@ -56,12 +58,13 @@ sealed class ReceiveHost : IDisposable
     // под какое состояние зарегистрирована реклама: смена адреса, режима или идентичности (перезагрузка сертификатов) — новая регистрация со свежей солью
     (IPAddress Address, int Index, Visibility Mode, CertificateIdentity? Identity)? _bound;
 
-    public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action bounce, IdentityProvider identity, IStackPause pause)
+    public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action bounce, IdentityProvider identity, IStackPause pause, SettingsStore settings)
     {
+        _settings = settings;
         _ui = ui;
         _pause = pause;
         _identity = identity;
-        _visibility = new VisibilityModel(identity.Current is not null, VisibilitySettings.Load());
+        _visibility = new VisibilityModel(identity.Current is not null, VisibilitySettings.Load(settings));
         _notifications = notifications;
         _clipboardOwner = clipboardOwner;
         _bounce = bounce;
@@ -102,8 +105,18 @@ sealed class ReceiveHost : IDisposable
             persisted = _visibility.Persisted;
             Log.Write($"visibility {_visibility.Current}");
         }
-        if (persist) VisibilitySettings.Save(persisted);
+        if (persist) VisibilitySettings.Save(_settings, persisted);
+        RaiseModeChanged();
         _ = Task.Run(() => EvaluateAsync());
+    }
+
+    /// <summary>Режим видимости изменился (выбор, смена сертификатов, истечение «Все»); поднимается не на UI-потоке.</summary>
+    public event Action? ModeChanged;
+
+    void RaiseModeChanged()
+    {
+        try { ModeChanged?.Invoke(); }
+        catch (Exception e) { Log.Write("mode changed handler failed: " + Log.Describe(e)); }
     }
 
     // сертификаты перечитаны (файлы изменились или истёк срок): доступность режима и свежая реклама
@@ -115,6 +128,7 @@ sealed class ReceiveHost : IDisposable
             Log.Write($"visibility {_visibility.Current}");
         }
         NoteDegraded();
+        RaiseModeChanged();
         _ = Task.Run(() => EvaluateAsync());
     }
 
@@ -151,6 +165,7 @@ sealed class ReceiveHost : IDisposable
             expired = before != _visibility.Current;
             if (expired) Log.Write($"visibility {_visibility.Current}");
         }
+        if (expired) RaiseModeChanged();
         if (expired || ++_ticks % RecheckEveryTicks == 0) _ = Task.Run(() => EvaluateAsync());
     }
 

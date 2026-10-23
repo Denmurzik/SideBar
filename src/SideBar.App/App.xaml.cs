@@ -5,10 +5,14 @@ using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Core.Nearby;
 using SideBar.Edge;
+using SideBar.Core.Settings;
+using SideBar.Core.Updates;
 using SideBar.Nearby;
+using SideBar.Settings;
 using SideBar.Shelf;
 using SideBar.Sharing;
 using SideBar.Tray;
+using SideBar.Updates;
 using WinRT.Interop;
 
 namespace SideBar;
@@ -36,6 +40,8 @@ public partial class App : Application
     FanWindow? _fan;
     Notifications? _notifications;
     ReceiveHost? _receive;
+    SettingsStore? _settings;
+    UpdateChecker? _updates;
     readonly StackPause _stack = new();
     OfficialAppWatcher? _official;
     IdentityProvider? _identity;
@@ -77,6 +83,8 @@ public partial class App : Application
         ShareStaging.SweepStale();   // остатки аварийно завершённого прошлого запуска
         _shelf = new ShelfService();
         _shelf.Load();
+        _settings = new SettingsStore(SettingsPath());
+        VisibilitySettings.MigrateLegacy(_settings);   // режим видимости M4 из реестра: один раз, до создания ReceiveHost
         _window = new CardWindow();
         _window.BindShelf(_shelf);
         _window.FanRequested += OnFanRequested;
@@ -137,10 +145,11 @@ public partial class App : Application
             _stack.SetOfficialRunning(running);
         };
         _official.Poll();   // первое решение приёма уже учитывает процесс
-        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack);
+        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack, _settings);
         _official.Start();
         _refresh = new OfficialRefreshHost(_stack, _identity, _notifications, _official, () => _receive.Busy || (_nearby?.Busy ?? false));   // Settings Task 3: передать AppSettings.OfficialExePath
         _refresh.Start();
+        SettingsWindow.RefreshCertificatesNow = RefreshCertificatesNow;   // кнопка «Обновить» в настройках
 #if DEBUG
         if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.SetMode(SideBar.Core.Nearby.Visibility.Everyone, persist: false);   // автотест без клика по меню трея
         // живой цикл M5 без клика по трею: SIDEBAR_DEBUG_REFRESH=1 запускает «Обновить сертификаты сейчас» через 5 с после старта
@@ -151,10 +160,68 @@ public partial class App : Application
             _debugNote = new Timer(_ => _ui?.TryEnqueue(() => DebugNote(noteKind)), null, 3000, 6000);
 #endif
         _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused,
-            () => _ = _refresh.RefreshNowAsync(), () => _refresh.Busy);
+            () => _ = _refresh.RefreshNowAsync(), () => _refresh.Busy) { OpenSettings = () => ShowSettings() };
+        InitUpdates();
+#if DEBUG
+        // скриншоты без ввода: SIDEBAR_DEBUG_SETTINGS=<0..4> открывает окно настроек на нужном разделе
+        var debugSettings = Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_SETTINGS");
+        if (int.TryParse(debugSettings, out var debugSection)) _ui.TryEnqueue(() => ShowSettings(debugSection));
+        else if (debugSettings == "selftest")   // повторный вызов поднимает то же окно; закрытие освобождает его
+            _ui.TryEnqueue(() =>
+            {
+                ShowSettings();
+                ShowSettings();
+                _ = Task.Run(async () =>
+                {
+                    for (var i = 0; i < 8; i++)
+                    {
+                        await Task.Delay(2500);
+                        _ui.TryEnqueue(SettingsWindow.DebugClose);
+                        await Task.Delay(1500);
+                        _ui.TryEnqueue(SettingsWindow.DebugReport);
+                        await Task.Delay(500);
+                        _ui.TryEnqueue(() => ShowSettings(i % 5));
+                    }
+                });
+            });
+#endif
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) CardHidden(); }), null, 2000, Timeout.Infinite);
+    }
+
+    /// <summary>Проверка обновлений (M7): таймер раз в час, пункт трея, кнопка «Проверить сейчас» в настройках.</summary>
+    void InitUpdates()
+    {
+        _updates = new UpdateChecker(_settings!, new UpdateStateStore(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsPath())!, "update-state.json")));
+        _tray!.AvailableUpdate = () => _updates.Available;
+        _tray.OpenUpdate = UpdateChecker.OpenRelease;
+        SettingsWindow.CheckForUpdatesNow = async () =>
+        {
+            var o = await _updates.CheckNowAsync();
+            return o.Kind switch
+            {
+                UpdateKind.UpToDate => Strings.UpToDate,
+                UpdateKind.Available => Strings.UpdateAvailable(o.Release!.Version.ToString()),
+                UpdateKind.NotFound => Strings.CheckFailedClosed,
+                _ => Strings.CheckFailed,
+            };
+        };
+        _updates.Start();
+    }
+
+    static string SettingsPath() => System.IO.Path.Combine(
+        Environment.GetEnvironmentVariable("SIDEBAR_DATA_DIR") is { Length: > 0 } dir
+            ? dir
+            : System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SideBar"),
+        "settings.json");
+
+    /// <summary>Окно настроек: одно на процесс, по требованию; пока оно открыто, обрезка working set стоит.</summary>
+    void ShowSettings(int? section = null)
+    {
+        if (_settings is null || _receive is null || _identity is null || _shelf is null) return;
+        SettingsWindow.ShowOrActivate(new SettingsDeps(_settings, new Autostart(), Environment.ProcessPath!, _receive, _identity,
+            () => { _shelf.Clear(); _fan?.Hide(); }, _trimmer.OnShown, _trimmer.OnHidden), section);
     }
 
     // пока карточка открыта (в том числе удерживается запросом), обрезка working set не идёт: OnShown снимает таймер
@@ -278,6 +345,7 @@ public partial class App : Application
             try { _dropTarget?.Dispose(); } catch { }
             try { _receive?.Dispose(); } catch { }
             try { _identity?.Dispose(); } catch { }
+            try { _updates?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
             try { _messages?.Dispose(); } catch { }
         }
