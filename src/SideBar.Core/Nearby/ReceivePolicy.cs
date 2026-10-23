@@ -9,10 +9,11 @@ public readonly record struct ReceiveDecision(bool Listen, bool CancelUnaccepted
 /// </summary>
 public static class ReceivePolicy
 {
-    public static ReceiveDecision Decide(Visibility visibility, NetworkCategory? category)
+    /// <param name="networkChecked">false when the network was not looked at (Hidden, no accepted transfer at that moment): nothing accepted may be cancelled then.</param>
+    public static ReceiveDecision Decide(Visibility visibility, NetworkCategory? category, bool networkChecked = true)
     {
         var networkOk = category is NetworkCategory.Private or NetworkCategory.Domain;
         var listen = visibility == Visibility.Everyone && networkOk;
-        return new ReceiveDecision(listen, CancelUnaccepted: !listen, CancelAccepted: !networkOk);
+        return new ReceiveDecision(listen, CancelUnaccepted: !listen, CancelAccepted: networkChecked && !networkOk);
     }
 }

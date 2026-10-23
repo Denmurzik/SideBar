@@ -15,7 +15,7 @@ public static class DisplayText
         ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp", ".tif", ".tiff", ".avif",
         ".mp4", ".mov", ".mkv", ".webm", ".avi",
         ".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus",
-        ".pdf", ".txt", ".md", ".csv", ".rtf", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
+        ".pdf", ".txt", ".md", ".csv", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
     };
 
     /// <summary>One line without control/format characters (bidi overrides included), whitespace collapsed, capped at <paramref name="max"/> UTF-16 units without splitting a surrogate pair.</summary>

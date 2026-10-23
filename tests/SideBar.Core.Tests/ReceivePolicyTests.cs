@@ -44,4 +44,13 @@ public class ReceivePolicyTests
         Assert.False(d.Listen);
         Assert.True(d.CancelAccepted);
     }
+
+    [Fact]
+    public void Unchecked_network_never_cancels_accepted_transfers()
+    {
+        var d = ReceivePolicy.Decide(Visibility.Hidden, null, networkChecked: false);
+        Assert.False(d.Listen);
+        Assert.True(d.CancelUnaccepted);
+        Assert.False(d.CancelAccepted);
+    }
 }

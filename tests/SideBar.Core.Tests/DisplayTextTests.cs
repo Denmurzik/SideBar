@@ -83,6 +83,7 @@ public class DisplayTextTests
     [InlineData(@"C:\d\a.flac", true)]
     [InlineData(@"C:\d\a.pdf", true)]
     [InlineData(@"C:\d\a.docx", true)]
+    [InlineData(@"C:\d\a.rtf", false)]
     [InlineData(@"C:\d\a.exe", false)]
     [InlineData(@"C:\d\a.msi", false)]
     [InlineData(@"C:\d\a.lnk", false)]

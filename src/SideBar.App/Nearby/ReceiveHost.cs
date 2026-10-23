@@ -116,7 +116,7 @@ sealed class ReceiveHost : IDisposable
                 }
                 else Log.Write("receive network none");
             }
-            var decision = ReceivePolicy.Decide(visibility, category);
+            var decision = ReceivePolicy.Decide(visibility, category, networkChecked: visibility == Visibility.Everyone || anyAccepted);
             CancelSessions(decision);
 
             if (!decision.Listen || lan is null)
@@ -261,6 +261,12 @@ sealed class ReceiveHost : IDisposable
                 Log.Write($"receive session {result.Status} files={result.Files.Count} texts={result.ReceivedTexts.Count}");
                 _ui.TryEnqueue(() => ShowResult(result, offer, accepted));
             }
+        }
+        catch (OperationCanceledException) when (live.Accepted && cts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // принятую передачу оборвала политика (сеть стала Public/Unknown или пропал маршрут); .part удалён сессией
+            Log.Write("receive session cancelled by policy");
+            _ui.TryEnqueue(() => _notifications.Info("interrupted", Strings.TransferInterrupted));
         }
         catch (Exception e)
         {
