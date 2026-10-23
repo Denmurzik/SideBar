@@ -1,8 +1,24 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace SideBar.Core.Settings;
 
-/// <summary>Формат settings.json. Перечисления хранятся строками и разбираются терпимо: неизвестное значение = по умолчанию.</summary>
+/// <summary>Чтение settings.json: каждое поле разбирается отдельно, значение не того типа сбрасывает только это поле.</summary>
+internal sealed class SettingsRaw
+{
+    [JsonPropertyName("language")] public JsonElement? Language { get; set; }
+    [JsonPropertyName("checkForUpdates")] public JsonElement? CheckForUpdates { get; set; }
+    [JsonPropertyName("visibility")] public JsonElement? Visibility { get; set; }
+    [JsonPropertyName("pcName")] public JsonElement? PcName { get; set; }
+    [JsonPropertyName("receiveFolder")] public JsonElement? ReceiveFolder { get; set; }
+    [JsonPropertyName("officialExePath")] public JsonElement? OfficialExePath { get; set; }
+    [JsonPropertyName("edgeOpenDelay")] public JsonElement? EdgeOpenDelay { get; set; }
+    [JsonPropertyName("bounceOnIncoming")] public JsonElement? BounceOnIncoming { get; set; }
+    [JsonPropertyName("showInFullscreen")] public JsonElement? ShowInFullscreen { get; set; }
+    [JsonPropertyName("shelfRetention")] public JsonElement? ShelfRetention { get; set; }
+}
+
+/// <summary>Запись settings.json. Перечисления хранятся строками.</summary>
 internal sealed class SettingsFile
 {
     [JsonPropertyName("language")] public string? Language { get; set; }
@@ -19,4 +35,5 @@ internal sealed class SettingsFile
 
 [JsonSourceGenerationOptions(WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(SettingsFile))]
+[JsonSerializable(typeof(SettingsRaw))]
 internal sealed partial class SettingsJsonContext : JsonSerializerContext;

@@ -37,7 +37,6 @@ public sealed class SettingsTests : IDisposable
         {
             Language = Language.English,
             CheckForUpdates = false,
-            Visibility = Visibility.Everyone,
             PcName = "Мой ПК",
             ReceiveFolder = @"D:\Приём",
             OfficialExePath = @"D:\NS\nearby_share.exe",
@@ -124,7 +123,7 @@ public sealed class SettingsTests : IDisposable
     public void MigrateVisibility_takes_registry_value_only_over_default()
     {
         var def = new AppSettings();
-        Assert.Equal(Visibility.Everyone, SettingsStore.MigrateVisibility(def, Visibility.Everyone).Visibility);
+        Assert.Equal(def, SettingsStore.MigrateVisibility(def, Visibility.Everyone));   // «Все» не переносится
         Assert.Equal(def, SettingsStore.MigrateVisibility(def, null));
         Assert.Equal(def, SettingsStore.MigrateVisibility(def, (Visibility)99));
         var chosen = def with { Visibility = Visibility.Everyone };

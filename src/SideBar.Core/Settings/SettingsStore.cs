@@ -4,36 +4,104 @@ using SideBar.Core.Nearby;
 namespace SideBar.Core.Settings;
 
 /// <summary>
-/// settings.json. Загрузка в конструкторе: нет файла — значения по умолчанию; нечитаемый — уезжает в <c>settings.bad-yyyyMMdd-HHmmss.json</c>,
-/// берутся значения по умолчанию. Запись атомарна (<c>.tmp</c> + <c>File.Move(overwrite)</c>). Не потокобезопасен (UI-поток).
+/// settings.json. Загрузка в конструкторе: нет файла — значения по умолчанию; нечитаемый (битый JSON, пустой, <c>null</c>) — уезжает в
+/// <c>settings.bad-yyyyMMdd-HHmmss.json</c>, берутся значения по умолчанию. Файл, занятый и после повторов, не считается битым: берутся
+/// значения по умолчанию, файл не трогается, запись подавляется, пока он не прочитается (проверка при следующем Update).
+/// Запись атомарна (<c>.tmp</c> + <c>File.Move(overwrite)</c>). Потокобезопасен; <see cref="Changed"/> приходит вне блокировки и по порядку,
+/// в том числе при вложенном Update из обработчика.
 /// </summary>
 public sealed class SettingsStore
 {
     const int MaxPcNameLength = 32, LoadRetries = 4, LoadRetryDelayMs = 200, SaveRetries = 3, SaveRetryDelayMs = 100;
 
     readonly string _path;
+    readonly object _gate = new();
+    readonly Queue<AppSettings> _pending = new();
+    bool _draining;
+    bool _writesSuppressed;
+    volatile AppSettings _current;
+    volatile bool _lastSaveFailed;
+    Visibility _persistedVisibility;
 
     public SettingsStore(string path)
     {
         _path = path;
-        Current = Load();
+        if (!TryLoad(LoadRetries, out var loaded))
+        {
+            loaded = new AppSettings();
+            _writesSuppressed = true;
+            _lastSaveFailed = true;
+        }
+        _current = loaded;
+        _persistedVisibility = loaded.Visibility;
     }
 
-    public AppSettings Current { get; private set; }
+    public AppSettings Current => _current;
+
+    /// <summary>Видимость, которая пишется в файл: «Все» (временный режим) не сохраняется, пишется последний постоянный режим.</summary>
+    public Visibility PersistedVisibility => _persistedVisibility;
+
+    /// <summary>Последняя запись не удалась (или файл не удалось прочитать и запись подавлена): настройки действуют до перезапуска.</summary>
+    public bool LastSaveFailed => _lastSaveFailed;
 
     public event Action<AppSettings>? Changed;
 
+    public event Action? SaveFailed;
+
     /// <summary>
-    /// Применяет изменение, нормализует результат и сохраняет. <see cref="Changed"/> — один раз, если значение изменилось.
-    /// Сбой записи не бросает: настройка действует до перезапуска.
+    /// Применяет изменение, нормализует результат и сохраняет. <see cref="Changed"/> — по одному разу на реальное изменение.
+    /// <paramref name="change"/> вернул null или то же значение — ничего не происходит. Сбой записи не бросает: <see cref="Current"/> обновлён,
+    /// <see cref="Changed"/> поднят, затем <see cref="SaveFailed"/>.
     /// </summary>
-    public void Update(Func<AppSettings, AppSettings> change)
+    public void Update(Func<AppSettings, AppSettings?> change)
     {
-        var next = Normalize(change(Current));
-        if (next == Current) return;
-        Current = next;
-        TrySave(next);
-        Changed?.Invoke(next);
+        var saveFailed = false;
+        lock (_gate)
+        {
+            var old = _current;
+            if (_writesSuppressed && TryLoad(0, out var reloaded))
+            {
+                _writesSuppressed = false;
+                _current = reloaded;
+                _persistedVisibility = reloaded.Visibility;
+            }
+            var next = Normalize(change(_current) ?? _current);
+            if (next == old) return;
+            _current = next;
+            if (next.Visibility != Visibility.Everyone) _persistedVisibility = next.Visibility;
+            if (_writesSuppressed) saveFailed = true;
+            else saveFailed = !TrySave(next);
+            _lastSaveFailed = saveFailed;
+            _pending.Enqueue(next);
+        }
+        Drain();
+        if (saveFailed) SaveFailed?.Invoke();
+    }
+
+    void Drain()
+    {
+        lock (_gate)
+        {
+            if (_draining) return;   // вложенный/параллельный Update: событие доставит тот, кто уже разгребает очередь, по порядку
+            _draining = true;
+        }
+        try
+        {
+            while (true)
+            {
+                AppSettings value;
+                lock (_gate)
+                {
+                    if (!_pending.TryDequeue(out value!)) { _draining = false; return; }
+                }
+                Changed?.Invoke(value);
+            }
+        }
+        catch
+        {
+            lock (_gate) _draining = false;
+            throw;
+        }
     }
 
     /// <summary>Имя ПК: как имена устройств (без управляющих символов), до 32 символов без разрыва суррогатной пары; пусто — null (имя компьютера).</summary>
@@ -49,9 +117,12 @@ public sealed class SettingsStore
         return clean.Length == 0 ? null : clean;
     }
 
-    /// <summary>Перенос видимости, сохранённой M4 в реестре: только пока в настройках стоит значение по умолчанию (Hidden). Чистая функция.</summary>
+    /// <summary>
+    /// Перенос видимости, сохранённой M4 в реестре: только пока в настройках стоит значение по умолчанию (Hidden); «Все» не переносится
+    /// (временный режим не сохраняется). Чистая функция: App сам читает реестр и удаляет значение сразу после этого вызова.
+    /// </summary>
     public static AppSettings MigrateVisibility(AppSettings settings, Visibility? fromRegistry) =>
-        fromRegistry is { } v && Enum.IsDefined(v) && settings.Visibility == Visibility.Hidden
+        fromRegistry is { } v && v != Visibility.Everyone && Enum.IsDefined(v) && settings.Visibility == Visibility.Hidden
             ? settings with { Visibility = v }
             : settings;
 
@@ -72,32 +143,37 @@ public sealed class SettingsStore
         };
     }
 
-    static T ParseEnum<T>(string? raw, T fallback) where T : struct, Enum =>
-        raw is { Length: > 0 } && !char.IsDigit(raw[0]) && Enum.TryParse<T>(raw, ignoreCase: true, out var v) && Enum.IsDefined(v) ? v : fallback;
+    static string? Str(JsonElement? e) => e is { ValueKind: JsonValueKind.String } x ? x.GetString() : null;
 
-    static AppSettings FromFile(SettingsFile f)
+    static bool? Bool(JsonElement? e) => e?.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => null };
+
+    static T ParseEnum<T>(JsonElement? e, T fallback) where T : struct, Enum =>
+        Str(e) is { Length: > 0 } raw && !char.IsDigit(raw[0]) && Enum.TryParse<T>(raw, ignoreCase: true, out var v) && Enum.IsDefined(v) ? v : fallback;
+
+    static AppSettings FromFile(SettingsRaw f)
     {
         var d = new AppSettings();
+        var visibility = ParseEnum(f.Visibility, d.Visibility);
         return Normalize(new AppSettings
         {
             Language = ParseEnum(f.Language, d.Language),
-            CheckForUpdates = f.CheckForUpdates ?? d.CheckForUpdates,
-            Visibility = ParseEnum(f.Visibility, d.Visibility),
-            PcName = f.PcName,
-            ReceiveFolder = f.ReceiveFolder,
-            OfficialExePath = f.OfficialExePath,
+            CheckForUpdates = Bool(f.CheckForUpdates) ?? d.CheckForUpdates,
+            Visibility = visibility == Visibility.Everyone ? d.Visibility : visibility,   // «Все» — временный режим, после перезапуска не живёт
+            PcName = Str(f.PcName),
+            ReceiveFolder = Str(f.ReceiveFolder),
+            OfficialExePath = Str(f.OfficialExePath),
             EdgeOpenDelay = ParseEnum(f.EdgeOpenDelay, d.EdgeOpenDelay),
-            BounceOnIncoming = f.BounceOnIncoming ?? d.BounceOnIncoming,
-            ShowInFullscreen = f.ShowInFullscreen ?? d.ShowInFullscreen,
+            BounceOnIncoming = Bool(f.BounceOnIncoming) ?? d.BounceOnIncoming,
+            ShowInFullscreen = Bool(f.ShowInFullscreen) ?? d.ShowInFullscreen,
             ShelfRetention = ParseEnum(f.ShelfRetention, d.ShelfRetention),
         });
     }
 
-    static SettingsFile ToFile(AppSettings s) => new()
+    SettingsFile ToFile(AppSettings s) => new()
     {
         Language = s.Language.ToString(),
         CheckForUpdates = s.CheckForUpdates,
-        Visibility = s.Visibility.ToString(),
+        Visibility = (s.Visibility == Visibility.Everyone ? _persistedVisibility : s.Visibility).ToString(),
         PcName = s.PcName,
         ReceiveFolder = s.ReceiveFolder,
         OfficialExePath = s.OfficialExePath,
@@ -107,27 +183,34 @@ public sealed class SettingsStore
         ShelfRetention = s.ShelfRetention.ToString(),
     };
 
-    AppSettings Load()
+    /// <summary>true — настройки получены (из файла, либо файла нет, либо он битый и убран в карантин: тогда значения по умолчанию). false — файл занят/недоступен.</summary>
+    bool TryLoad(int retries, out AppSettings settings)
     {
+        settings = new AppSettings();
         for (var attempt = 0; ; attempt++)
         {
             try
             {
-                if (!File.Exists(_path)) return new AppSettings();
+                if (!File.Exists(_path)) return true;
                 var bytes = File.ReadAllBytes(_path);
                 if (bytes is [0xEF, 0xBB, 0xBF, ..]) bytes = bytes[3..];
-                var file = JsonSerializer.Deserialize(bytes, SettingsJsonContext.Default.SettingsFile);
-                if (file is null) { Quarantine(); return new AppSettings(); }
-                return FromFile(file);
+                var file = JsonSerializer.Deserialize(bytes, SettingsJsonContext.Default.SettingsRaw);
+                if (file is null) { Quarantine(); return true; }
+                settings = FromFile(file);
+                return true;
             }
-            catch (IOException e) when (attempt < LoadRetries && e is not (FileNotFoundException or DirectoryNotFoundException))
-            {
-                Thread.Sleep(LoadRetryDelayMs);   // антивирус/индексатор держит файл коротко: не принимаем его за битый
-            }
-            catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
+            catch (JsonException)
             {
                 Quarantine();
-                return new AppSettings();
+                return true;
+            }
+            catch (IOException e) when (attempt < retries && e is not (FileNotFoundException or DirectoryNotFoundException))
+            {
+                Thread.Sleep(LoadRetryDelayMs);   // антивирус/индексатор держит файл коротко
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                return e is FileNotFoundException or DirectoryNotFoundException;   // исчез между Exists и чтением — как «нет файла»
             }
         }
     }
@@ -147,7 +230,7 @@ public sealed class SettingsStore
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
-    void TrySave(AppSettings s)
+    bool TrySave(AppSettings s)
     {
         try
         {
@@ -164,11 +247,14 @@ public sealed class SettingsStore
                         stream.Flush(flushToDisk: true);
                     }
                     File.Move(tmp, _path, overwrite: true);
-                    return;
+                    return true;
                 }
                 catch (IOException) when (attempt < SaveRetries) { Thread.Sleep(SaveRetryDelayMs); }
             }
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
     }
 }
