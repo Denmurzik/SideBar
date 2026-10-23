@@ -100,15 +100,15 @@ public sealed class SettingsRobustnessTests : IDisposable
     public void Everyone_is_never_persisted()
     {
         File.WriteAllText(FilePath, """{ "visibility": "Everyone" }""");
-        Assert.Equal(Visibility.Hidden, new SettingsStore(FilePath).Current.Visibility);
+        Assert.Equal(Visibility.OwnDevices, new SettingsStore(FilePath).Current.Visibility);
 
         var path = Path.Combine(_dir, "e.json");
         var store = new SettingsStore(path);
         store.Update(s => s with { Visibility = Visibility.Everyone });
         Assert.Equal(Visibility.Everyone, store.Current.Visibility);
-        Assert.Equal(Visibility.Hidden, store.PersistedVisibility);
+        Assert.Equal(Visibility.OwnDevices, store.PersistedVisibility);
         Assert.DoesNotContain("Everyone", File.ReadAllText(path));
-        Assert.Equal(Visibility.Hidden, new SettingsStore(path).Current.Visibility);
+        Assert.Equal(Visibility.OwnDevices, new SettingsStore(path).Current.Visibility);
     }
 
     [Fact]

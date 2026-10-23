@@ -5,7 +5,9 @@ using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Core.Nearby;
 using SideBar.Edge;
+using SideBar.Core.Settings;
 using SideBar.Nearby;
+using SideBar.Settings;
 using SideBar.Shelf;
 using SideBar.Sharing;
 using SideBar.Tray;
@@ -36,6 +38,7 @@ public partial class App : Application
     FanWindow? _fan;
     Notifications? _notifications;
     ReceiveHost? _receive;
+    SettingsStore? _settings;
     readonly StackPause _stack = new();
     OfficialAppWatcher? _official;
     IdentityProvider? _identity;
@@ -76,6 +79,8 @@ public partial class App : Application
         ShareStaging.SweepStale();   // остатки аварийно завершённого прошлого запуска
         _shelf = new ShelfService();
         _shelf.Load();
+        _settings = new SettingsStore(SettingsPath());
+        VisibilitySettings.MigrateLegacy(_settings);   // режим видимости M4 из реестра: один раз, до создания ReceiveHost
         _window = new CardWindow();
         _window.BindShelf(_shelf);
         _window.FanRequested += OnFanRequested;
@@ -136,7 +141,7 @@ public partial class App : Application
             _stack.SetOfficialRunning(running);
         };
         _official.Poll();   // первое решение приёма уже учитывает процесс
-        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack);
+        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity, _stack, _settings);
         _official.Start();
 #if DEBUG
         if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.SetMode(SideBar.Core.Nearby.Visibility.Everyone, persist: false);   // автотест без клика по меню трея
@@ -144,10 +149,47 @@ public partial class App : Application
         if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_NOTE") is { Length: > 0 } noteKind)
             _debugNote = new Timer(_ => _ui?.TryEnqueue(() => DebugNote(noteKind)), null, 3000, 6000);
 #endif
-        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused);
+        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused) { OpenSettings = () => ShowSettings() };
+#if DEBUG
+        // скриншоты без ввода: SIDEBAR_DEBUG_SETTINGS=<0..4> открывает окно настроек на нужном разделе
+        var debugSettings = Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_SETTINGS");
+        if (int.TryParse(debugSettings, out var debugSection)) _ui.TryEnqueue(() => ShowSettings(debugSection));
+        else if (debugSettings == "selftest")   // повторный вызов поднимает то же окно; закрытие освобождает его
+            _ui.TryEnqueue(() =>
+            {
+                ShowSettings();
+                ShowSettings();
+                _ = Task.Run(async () =>
+                {
+                    for (var i = 0; i < 8; i++)
+                    {
+                        await Task.Delay(2500);
+                        _ui.TryEnqueue(SettingsWindow.DebugClose);
+                        await Task.Delay(1500);
+                        _ui.TryEnqueue(SettingsWindow.DebugReport);
+                        await Task.Delay(500);
+                        _ui.TryEnqueue(() => ShowSettings(i % 5));
+                    }
+                });
+            });
+#endif
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) CardHidden(); }), null, 2000, Timeout.Infinite);
+    }
+
+    static string SettingsPath() => System.IO.Path.Combine(
+        Environment.GetEnvironmentVariable("SIDEBAR_DATA_DIR") is { Length: > 0 } dir
+            ? dir
+            : System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SideBar"),
+        "settings.json");
+
+    /// <summary>Окно настроек: одно на процесс, по требованию; пока оно открыто, обрезка working set стоит.</summary>
+    void ShowSettings(int? section = null)
+    {
+        if (_settings is null || _receive is null || _identity is null || _shelf is null) return;
+        SettingsWindow.ShowOrActivate(new SettingsDeps(_settings, new Autostart(), Environment.ProcessPath!, _receive, _identity,
+            () => { _shelf.Clear(); _fan?.Hide(); }, _trimmer.OnShown, _trimmer.OnHidden), section);
     }
 
     // пока карточка открыта (в том числе удерживается запросом), обрезка working set не идёт: OnShown снимает таймер
