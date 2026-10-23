@@ -175,7 +175,7 @@ sealed class Driver
         if (Path.GetFullPath(_srcDir).StartsWith(Path.GetFullPath(tmpDir), StringComparison.OrdinalIgnoreCase))
         { Rep("FAIL source files must be outside %TEMP% (they would count as temporary)"); _fail++; return; }
 
-        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_CLEAR_ONLY") == "1") { ClearScenarios(W, H, a, b, c); return; }   // быстрый прогон: только корзина полки (C1..C3)
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_CLEAR_ONLY") == "1") { ClearScenarios(W, H, a, b, c); return; }   // быстрый прогон: только корзина полки (C1..C5)
         if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1" || Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_FAN_ONLY") == "1")   // быстрый прогон: только вынос стопки и отправка с плитки
         {
             var quickFolder = Path.Combine(_srcDir, "folder1");
@@ -590,7 +590,16 @@ sealed class Driver
         DragToPanel(files, W, H);
     }
 
-    // C1..C3: очистка полки корзиной только вторым кликом в течение 3 с; файлы на диске целы
+    /// <summary>Клик по корзине не должен ничего запускать: ни выноса, ни веера, ни активации окон приложения.</summary>
+    bool QuietClick(out string why)
+    {
+        var log = AppLog();
+        bool fg = ForegroundIsApp(out var cls);
+        why = $"dragOut={log.Contains("drag-out starting")} fan={FanZone() != null} foregroundIsApp={fg} ({cls})";
+        return !log.Contains("drag-out starting") && FanZone() == null && !fg;
+    }
+
+    // C1..C5: очистка полки корзиной только вторым кликом в течение 3 с; файлы на диске целы; Owned уходит в отложенное удаление
     void ClearScenarios(int W, int H, string a, string b, string c)
     {
         StopApp();
@@ -603,12 +612,14 @@ sealed class Driver
         MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
         Click(); Thread.Sleep(600);
         s = ReadShelf();
-        Shot("c1-armed", W, H);
-        Check("C1 first click on the trash only arms it: shelf still holds 3", s.Count == 3, Dump(s));
+        bool quiet = QuietClick(out var why);
+        Check("C1 first click on the trash only arms it: shelf still holds 3; no drag-out, no fan, card not foreground", s.Count == 3 && quiet, Dump(s) + "\n" + why);
         Click();
         s = WaitShelf(x => x.Count == 0, 3000);
-        Check("C2 second click within 3 s clears the shelf; the files stay on disk; log 'shelf cleared n=3'",
-            s.Count == 0 && File.Exists(a) && File.Exists(b) && File.Exists(c) && AppLog().Contains("shelf cleared n=3"), Dump(s));
+        quiet = QuietClick(out why);
+        Check("C2 second click within 3 s clears the shelf; the files stay on disk; log 'shelf cleared n=3'; no drag-out, no fan, card not foreground",
+            s.Count == 0 && File.Exists(a) && File.Exists(b) && File.Exists(c) && AppLog().Contains("shelf cleared n=3") && quiet, Dump(s) + "\n" + why);
+        Shot("c2-cleared", W, H);
         MoveTo(W - 700, H, 200); Thread.Sleep(500);
         FillThree(W, H, a, b, c);
         s = WaitShelf(x => x.Count == 3);
@@ -617,7 +628,53 @@ sealed class Driver
         Click(); Thread.Sleep(3500);
         Click(); Thread.Sleep(600);
         s = ReadShelf();
-        Check("C3 click, wait 3.5 s, click again: the arming expired, the shelf is not cleared", s.Count == 3, Dump(s));
+        quiet = QuietClick(out why);
+        bool expired = s.Count == 3;
+        Click();   // третий клик: после перевооружения очищает полку
+        var cleared = WaitShelf(x => x.Count == 0, 3000);
+        Check("C3 click, wait 3.5 s, click again: the arming expired (shelf holds 3); a third click then clears it; no drag-out, no fan, card not foreground",
+            expired && cleared.Count == 0 && quiet && AppLog().Contains("shelf cleared n=3"), $"afterSecond={s.Count} afterThird={cleared.Count}\n" + why);
+        Shot("c3-after", W, H);
+
+        // C4: Owned (PNG из %TEMP%) уходит с полки, файл жив сразу после очистки и записан в pendingDeletes
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        if (!StartApp()) { _fail++; return; }
+        var png = Path.Combine(Path.GetTempPath(), "drive-clear-owned.png");
+        using (var bmp = new Bitmap(16, 16)) bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+        var pngDrop = new DataObject();
+        pngDrop.SetData(DataFormats.FileDrop, new[] { png });
+        DragToPanel(pngDrop, W, H);
+        var two = new DataObject();
+        two.SetData(DataFormats.FileDrop, new[] { a });
+        DragToPanel(two, W, H);
+        s = WaitShelf(x => x.Count == 2);
+        try { File.Delete(png); } catch { }
+        var owned = s.FirstOrDefault(x => x.Kind == Owned);
+        if (s.Count != 2 || owned == null || !OpenCard(W, H)) { Check("C4 shelf prepared (png owned + file ref) and card open", false, Dump(s)); return; }
+        var ownedDir = Path.GetDirectoryName(owned.Path)!;
+        MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
+        Click(); Thread.Sleep(300); Click();
+        s = WaitShelf(x => x.Count == 0, 3000);
+        bool alive = File.Exists(owned.Path);
+        var pending = ReadPending();
+        bool recorded = Guid.TryParse(Path.GetFileName(ownedDir), out var ownedGuid) && pending.Any(p => Guid.Parse(p.Guid) == ownedGuid);
+        Check("C4 Owned item: clear removes it from the shelf, its file still exists right after, shelf.json pendingDeletes holds it",
+            s.Count == 0 && alive && recorded && File.Exists(a), $"alive={alive} pending=[{string.Join("; ", pending)}]\n" + Dump(s));
+
+        // C5: корзина скрыта, пока стопку выносят, и возвращается после drag'а
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+        FillThree(W, H, a, b, c);
+        s = WaitShelf(x => x.Count == 3);
+        if (s.Count != 3) { Check("C5 shelf prepared", false, Dump(s)); return; }
+        if (!DragStackTo(new Point(W - 700, H), W, H)) return;
+        var log = AppLog();
+        int started = log.IndexOf("drag-out starting", StringComparison.Ordinal);
+        int hidden = log.IndexOf("shelf trash Collapsed", StringComparison.Ordinal);
+        int completed = log.IndexOf("drag-out completed", StringComparison.Ordinal);
+        int shown = completed < 0 ? -1 : log.IndexOf("shelf trash Visible", completed, StringComparison.Ordinal);
+        Check("C5 trash is hidden while a stack item is dragged out and is back after the drag",
+            started >= 0 && hidden >= 0 && completed > hidden && shown > completed, $"starting={started} collapsed={hidden} completed={completed} visibleAfter={shown}\n" + log);
     }
 
     // D3e: отложенное удаление переживает перезапуск: перезапуск внутри окна задержки не удаляет папку, после срока она удаляется

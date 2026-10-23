@@ -141,7 +141,7 @@ public partial class App : Application
         if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_NOTE") is { Length: > 0 } noteKind)
             _debugNote = new Timer(_ => _ui?.TryEnqueue(() => DebugNote(noteKind)), null, 3000, 6000);
 #endif
-        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m));
+        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused);
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) CardHidden(); }), null, 2000, Timeout.Infinite);

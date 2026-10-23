@@ -10,6 +10,7 @@ static class Strings
     public const string VisibilityHidden = "Скрыто";
     public const string VisibilityOwnDevices = "Свои устройства";
     public const string VisibilityEveryone = "Все (10 мин)";
+    public const string StackPaused = "Quick Share на паузе — открыт официальный Quick Share";
     public const string OwnMark = "своё";
     /// <summary>Имя своего устройства, если в сертификате его нет: имя из рекламы задаёт пир и сюда не попадает.</summary>
     public const string OwnDevice = "Ваше устройство";

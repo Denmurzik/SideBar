@@ -363,6 +363,55 @@ public class OfficialCertificateStoreTests : IDisposable
     }
 
     [Fact]
+    public void Contact_certificate_without_for_self_share_is_not_an_own_device()
+    {
+        var pc = NewDevice("PC");
+        var contact = NewDevice("Contact");
+        contact.Public.ForSelfShare = false;
+        WriteSharingDir(Dir, [pc.Private], [pc.Public, contact.Public]);
+        using var store = NewStore();
+        Assert.True(store.TryLoad(out var identity, out _));
+        Assert.Equal(0, store.Summary!.PeerCount);
+
+        var contactIdentity = new CertificateIdentity(
+            new PrivateCertificateData(contact.Private.SecretKey, contact.Private.MetadataEncryptionKey, contact.Private.KeyPairPkcs8),
+            [new PublicCertificateData(pc.Public.SecretId, pc.Public.SecretKey, pc.Public.PublicKey, pc.Public.KeyTag, pc.Public.EncryptedMetadata)]);
+        var advert = contactIdentity.CreateEndpointInfo("x", DeviceKind.Phone);
+        var token = RandomNumberGenerator.GetBytes(32);
+        var frame = contactIdentity.CreatePairedKeyEncryption(
+            token, PairedKeyRole.Sender, identity!.CreateEndpointInfo("PC", DeviceKind.Laptop));
+
+        Assert.False(identity.Identify(advert));
+        Assert.NotEqual(PairedKeyResultFrame.Types.Status.Success,
+            identity.VerifyPairedKey(frame, token, PairedKeyRole.Receiver, advert));
+    }
+
+    [Fact]
+    public void Watcher_error_drops_the_watcher_and_the_next_tick_recreates_it_and_reloads()
+    {
+        var pc = NewDevice("PC");
+        WriteSharingDir(Dir, [pc.Private], [pc.Public]);
+        using var store = NewStore();
+        var raised = 0;
+        store.FilesChanged += () => Interlocked.Increment(ref raised);
+        store.StartWatching();
+        var debounce = _timers.Timers[0];
+        var expiry = _timers.Timers[1];
+
+        store.OnWatcherError();
+        Assert.Equal(TimeSpan.FromSeconds(2), debounce.Due);
+        debounce.Fire();
+        Assert.Equal(1, raised);
+        debounce.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+
+        // The dead watcher is gone: the tick creates a new one and schedules one reload.
+        expiry.Fire();
+        Assert.Equal(TimeSpan.FromSeconds(2), debounce.Due);
+        debounce.Fire();
+        Assert.Equal(2, raised);
+    }
+
+    [Fact]
     public void Debounce_collapses_a_burst_of_file_changes_into_one_event()
     {
         var pc = NewDevice("PC");

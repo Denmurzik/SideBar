@@ -163,7 +163,7 @@ public sealed class OfficialCertificateStore(
             watcher.Created += OnFileEvent;
             watcher.Deleted += OnFileEvent;
             watcher.Renamed += (s, e) => OnFileEvent(s, e);
-            watcher.Error += (_, _) => NotifyFilesChanged();
+            watcher.Error += (_, _) => OnWatcherError();
             watcher.EnableRaisingEvents = true;
             _watcher = watcher;
         }
@@ -171,6 +171,19 @@ public sealed class OfficialCertificateStore(
         {
             // The Sharing directory does not exist yet (Quick Share not installed): the next tick tries again.
         }
+    }
+
+    // The watched directory was deleted or recreated, or the buffer overflowed: the watcher may be dead. Drop it so the
+    // next expiry tick recreates it and reloads once.
+    internal void OnWatcherError()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _watcher?.Dispose();
+            _watcher = null;
+        }
+        NotifyFilesChanged();
     }
 
     /// <summary>Restarts the 2 s debounce; the event fires once after the files stay quiet. Also used by the watcher.</summary>
@@ -301,6 +314,8 @@ public sealed class OfficialCertificateStore(
             .Where(c => c.IsStructurallyValid
                 && nowSeconds >= c.StartSeconds - tolerance && nowSeconds < c.EndSeconds + tolerance)
             .Where(c => !ownIds.Contains(Convert.ToHexString(c.SecretId)))
+            // Contacts' certificates (for_self_share = false) are not the user's own devices.
+            .Where(c => c.ForSelfShare)
             .GroupBy(c => Convert.ToHexString(c.SecretId)).Select(g => g.First()).ToList();
 
         var names = peers.Select(PeerName).Where(n => n is not null).Select(n => n!).Distinct().ToList();

@@ -108,6 +108,55 @@ public sealed class VerifiedTests : IDisposable
         Assert.True(send.PeerVerified);
     }
 
+    // A contact's certificate (for_self_share = false) in the receiver's database must not make the sender "own".
+    private sealed class ContactPair
+    {
+        public CertificateIdentity Contact { get; }
+        public CertificateIdentity Pc { get; }
+
+        public ContactPair(string dir)
+        {
+            var pc = CertFixtures.NewDevice("My PC");
+            var contact = CertFixtures.NewDevice("Contact");
+            contact.Public.ForSelfShare = false;
+            CertFixtures.WriteSharingDir(dir, [pc.Private], [pc.Public, contact.Public]);
+            using var store = new OfficialCertificateStore(dir, () => CertFixtures.Now);
+            Assert.True(store.TryLoad(out var identity, out _));
+            Pc = identity!;
+            Contact = new CertificateIdentity(PrivateOf(contact), [PublicOf(pc)]);
+        }
+    }
+
+    [Fact]
+    public async Task Contact_certificate_is_not_verified_and_is_rejected_without_asking_in_own_devices()
+    {
+        var dir = Path.Combine(_out, "sharing");
+        var pair = new ContactPair(dir);
+        var advert = pair.Contact.CreateEndpointInfo("x", DeviceKind.Phone);
+
+        var (offer, _, asked) = await RunFakeAsync(pair.Pc, advert, async (s, ct) =>
+        {
+            await s.SendPairedKeyAsync(Signed(pair.Contact, s.AuthString), ct);
+            await s.IntroduceAsync(ct, TestFrames.File(1, 3));
+        });
+        Assert.True(asked);
+        Assert.False(offer!.Verified);
+
+        using var cts = Timeout();
+        using var link = await Link.OpenAsync(cts.Token);
+        var askedOwn = false;
+        var receive = ReceiveSession.ReceiveAsync(
+            link.Server, new SessionOptions("My PC", Identity: pair.Pc) { RejectUnverified = true }, _out,
+            (_, _) => { askedOwn = true; return Task.FromResult(true); }, ct: cts.Token);
+        await using var sender = await FakeSender.ConnectAsync(link.Client, cts.Token, advert);
+        await sender.SendPairedKeyAsync(Signed(pair.Contact, sender.AuthString), cts.Token);
+        await sender.IntroduceAsync(cts.Token, TestFrames.File(1, 3));
+        await sender.ReadResponseAsync(cts.Token);
+
+        Assert.Equal(TransferStatus.RejectedByPeer, (await receive).Status);
+        Assert.False(askedOwn);
+    }
+
     [Fact]
     public async Task Introduction_before_paired_key_is_not_verified()
     {

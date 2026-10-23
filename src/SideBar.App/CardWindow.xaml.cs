@@ -66,13 +66,15 @@ public sealed partial class CardWindow : Window
     ShelfService? _shelfService;
     readonly ClearConfirm _clear = new();
     DispatcherTimer? _clearTimer;
-    bool _hasItems, _clearHover;
+    bool _hasItems, _clearHover, _dragging;
 
-    // корзина видна, пока на полке есть элементы и нет своего drag; вооружение сбрасывается при любом изменении
+    // корзина видна, пока на полке есть элементы и нет своего drag (_dragging); вооружение сбрасывается при любом изменении
     void UpdateClear()
     {
-        ShelfClear.Visibility = _hasItems && !DragOut.IsActive ? Visibility.Visible : Visibility.Collapsed;
-        if (ShelfClear.Visibility == Visibility.Collapsed) Disarm();
+        var visibility = _hasItems && !_dragging ? Visibility.Visible : Visibility.Collapsed;
+        if (visibility != ShelfClear.Visibility) Log.Write("shelf trash " + visibility);
+        ShelfClear.Visibility = visibility;
+        if (ShelfClear.Visibility == Visibility.Collapsed) { _clearHover = false; Disarm(); }   // PointerExited не придёт
         else RenderClear();
     }
 
@@ -133,8 +135,10 @@ public sealed partial class CardWindow : Window
     internal void BindShelf(ShelfService shelf)
     {
         _shelfService = shelf;
-        Stack.DragStarting += (_, _) => UpdateClear();
-        Stack.DropCompleted += (_, _) => UpdateClear();
+        // DragOut.Start асинхронный: IsActive в DragStarting ещё false, поэтому свой флаг
+        Stack.DragStarting += (_, _) => { _dragging = true; UpdateClear(); };
+        Stack.DropCompleted += (_, _) => { _dragging = false; UpdateClear(); };
+        Settled += state => { if (state == PanelState.Hidden && _dragging) { _dragging = false; UpdateClear(); } };   // потерянный DropCompleted
         Stack.HasItemsChanged += has => { _hasItems = has; UpdateClear(); };
         Stack.HasItemsChanged += has => ShelfEmptyIcon.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         Stack.FanRequested += () => FanRequested?.Invoke();

@@ -54,12 +54,13 @@ sealed unsafe class TrayIcon : IDisposable
     readonly Func<Visibility> _mode;
     readonly Func<bool> _ownDevicesAvailable;
     readonly Action<Visibility> _setMode;
+    readonly Func<bool> _stackPaused;
     readonly uint _taskbarCreated;
     nint _icon;
     bool _added;
 
     public TrayIcon(MessageWindow window, Autostart autostart, string exePath, Action onExit,
-        Func<Visibility> mode, Func<bool> ownDevicesAvailable, Action<Visibility> setMode)
+        Func<Visibility> mode, Func<bool> ownDevicesAvailable, Action<Visibility> setMode, Func<bool> stackPaused)
     {
         _window = window;
         _autostart = autostart;
@@ -68,6 +69,7 @@ sealed unsafe class TrayIcon : IDisposable
         _mode = mode;
         _ownDevicesAvailable = ownDevicesAvailable;
         _setMode = setMode;
+        _stackPaused = stackPaused;
         _taskbarCreated = RegisterWindowMessageW("TaskbarCreated");
         _icon = LoadIcon();
         Add();
@@ -109,6 +111,8 @@ sealed unsafe class TrayIcon : IDisposable
     void ShowMenu(int x, int y)
     {
         nint menu = CreatePopupMenu();
+        // пока открыт официальный Quick Share, наш стек не слушает и не рекламируется
+        if (_stackPaused()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, Strings.StackPaused);
         AppendMenuW(menu, MF_STRING, CmdHidden, Strings.VisibilityHidden);
         AppendMenuW(menu, MF_STRING | (_ownDevicesAvailable() ? 0 : MF_GRAYED), CmdOwnDevices, Strings.VisibilityOwnDevices);   // без сертификатов недоступно
         AppendMenuW(menu, MF_STRING, CmdEveryone, Strings.VisibilityEveryone);
