@@ -26,10 +26,13 @@ sealed partial class ShelfService
         if (string.IsNullOrWhiteSpace(dataDir))
             dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SideBar");
         ShelfRoot = Path.Combine(dataDir, "Shelf");
-        _store = new ShelfStore(Path.Combine(dataDir, "shelf.json"));
+        StatePath = Path.Combine(dataDir, "shelf.json");
+        _store = new ShelfStore(StatePath);
     }
 
     public string ShelfRoot { get; }
+
+    string StatePath { get; }
 
     /// <summary>Заменяется в <see cref="Load"/>: подписываться на Changed — после Load.</summary>
     public ShelfModel Model { get; private set; } = new();
@@ -40,9 +43,19 @@ sealed partial class ShelfService
         int pruned = 0;
         try
         {
-            model = new ShelfModel(_store.Load());
-            pruned = model.PruneMissing(Exists);
-            SweepOrphans(model);
+            bool readable = _store.TryLoad(out var items);
+            model = new ShelfModel(items);
+            if (readable)
+            {
+                pruned = model.PruneMissing(Exists);
+                SweepOrphans(model);
+            }
+            else
+            {
+                // пустой список ссылок удалил бы все Shelf\<guid>, а они часто единственные копии: не чистим, файл откладываем
+                Log.Write("shelf.json unreadable: keeping Shelf folders, moving the file aside");
+                QuarantineStateFile();
+            }
         }
         catch (Exception e)
         {
@@ -53,6 +66,16 @@ sealed partial class ShelfService
         if (pruned > 0) Persist();
         model.Changed += OnChanged;
         Log.Write($"shelf loaded: {model.Items.Count} item(s), pruned {pruned}");
+    }
+
+    void QuarantineStateFile()
+    {
+        try
+        {
+            var bad = Path.Combine(Path.GetDirectoryName(StatePath)!, "shelf.bad.json");
+            File.Move(StatePath, bad, overwrite: true);
+        }
+        catch (Exception e) { Log.Write("shelf.json quarantine failed: " + Log.Describe(e)); }
     }
 
     /// <summary>Файл или каталог: каталоги кладутся в стопку ссылками.</summary>

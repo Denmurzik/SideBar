@@ -37,6 +37,29 @@ public sealed class ShelfStoreTests : IDisposable
     }
 
     [Fact]
+    public void TryLoad_reports_failure_for_garbage_and_success_for_missing()
+    {
+        var missing = new ShelfStore(Path.Combine(_dir, "none.json"));
+        Assert.True(missing.TryLoad(out var none));
+        Assert.Empty(none);
+
+        var garbage = Path.Combine(_dir, "garbage.json");
+        File.WriteAllText(garbage, "{ not json [[[");
+        Assert.False(new ShelfStore(garbage).TryLoad(out var items));
+        Assert.Empty(items);
+
+        var nullJson = Path.Combine(_dir, "null.json");
+        File.WriteAllText(nullJson, "null");
+        Assert.False(new ShelfStore(nullJson).TryLoad(out _));
+
+        var ok = new ShelfStore(Path.Combine(_dir, "ok.json"));
+        ShelfItem[] saved = [Item("a.txt")];
+        ok.Save(saved);
+        Assert.True(ok.TryLoad(out var loaded));
+        Assert.Equal(saved, loaded);
+    }
+
+    [Fact]
     public void Store_save_is_atomic()
     {
         var file = Path.Combine(_dir, "shelf.json");

@@ -273,6 +273,18 @@ sealed class Driver
         Check("T11b restart: orphan Shelf\\<guid> removed, non-guid folder kept",
             !Directory.Exists(orphan) && Directory.Exists(foreign), $"orphanExists={Directory.Exists(orphan)} foreignExists={Directory.Exists(foreign)}");
         MoveTo(W - 700, H, 200); Thread.Sleep(500);
+
+        // T12: битый shelf.json -> Shelf\<guid> не чистятся (там часто единственные копии), файл уходит в shelf.bad.json
+        var ownedBefore = ReadShelf().Where(x => x.Kind == Owned).Select(x => x.Path).ToList();
+        int dirsBeforeBad = ShelfDirs();
+        StopApp();
+        File.WriteAllText(_shelfJson, "{ not json [[[");
+        bool restarted2 = StartApp();
+        var bad = Path.Combine(_dataDir, "shelf.bad.json");
+        Check("T12 corrupt shelf.json -> Shelf folders and owned files survive, bad file kept as shelf.bad.json, shelf starts empty",
+            restarted2 && ownedBefore.Count > 0 && ownedBefore.All(File.Exists) && ShelfDirs() == dirsBeforeBad
+            && File.Exists(bad) && File.ReadAllText(bad).Contains("not json") && !File.Exists(_shelfJson),
+            $"owned={ownedBefore.Count} dirs={ShelfDirs()}/{dirsBeforeBad} bad={File.Exists(bad)} json={File.Exists(_shelfJson)}");
     }
 
     // ---- проверки состояния ----
