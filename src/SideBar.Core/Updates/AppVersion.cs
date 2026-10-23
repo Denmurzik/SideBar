@@ -16,7 +16,11 @@ public static class AppVersion
         var s = text.AsSpan();
         if (s[0] == 'v') s = s[1..];
         var cut = s.IndexOfAny('+', '-');
-        if (cut >= 0) s = s[..cut];
+        if (cut >= 0)
+        {
+            if (cut == s.Length - 1) return false; // пустой суффикс
+            s = s[..cut];
+        }
 
         Span<Range> parts = stackalloc Range[4];
         if (s.Split(parts, '.') != 3) return false;
@@ -25,7 +29,7 @@ public static class AppVersion
         for (var i = 0; i < 3; i++)
         {
             var p = s[parts[i]];
-            if (p.Length == 0 || p.Length > 9) return false;
+            if (p.Length == 0 || p.Length > 9 || (p.Length > 1 && p[0] == '0')) return false;
             foreach (var c in p) if (c is < '0' or > '9') return false;
             n[i] = int.Parse(p, NumberStyles.None, CultureInfo.InvariantCulture);
         }
@@ -33,5 +37,9 @@ public static class AppVersion
         return true;
     }
 
+    /// <summary>
+    /// Строгое сравнение. Текущую версию брать только как <see cref="TryParse"/>(AssemblyInformationalVersion),
+    /// а не из Assembly.GetName().Version.
+    /// </summary>
     public static bool IsNewer(Version current, Version latest) => latest > current;
 }

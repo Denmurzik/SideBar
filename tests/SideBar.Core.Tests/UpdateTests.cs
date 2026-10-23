@@ -13,7 +13,7 @@ public class UpdateTests
         return v;
     }
 
-    private static bool Parse(string json, out ReleaseInfo info) =>
+    private static bool Parse(string json, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out ReleaseInfo? info) =>
         ReleaseInfo.TryParse(Encoding.UTF8.GetBytes(json), out info);
 
     [Fact]
@@ -54,9 +54,22 @@ public class UpdateTests
     [InlineData("+abc")]
     [InlineData("vv1.2.3")]
     [InlineData("99999999999.0.0")]
+    [InlineData("01.2.3")]
+    [InlineData("1.2")]
+    [InlineData("1..3")]
+    [InlineData("V1.2.3")]
+    [InlineData("1.2.3-")]
+    [InlineData("1.2.3+")]
+    [InlineData("1000000000.0.0")]
     public void Garbage_tag_is_rejected(string tag)
     {
         Assert.False(AppVersion.TryParse(tag, out _));
+    }
+
+    [Fact]
+    public void Max_nine_digit_component_is_accepted()
+    {
+        Assert.Equal(new Version(999999999, 0, 0), V("999999999.0.0"));
     }
 
     [Fact]
@@ -73,8 +86,15 @@ public class UpdateTests
         Assert.False(UpdatePolicy.ShouldCheck(T0.AddHours(5), T0, T0.AddHours(4)));
         Assert.False(UpdatePolicy.ShouldCheck(T0.AddHours(28).AddSeconds(-1), T0, T0.AddHours(4)));
         Assert.True(UpdatePolicy.ShouldCheck(T0.AddHours(28), T0, T0.AddHours(4)));
-        // часы ушли назад: lastCheck в будущем -> не проверяем
-        Assert.False(UpdatePolicy.ShouldCheck(T0.AddHours(5), T0, T0.AddHours(9)));
+        // часы ушли назад: lastCheck в будущем -> проверяем
+        Assert.True(UpdatePolicy.ShouldCheck(T0.AddHours(5), T0, T0.AddHours(9)));
+    }
+
+    [Fact]
+    public void Started_in_the_future_counts_delay_from_now()
+    {
+        Assert.False(UpdatePolicy.ShouldCheck(T0, T0.AddHours(1), null));
+        Assert.False(UpdatePolicy.ShouldCheck(T0.AddSeconds(5), T0.AddDays(3), null));
     }
 
     [Fact]
@@ -91,6 +111,19 @@ public class UpdateTests
     [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com.evil.example/a"}""")]
     [InlineData("""{"tag_name":"v0.2.0","html_url":"file:///C:/x.exe"}""")]
     [InlineData("""{"tag_name":"v0.2.0"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com@evil.example/Denmurzik/SideBar/releases/tag/v0.2.0"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com.evil.example/Denmurzik/SideBar/releases/tag/v0.2.0"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://user@github.com/Denmurzik/SideBar/releases/tag/v0.2.0"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com:8443/Denmurzik/SideBar/releases/tag/v0.2.0"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0 & calc"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com/Denmurzik/SideBar/releases/tag/\"v0.2.0"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0\x"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com/Denmurzik/SideBar/releases/tag/é"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com/other/repo/releases/tag/v0.2.0"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com/"}""")]
+    [InlineData("""{"tag_name":"v0.2.0","html_url":"https://github.com/Denmurzik/SideBar/releases/"}""")]
+    [InlineData("""{"tag_name":123,"html_url":"https://github.com/Denmurzik/SideBar/releases/tag/v1.0.0"}""")]
+    [InlineData("""{"tag_name":{"a":1},"html_url":"https://github.com/Denmurzik/SideBar/releases/tag/v1.0.0"}""")]
     public void Non_github_html_url_is_rejected(string json)
     {
         Assert.False(Parse(json, out _));
@@ -98,9 +131,9 @@ public class UpdateTests
 
     [Theory]
     [InlineData("""{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}""")]
-    [InlineData("""{"html_url":"https://github.com/a/b"}""")]
-    [InlineData("""{"tag_name":"nope","html_url":"https://github.com/a/b"}""")]
-    [InlineData("""{"tag_name":null,"html_url":"https://github.com/a/b"}""")]
+    [InlineData("""{"html_url":"https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0"}""")]
+    [InlineData("""{"tag_name":"nope","html_url":"https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0"}""")]
+    [InlineData("""{"tag_name":null,"html_url":"https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0"}""")]
     [InlineData("""[1,2,3]""")]
     [InlineData("not json")]
     [InlineData("")]
@@ -110,9 +143,26 @@ public class UpdateTests
     }
 
     [Fact]
+    public void Exactly_one_mib_is_accepted_and_one_more_byte_is_not()
+    {
+        const string head = "{\"tag_name\":\"v0.2.0\",\"html_url\":\"https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0\",\"body\":\"";
+        const string tail = "\"}";
+        var pad = new string('x', ReleaseInfo.MaxJsonBytes - head.Length - tail.Length);
+        Assert.True(Parse(head + pad + tail, out _));
+        Assert.False(Parse(head + pad + "x" + tail, out _));
+    }
+
+    [Fact]
+    public void Deep_nesting_is_rejected_without_throwing()
+    {
+        var deep = new string('[', 5000) + new string(']', 5000);
+        Assert.False(Parse("{\"tag_name\":\"v0.2.0\",\"html_url\":\"https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0\",\"x\":" + deep + "}", out _));
+    }
+
+    [Fact]
     public void Oversized_input_is_rejected()
     {
         var pad = new string('x', 1024 * 1024);
-        Assert.False(Parse("{\"tag_name\":\"v0.2.0\",\"html_url\":\"https://github.com/a/b\",\"body\":\"" + pad + "\"}", out _));
+        Assert.False(Parse("{\"tag_name\":\"v0.2.0\",\"html_url\":\"https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0\",\"body\":\"" + pad + "\"}", out _));
     }
 }
