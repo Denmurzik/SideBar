@@ -72,7 +72,9 @@ public sealed partial class CardWindow : Window
     void UpdateClear()
     {
         var visibility = _hasItems && !_dragging ? Visibility.Visible : Visibility.Collapsed;
-        if (visibility != ShelfClear.Visibility) Log.Write("shelf trash " + visibility);
+#if DEBUG
+        if (visibility != ShelfClear.Visibility) Log.Write("shelf trash " + visibility);   // хук для DragDriver C5
+#endif
         ShelfClear.Visibility = visibility;
         if (ShelfClear.Visibility == Visibility.Collapsed) { _clearHover = false; Disarm(); }   // PointerExited не придёт
         else RenderClear();

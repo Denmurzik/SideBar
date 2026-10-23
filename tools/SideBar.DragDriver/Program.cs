@@ -669,12 +669,18 @@ sealed class Driver
         if (s.Count != 3) { Check("C5 shelf prepared", false, Dump(s)); return; }
         if (!DragStackTo(new Point(W - 700, H), W, H)) return;
         var log = AppLog();
+        if (!log.Contains("shelf trash"))
+        { Rep("SKIP C5 needs a Debug app: the 'shelf trash' log hook exists only in Debug"); return; }
         int started = log.IndexOf("drag-out starting", StringComparison.Ordinal);
-        int hidden = log.IndexOf("shelf trash Collapsed", StringComparison.Ordinal);
-        int completed = log.IndexOf("drag-out completed", StringComparison.Ordinal);
+        int hidden = started < 0 ? -1 : log.IndexOf("shelf trash Collapsed", started, StringComparison.Ordinal);
+        int completed = hidden < 0 ? -1 : log.IndexOf("drag-out completed", hidden, StringComparison.Ordinal);
         int shown = completed < 0 ? -1 : log.IndexOf("shelf trash Visible", completed, StringComparison.Ordinal);
-        Check("C5 trash is hidden while a stack item is dragged out and is back after the drag",
-            started >= 0 && hidden >= 0 && completed > hidden && shown > completed, $"starting={started} collapsed={hidden} completed={completed} visibleAfter={shown}\n" + log);
+        s = ReadShelf();
+        // цель выноса - пустое место (DropResult=None): элементы остаются на полке, корзина обязана вернуться
+        bool back = s.Count == 0 || shown > completed;
+        Check("C5 trash is hidden while a stack item is dragged out (starting < Collapsed < completed) and is back after the drag",
+            started >= 0 && hidden > started && completed > hidden && completed >= 0 && back && log.Contains("DropResult=None"),
+            $"starting={started} collapsed={hidden} completed={completed} visibleAfter={shown} shelf={s.Count}\n" + log);
     }
 
     // D3e: отложенное удаление переживает перезапуск: перезапуск внутри окна задержки не удаляет папку, после срока она удаляется
