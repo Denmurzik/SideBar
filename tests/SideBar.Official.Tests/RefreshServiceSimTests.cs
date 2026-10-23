@@ -171,17 +171,48 @@ public sealed class RefreshServiceSimTests : IDisposable
     }
 
     [Fact]
-    public async Task Cancellation_skips_reload_and_resume_and_leaves_process()
+    public async Task Service_stop_skips_reload_and_resume_and_leaves_process()
     {
         var svc = Make("silent");
-        using var cts = new CancellationTokenSource();
-        var run = svc.RunOnceAsync(cts.Token);
+        var run = svc.RunOnceAsync();
         Assert.True(WaitFor(() => SimProcesses().Any(p => Native.WindowsOf(p.Id).Count > 0)));   // окно уже есть: Dispose теста сможет закрыть симулятор
-        cts.Cancel();
+        svc.Dispose();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
         Assert.Equal(["pause"], _hooks);   // приложение закрывается: ни перезагрузки, ни возобновления
         Assert.Single(SimProcesses());     // процесс не убиваем
         Assert.False(svc.IsBusy);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_resumes_stack_but_skips_reload()
+    {
+        var svc = Make("silent");
+        using var cts = new CancellationTokenSource();
+        var run = svc.RunOnceAsync(cts.Token);
+        Assert.True(WaitFor(() => SimProcesses().Any(p => Native.WindowsOf(p.Id).Count > 0)));
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        Assert.Equal(["pause", "resume"], _hooks);
+        Assert.Single(SimProcesses());
+    }
+
+    [Fact]
+    public async Task Already_cancelled_token_never_launches()
+    {
+        var svc = Make("normal");
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => svc.RunOnceAsync(cts.Token));
+        Assert.Empty(SimProcesses());
+        Assert.Equal(["pause", "resume"], _hooks);
+    }
+
+    [Fact]
+    public async Task Leftover_process_is_reported_as_ours()
+    {
+        var svc = Make("hung", new RefreshTimings { MarkerTimeout = TimeSpan.FromSeconds(10), Settle = TimeSpan.FromMilliseconds(100), ExitWait = TimeSpan.FromMilliseconds(300), RetryDelay = TimeSpan.FromMilliseconds(300) });
+        Assert.Equal(RefreshOutcome.DidNotExit, await svc.RunOnceAsync());
+        Assert.True(svc.OurLeftoverAlive());
     }
 
     [Fact]

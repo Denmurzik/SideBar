@@ -67,23 +67,27 @@ sealed class OfficialRefreshHost : IDisposable
         if (text is not null) _notes.Info("refresh", text);
     }
 
-    static string? Describe(RefreshOutcome outcome) => outcome switch
+    static string? Describe(RefreshOutcome outcome) => RefreshNotes.For(outcome) switch
     {
-        RefreshOutcome.Succeeded => Strings.RefreshDone,
-        RefreshOutcome.NotInstalled => Strings.RefreshNotInstalled,
-        RefreshOutcome.OfficialAlreadyRunning => Strings.RefreshOfficialOpen,
-        RefreshOutcome.CycleInProgress => null,   // цикл уже идёт и сам покажет итог тому, кто его запустил
-        _ => Strings.RefreshDeferred,             // MarkerTimeout / DidNotExit / UserTookOver
+        RefreshNote.Done => Strings.RefreshDone,
+        RefreshNote.NotInstalled => Strings.RefreshNotInstalled,
+        RefreshNote.OfficialOpen => Strings.RefreshOfficialOpen,
+        RefreshNote.Deferred => Strings.RefreshDeferred,
+        _ => null,
     };
 
     // Официальное приложение постоянно в трее: наш стек на паузе, цикл не идёт — скажем об этом один раз за запуск.
     void CheckResident()
     {
-        bool note;
-        lock (_residentGate) note = _resident.Observe(_watcher.Running, DateTimeOffset.UtcNow, _service.IsBusy);
-        if (!note) return;
-        Log.Write("official app resident > 10 min");
-        _notes.Info("official-resident", Strings.OfficialResident);
+        ResidentNote note;
+        lock (_residentGate)
+        {
+            bool ours = _watcher.Running && _service.OurLeftoverAlive();
+            note = _resident.Observe(_watcher.Running, DateTimeOffset.UtcNow, _service.IsBusy, ours);
+        }
+        if (note == ResidentNote.None) return;
+        Log.Write($"official app resident > 10 min, {note}");
+        _notes.Info("official-resident", note == ResidentNote.OurLeftover ? Strings.OfficialLeftover : Strings.OfficialResident);
     }
 
     public void Dispose()

@@ -3,16 +3,6 @@ using SideBar.Core.Official;
 
 namespace SideBar.Official;
 
-internal enum RefreshOutcome
-{
-    Succeeded, NotInstalled,
-    /// <summary>Официальное приложение уже запущено (пользователем): не запускали и не трогали.</summary>
-    OfficialAlreadyRunning,
-    /// <summary>Наш цикл уже идёт (параллельный вызов).</summary>
-    CycleInProgress,
-    MarkerTimeout, UserTookOver, DidNotExit,
-}
-
 /// <summary>Тайминги цикла; значения по умолчанию — боевые, тесты ужимают их.</summary>
 internal sealed record RefreshTimings
 {
@@ -56,6 +46,8 @@ internal sealed class RefreshService : IDisposable
     readonly CancellationTokenSource _cts = new();
     Task? _loop;
     int _busy;
+    readonly object _stateGate = new();
+    int _leftoverPid;   // pid нашего запущенного процесса, оставшегося после DidNotExit/UserTookOver (0 — нет)
     DateTimeOffset? _lastWarned;
 
     public RefreshService(OfficialAppController app, AppStateStore store, RefreshHooks hooks, Action<string> log,
@@ -101,21 +93,25 @@ internal sealed class RefreshService : IDisposable
         try
         {
             var now = _now();
-            var loaded = _store.Load();
-            var state = loaded.ClampedTo(now);
-            if (state.FirstSeen is null) state = state with { FirstSeen = now };
-            if (state != loaded) Save(state);   // зажатые «будущие» времена сохраняем, иначе они снова зажмутся к следующему now
-
-            // Без успехов опорой служит первое наблюдение: иначе при отсутствии приложения предупреждения не будет никогда.
-            var anchor = state.LastSuccess ?? state.FirstSeen;
-            var warned = (state.LastWarned, _lastWarned) switch { ({ } x, { } y) => x > y ? x : y, var (x, y) => x ?? y };   // и в памяти: сбой Save не должен повторять уведомление каждые 5 мин
-            if (_scheduler.ShouldWarn(now, anchor, warned))
+            AppState state;
+            lock (_stateGate)   // чтение-изменение-запись state.json не должны перемежаться с RecordSuccess
             {
-                _lastWarned = now;
-                _log("official: no successful refresh for 72h, warning");
-                try { _hooks.WarnStale?.Invoke(); } catch (Exception e) { _log($"official: warn hook {Describe(e)}"); }
-                state = state with { LastWarned = now };
-                Save(state);
+                var loaded = _store.Load();
+                state = loaded.ClampedTo(now);
+                if (state.FirstSeen is null) state = state with { FirstSeen = now };
+                if (state != loaded) Save(state);   // зажатые «будущие» времена сохраняем, иначе они снова зажмутся к следующему now
+
+                // Без успехов опорой служит первое наблюдение: иначе при отсутствии приложения предупреждения не будет никогда.
+                var anchor = state.LastSuccess ?? state.FirstSeen;
+                var warned = (state.LastWarned, _lastWarned) switch { ({ } x, { } y) => x > y ? x : y, var (x, y) => x ?? y };   // и в памяти: сбой Save не должен повторять уведомление каждые 5 мин
+                if (_scheduler.ShouldWarn(now, anchor, warned))
+                {
+                    _lastWarned = now;
+                    _log("official: no successful refresh for 72h, warning");
+                    try { _hooks.WarnStale?.Invoke(); } catch (Exception e) { _log($"official: warn hook {Describe(e)}"); }
+                    state = state with { LastWarned = now };
+                    Save(state);
+                }
             }
 
             var decision = _scheduler.Decide(now, state.LastSuccess, _idle(), _app.IsInstalled, _app.IsRunning());
@@ -155,17 +151,19 @@ internal sealed class RefreshService : IDisposable
             if (_hooks.PauseStack is { } pause) await pause();
             if (_app.IsRunning()) return RefreshOutcome.OfficialAlreadyRunning;   // пользователь мог открыть приложение, пока ставили паузу
             var snapshot = scanner.Snapshot();
+            ct.ThrowIfCancellationRequested();   // отмена за время паузы: приложение не запускаем
             proc = _app.Launch();
             if (proc is null) return RefreshOutcome.NotInstalled;
+            Volatile.Write(ref _leftoverPid, 0);
 
             var markerSeen = false;
             var sw = Stopwatch.StartNew();
             while (sw.Elapsed < _t.MarkerTimeout)
             {
                 var scan = scanner.Scan(snapshot);
-                if (scan.UserActivity) return RefreshOutcome.UserTookOver;
+                if (scan.UserActivity) return Leftover(proc, RefreshOutcome.UserTookOver);
                 _app.Observe(proc);
-                if (proc.SawVisible) return RefreshOutcome.UserTookOver;
+                if (proc.SawVisible) return Leftover(proc, RefreshOutcome.UserTookOver);
                 if (scan.MarkerSeen) { markerSeen = true; break; }
                 if (proc.HasExited) return RefreshOutcome.MarkerTimeout;   // вышел сам, не опубликовав
                 await Task.Delay(_t.Poll, ct);
@@ -173,6 +171,7 @@ internal sealed class RefreshService : IDisposable
 
             await Task.Delay(_t.Settle, ct);
             var closed = await CloseAsync(proc, scanner, snapshot, ct);
+            if (closed != CloseResult.Exited) Volatile.Write(ref _leftoverPid, proc.Pid);
             return closed switch
             {
                 CloseResult.UserTookOver => RefreshOutcome.UserTookOver,
@@ -183,13 +182,33 @@ internal sealed class RefreshService : IDisposable
         finally
         {
             proc?.Dispose();
-            // Сертификаты могли измениться, даже если цикл не дошёл до конца; стек возвращаем всегда — кроме отмены (приложение закрывается).
-            if (!ct.IsCancellationRequested)
-            {
-                if (proc is not null) Hook(_hooks.ReloadCertificates, "reload");
-                Hook(_hooks.ResumeStack, "resume");
-            }
+            // Сертификаты могли измениться, даже если цикл не дошёл до конца. Любая отмена пропускает перезагрузку; стек возвращаем всегда,
+            // кроме остановки сервиса (приложение закрывается). Отмена только токеном вызова стек всё равно возобновляет.
+            if (!ct.IsCancellationRequested && proc is not null) Hook(_hooks.ReloadCertificates, "reload");
+            if (!_cts.IsCancellationRequested) Hook(_hooks.ResumeStack, "resume");
         }
+    }
+
+    RefreshOutcome Leftover(LaunchedProcess proc, RefreshOutcome outcome)
+    {
+        Volatile.Write(ref _leftoverPid, proc.Pid);
+        return outcome;
+    }
+
+    /// <summary>Жив ли оставшийся после неудачного цикла процесс, запущенный именно нами (по pid и имени процесса).</summary>
+    public bool OurLeftoverAlive()
+    {
+        var pid = Volatile.Read(ref _leftoverPid);
+        if (pid == 0) return false;
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            if (!p.HasExited && string.Equals(p.ProcessName, _app.ProcessName, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        catch (ArgumentException) { }
+        catch (InvalidOperationException) { }
+        Volatile.Write(ref _leftoverPid, 0);
+        return false;
     }
 
     enum CloseResult { Exited, UserTookOver, DidNotExit }
@@ -205,6 +224,7 @@ internal sealed class RefreshService : IDisposable
             _app.Observe(proc);
             if (proc.SawVisible) return CloseResult.UserTookOver;
             if (scanner.Scan(snapshot).UserActivity) return CloseResult.UserTookOver;
+            ct.ThrowIfCancellationRequested();
             var quit = _app.RequestQuit(proc);
             if (quit == QuitResult.WindowsVisible) return CloseResult.UserTookOver;
             _log($"official: close attempt {attempt}, {quit}");
@@ -229,7 +249,7 @@ internal sealed class RefreshService : IDisposable
     void RecordSuccess()
     {
         var now = _now();
-        Save((_store.Load() with { LastSuccess = now }).ClampedTo(now));
+        lock (_stateGate) Save((_store.Load() with { LastSuccess = now }).ClampedTo(now));
     }
 
     void Save(AppState state)

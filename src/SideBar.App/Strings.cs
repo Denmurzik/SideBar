@@ -74,4 +74,5 @@ static class Strings
     public const string RefreshFailed = "Не удалось обновить";
     public const string CertsStale = "Не удаётся обновить сертификаты Quick Share — откройте официальное приложение Quick Share один раз";
     public const string OfficialResident = "Официальный Quick Share запущен — SideBar на паузе. Закройте его в трее, чтобы SideBar принимал файлы";
+    public const string OfficialLeftover = "Обновление сертификатов не завершилось — официальный Quick Share остался открытым. Закройте его в трее, чтобы SideBar принимал файлы";
 }
