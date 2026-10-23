@@ -99,4 +99,20 @@ public class DisplayTextTests
     {
         Assert.Equal(safe, DisplayText.IsSafeToOpen(path));
     }
+
+    [Fact]
+    public void Verified_peer_without_certificate_name_is_generic_never_the_advertised_name()
+    {
+        // SenderName/EndpointName are chosen by the peer: a verified peer with no VerifiedName must not borrow them
+        Assert.Equal("Ваше устройство", DisplayText.PeerName(verified: true, verifiedName: null, senderName: "Pixel 9", own: "Ваше устройство", unknown: "Устройство"));
+        Assert.Equal("Ваше устройство", DisplayText.PeerName(true, "  \u202E ", "Pixel 9", "Ваше устройство", "Устройство"));
+        Assert.Equal("Моё Pixel", DisplayText.PeerName(true, "Моё Pixel", "Evil", "Ваше устройство", "Устройство"));
+    }
+
+    [Fact]
+    public void Unverified_peer_uses_the_sanitized_advertised_name_and_never_the_certificate_name()
+    {
+        Assert.Equal("Pixel 9", DisplayText.PeerName(false, "Моё Pixel", " Pixel\n9 ", "Ваше устройство", "Устройство"));
+        Assert.Equal("Устройство", DisplayText.PeerName(false, null, null, "Ваше устройство", "Устройство"));
+    }
 }

@@ -21,6 +21,7 @@ public sealed partial class ShareTileView : UserControl
     readonly Grid[] _slots;
     readonly FontIcon[] _slotIcons;
     readonly TextBlock[] _slotNames;
+    readonly TextBlock[] _slotOwn;
     readonly string?[] _slotIds = new string?[ShareTileModel.MaxDevices];
 
     /// <summary>Клик по иконке устройства (UI-поток).</summary>
@@ -32,6 +33,8 @@ public sealed partial class ShareTileView : UserControl
         _slots = [Slot0, Slot1, Slot2, Slot3];
         _slotIcons = [SlotIcon0, SlotIcon1, SlotIcon2, SlotIcon3];
         _slotNames = [SlotName0, SlotName1, SlotName2, SlotName3];
+        _slotOwn = [SlotOwn0, SlotOwn1, SlotOwn2, SlotOwn3];
+        foreach (var mark in _slotOwn) mark.Text = "● " + Strings.OwnMark;   // маленькая точка акцентного цвета и «своё» под именем
         for (int i = 0; i < _slots.Length; i++)
         {
             int k = i;
@@ -69,7 +72,7 @@ public sealed partial class ShareTileView : UserControl
     /// <summary>Возвращает true, если плитка занята (логотип надо скрыть). Приоритет: запрос > отправка > заметка > покой.</summary>
     public bool Render(ShareTileModel m)
     {
-        string key = m.State + "|" + string.Join(',', m.Devices.Select(d => d.Id)) + "|" + (_recv?.HasConsent ?? false) + "|" + (_recv?.CurrentNote?.Id ?? 0);
+        string key = m.State + "|" + string.Join(',', m.Devices.Select(d => d.Id + (d.IsOwn ? "*" : ""))) + "|" + (_recv?.HasConsent ?? false) + "|" + (_recv?.CurrentNote?.Id ?? 0);
         if (key != _contentKey) { _contentKey = key; _arming.Placed(DateTimeOffset.UtcNow); }   // под курсором могла оказаться другая кнопка
         var content = _recv?.Content(m.State) ?? (m.State == ShareTileState.Idle ? TileContent.Idle : TileContent.Send);
         bool send = content == TileContent.Send;   // отправка под запросом не прерывается, просто не видна
@@ -238,6 +241,7 @@ public sealed partial class ShareTileView : UserControl
             _slotIds[i] = d.Id;
             _slotIcons[i].Glyph = GlyphFor(d.Kind);
             _slotNames[i].Text = d.Name.Trim();
+            _slotOwn[i].Visibility = d.IsOwn ? Visibility.Visible : Visibility.Collapsed;
             _slots[i].Visibility = Visibility.Visible;
         }
     }

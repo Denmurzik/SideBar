@@ -317,4 +317,21 @@ public class ShareTileModelTests
         m.Tick(t0.AddSeconds(151));
         Assert.Equal(ShareTileState.Failed, m.State);
     }
+
+    [Fact]
+    public void Tile_marks_own_devices()
+    {
+        var m = new ShareTileModel();
+        m.BeginShare(["a.txt"], T0);
+        m.DeviceFound(new DeviceView("pixel", "Pixel 9", ShareDeviceKind.Phone, IsOwn: true));
+        m.DeviceFound(new DeviceView("stranger", "Pixel 9", ShareDeviceKind.Phone));
+
+        Assert.Equal(2, m.Devices.Count);
+        Assert.True(m.Devices.Single(d => d.Id == "pixel").IsOwn);
+        Assert.False(m.Devices.Single(d => d.Id == "stranger").IsOwn);
+
+        // the same instance re-announced without the mark is no longer own
+        m.DeviceFound(new DeviceView("pixel", "Pixel 9", ShareDeviceKind.Phone));
+        Assert.False(m.Devices.Single(d => d.Id == "pixel").IsOwn);
+    }
 }

@@ -5,7 +5,8 @@ public enum ShareTileState { Idle, Searching, Choosing, Sending, Done, Failed }
 /// <summary>Тип устройства для глифа плитки; Core не зависит от протокольной библиотеки, App отображает DeviceKind сюда.</summary>
 public enum ShareDeviceKind { Other, Phone, Tablet, Laptop }
 
-public sealed record DeviceView(string Id, string Name, ShareDeviceKind Kind);
+/// <param name="IsOwn">The device's certificate was found among ours (an own device); the tile marks it.</param>
+public sealed record DeviceView(string Id, string Name, ShareDeviceKind Kind, bool IsOwn = false);
 
 /// <summary>
 /// Состояния плитки Quick Share: покой, поиск, выбор, отправка, итог. Чистая модель без UI и сети, только UI-поток.

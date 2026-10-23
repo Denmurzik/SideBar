@@ -5,21 +5,24 @@ using Microsoft.UI.Dispatching;
 using SideBar.Core.Nearby;
 using SideBar.Nearby;
 using SideBar.Nearby.Discovery;
+using SideBar.Nearby.Identity;
 using SideBar.Nearby.Session;
 using SideBar.Nearby.Wire;
 
 namespace SideBar.Sharing;
 
 /// <summary>
-/// Приём Quick Share: слушатель и mDNS-реклама работают, только пока видимость «Все» и сеть Private/Domain
-/// (интерфейс с маршрутом по умолчанию). Перепроверка при смене сети и раз в 30 с. До 3 параллельных сессий.
+/// Приём Quick Share: слушатель и mDNS-реклама работают, только пока видимость «Свои устройства» или «Все» и сеть Private/Domain
+/// (интерфейс с маршрутом по умолчанию). В «Своих» реклама без имени с сертификатом, неверифицированные входящие отклоняются
+/// без вопроса, верифицированные принимаются сами. Перепроверка при смене сети, смене сертификатов и раз в 30 с. До 3 параллельных сессий.
 /// </summary>
 sealed class ReceiveHost : IDisposable
 {
     const int MaxSessions = 3;
     const int TickSeconds = 5, RecheckEveryTicks = 6;   // 5 с — истечение видимости, 30 с — проверка сети и слушателя
 
-    readonly VisibilityModel _visibility = new();
+    readonly VisibilityModel _visibility;
+    readonly IdentityProvider _identity;
     readonly object _gate = new();   // _visibility
     readonly DispatcherQueue _ui;
     readonly Notifications _notifications;
@@ -31,6 +34,7 @@ sealed class ReceiveHost : IDisposable
     readonly CancellationTokenSource _lifetime = new();
     readonly NetworkCategoryTracker _network = new();   // под _evaluate
     bool _blockNoted;                                    // под _gate: заметка «приём выключен» уже показана для этого включения
+    bool _degradeNoted;                                  // под _gate: заметка «сертификаты недоступны» уже показана в этом запуске
     int _ticks;
     int _sessions;
     readonly HashSet<Task> _running = [];   // под _gate
@@ -48,34 +52,74 @@ sealed class ReceiveHost : IDisposable
     // состояние слушателя — только под _evaluate
     TcpListener? _listener;
     QuickShareAdvertiser? _advertiser;
-    (IPAddress Address, int Index)? _bound;
+    // под какое состояние зарегистрирована реклама: смена адреса, режима или идентичности (перезагрузка сертификатов) — новая регистрация со свежей солью
+    (IPAddress Address, int Index, Visibility Mode, CertificateIdentity? Identity)? _bound;
 
-    public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action bounce)
+    public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action bounce, IdentityProvider identity)
     {
         _ui = ui;
+        _identity = identity;
+        _visibility = new VisibilityModel(identity.Current is not null, VisibilitySettings.Load());
         _notifications = notifications;
         _clipboardOwner = clipboardOwner;
         _bounce = bounce;
         NearbyLog.Log = e => Log.Write($"nearby {e.Kind}{(e.Size is { } s ? " " + s : "")}{(e.Value is null ? "" : " " + e.Value)}");
         NetworkChange.NetworkAddressChanged += OnNetworkChanged;
+        identity.Changed += OnIdentityChanged;
+        Log.Write($"visibility {_visibility.Current}");
+        NoteDegraded();
         _timer = new Timer(_ => OnTick(), null, TimeSpan.FromSeconds(TickSeconds), TimeSpan.FromSeconds(TickSeconds));
+        if (_visibility.Current != Visibility.Hidden) _ = Task.Run(() => EvaluateAsync());   // «Свои устройства» по умолчанию: слушать сразу, а не через 30 с
     }
 
-    public bool IsEveryone
+    public Visibility Mode
     {
-        get { lock (_gate) return _visibility.Current == Visibility.Everyone; }
+        get { lock (_gate) return _visibility.Current; }
     }
 
-    /// <summary>Пункт меню трея: включить «Все» на 10 минут или выключить.</summary>
-    public void ToggleEveryone()
+    /// <summary>«Свои устройства» можно выбрать: сертификаты официального Quick Share прочитаны.</summary>
+    public bool OwnDevicesAvailable
+    {
+        get { lock (_gate) return _visibility.OwnDevicesAvailable; }
+    }
+
+    /// <summary>Пункт меню трея. «Все» действует 10 минут, затем возвращается прежний режим; выбор Hidden/OwnDevices запоминается.</summary>
+    public void SetMode(Visibility mode, bool persist = true)
+    {
+        Visibility persisted;
+        lock (_gate)
+        {
+            if (!_visibility.Select(mode, DateTimeOffset.UtcNow)) return;
+            if (mode != Visibility.Hidden) _blockNoted = false;
+            persisted = _visibility.Persisted;
+            Log.Write($"visibility {_visibility.Current}");
+        }
+        if (persist) VisibilitySettings.Save(persisted);
+        _ = Task.Run(() => EvaluateAsync());
+    }
+
+    // сертификаты перечитаны (файлы изменились или истёк срок): доступность режима и свежая реклама
+    void OnIdentityChanged()
     {
         lock (_gate)
         {
-            if (_visibility.Current == Visibility.Everyone) _visibility.Disable();
-            else { _visibility.EnableEveryone(DateTimeOffset.UtcNow); _blockNoted = false; }
+            _visibility.SetOwnDevicesAvailable(_identity.Current is not null);
             Log.Write($"visibility {_visibility.Current}");
         }
+        NoteDegraded();
         _ = Task.Run(() => EvaluateAsync());
+    }
+
+    // «Свои устройства» нужны, но сертификатов нет: одна заметка за запуск
+    void NoteDegraded()
+    {
+        lock (_gate)
+        {
+            if (!_visibility.OwnDevicesDegraded || _degradeNoted) return;
+            _degradeNoted = true;
+        }
+        Log.Write("own devices unavailable, working as hidden");
+        _ui.TryEnqueue(() => _notifications.Info("certs", Strings.CertsUnavailable));
     }
 
     void OnNetworkChanged(object? sender, EventArgs e) => _ = Task.Run(() => EvaluateAsync());
@@ -103,11 +147,13 @@ sealed class ReceiveHost : IDisposable
             Visibility visibility;
             bool anyAccepted;
             lock (_gate) { visibility = _visibility.Current; anyAccepted = _live.Any(l => l.Accepted); }
+            // реклама «Своих» подписана сертификатом; идентичность читается один раз на проход
+            var identity = visibility == Visibility.OwnDevices ? _identity.Current : null;
 
             // сеть проверяем и в «Скрыто», пока жива принятая передача: Public/Unknown её обрывает
             (IPAddress Address, int Index)? lan = null;
             NetworkCategory? category = null;
-            var networkChecked = visibility == Visibility.Everyone || anyAccepted;
+            var networkChecked = visibility != Visibility.Hidden || anyAccepted;
             if (networkChecked)
             {
                 var route = Route();
@@ -129,16 +175,17 @@ sealed class ReceiveHost : IDisposable
             CancelSessions(decision);
             NoteBlocked(ReceiveBlockReason.Of(visibility, lan is not null, category));
 
-            if (!decision.Listen || lan is null)
+            if (!decision.Listen || lan is null || (visibility == Visibility.OwnDevices && identity is null))
             {
                 Stop();
                 return;
             }
-            // реклама не перерегистрируется, пока адрес и порт те же: иначе ПК мигает в списке телефона
-            if (_listener is not null && _bound is { } b && b.Address.Equals(lan.Value.Address) && b.Index == lan.Value.Index)
+            // реклама не перерегистрируется, пока адрес, режим и идентичность те же: иначе ПК мигает в списке телефона
+            if (_listener is not null && _bound is { } b && b.Address.Equals(lan.Value.Address) && b.Index == lan.Value.Index
+                && b.Mode == visibility && ReferenceEquals(b.Identity, identity))
                 return;
             Stop();
-            await StartAsync(lan.Value);
+            await StartAsync(lan.Value, visibility, identity);
         }
         catch (Exception e)
         {
@@ -180,7 +227,7 @@ sealed class ReceiveHost : IDisposable
         _ui.TryEnqueue(() => _notifications.Info("blocked", text));
     }
 
-    async Task StartAsync((IPAddress Address, int Index) lan)
+    async Task StartAsync((IPAddress Address, int Index) lan, Visibility mode, CertificateIdentity? identity)
     {
         TcpListener? listener = null;
         QuickShareAdvertiser? advertiser = null;
@@ -189,7 +236,8 @@ sealed class ReceiveHost : IDisposable
             listener = new TcpListener(lan.Address, 0);
             listener.Start();
             int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-            var info = new AnonymousIdentity().CreateEndpointInfo(_deviceName, DeviceKind.Laptop);
+            // новая соль при каждой регистрации; «Все» — анонимно с именем, «Свои» — без имени, подписано сертификатом
+            var info = ((IShareIdentity?)identity ?? new AnonymousIdentity()).CreateEndpointInfo(_deviceName, DeviceKind.Laptop);
             advertiser = new QuickShareAdvertiser(MdnsName.NewEndpointId(), info.Encode(), port, lan.Address, lan.Index);
             await advertiser.RegisterAsync(_lifetime.Token);
         }
@@ -202,8 +250,8 @@ sealed class ReceiveHost : IDisposable
         }
         _listener = listener;
         _advertiser = advertiser;
-        _bound = lan;
-        Log.Write("receive listening");
+        _bound = (lan.Address, lan.Index, mode, identity);
+        Log.Write($"receive listening {mode}");
         _ = AcceptLoopAsync(listener, _lifetime.Token);
     }
 
@@ -305,7 +353,11 @@ sealed class ReceiveHost : IDisposable
             {
                 client.NoDelay = true;
                 Log.Write("receive session start");
-                var options = new SessionOptions(_deviceName);
+                // режим и идентичность фиксируются на старте сессии: смена сертификатов её не трогает
+                Visibility mode;
+                lock (_gate) mode = _visibility.Current;
+                bool own = mode == Visibility.OwnDevices;
+                var options = new SessionOptions(_deviceName) { Identity = own ? _identity.Current : null, RejectUnverified = own };
 #if DEBUG
                 if (int.TryParse(Environment.GetEnvironmentVariable("SIDEBAR_DECISION_TIMEOUT_S"), out var seconds))
                     options = options with { DecisionTimeout = TimeSpan.FromSeconds(seconds) };   // автотест таймаута решения
@@ -348,6 +400,10 @@ sealed class ReceiveHost : IDisposable
 
     static string DeviceName(string? raw) => DisplayText.SanitizeName(raw, Strings.UnknownDevice);
 
+    // верифицированный пир называется по сертификату (без имени — "Ваше устройство"), остальные — по рекламе
+    static string PeerName(IncomingTransfer? offer) =>
+        DisplayText.PeerName(offer?.Verified == true, offer?.VerifiedName, offer?.SenderName, Strings.OwnDevice, Strings.UnknownDevice);
+
     Task<bool> ConsentAsync(IncomingTransfer offer, CancellationToken token)
     {
 #if DEBUG
@@ -357,6 +413,12 @@ sealed class ReceiveHost : IDisposable
             return Task.FromResult(true);
         }
 #endif
+        if (offer.Verified)
+        {
+            // своё устройство: сертификат пира проверен до Introduction; ни запроса, ни прыжка внимания
+            Log.Write("consent auto-accepted (own device)");
+            return Task.FromResult(true);
+        }
         string device = DeviceName(offer.SenderName);
         bool onlyLinks = offer.Texts.Count > 0 && offer.Texts.All(t => t.Kind == TextKind.Url);
         string line = Strings.WantsToSend(device, offer.Files.Count, offer.Texts.Count, onlyLinks);
@@ -366,12 +428,13 @@ sealed class ReceiveHost : IDisposable
     // UI-поток
     void ShowResult(TransferResult result, IncomingTransfer? offer, bool accepted)
     {
-        string device = DeviceName(offer?.SenderName);
+        string device = PeerName(offer);
+        string? ownDevice = offer?.Verified == true ? device : null;   // «<имя>: получено N» только для своих
         switch (result.Status)
         {
             case TransferStatus.Completed:
                 if (accepted) _bounce();   // принятая передача завершилась: один прыжок карточки
-                if (result.Files.Count > 0) _notifications.Received(result.Files);
+                if (result.Files.Count > 0) _notifications.Received(result.Files, ownDevice);
                 var texts = result.ReceivedTexts;
                 if (texts.Count > 0) ClipboardText.Set(texts[0].Value, _clipboardOwner);
                 foreach (var t in texts.Take(3)) _notifications.SharedText(device, t.Kind, t.Value);
@@ -400,13 +463,14 @@ sealed class ReceiveHost : IDisposable
         // оборванная передача: уже сохранённые файлы остаются в «Загрузках», о них тоже говорим
         if (result.Status is TransferStatus.CancelledByPeer or TransferStatus.TimedOut or TransferStatus.ProtocolError or TransferStatus.Failed
             && result.Files.Count > 0)
-            _notifications.Received(result.Files);
+            _notifications.Received(result.Files, ownDevice);
     }
 
     public void Dispose()
     {
         _disposed = true;
         NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
+        _identity.Changed -= OnIdentityChanged;
         _timer.Dispose();
         try { _lifetime.Cancel(); } catch (Exception) { }   // прерывает идущий StartAsync/RegisterAsync и все сессии
         // тот же затвор, что у Evaluate: Stop не гоняется с StartAsync

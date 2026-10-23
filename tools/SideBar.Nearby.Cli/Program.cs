@@ -8,10 +8,11 @@ using SideBar.Nearby.Wire;
 
 const string Usage = """
     nearby discover [--timeout SEC] [--include-local]
-    nearby send <file>... [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local]
+    nearby send <file>... [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local] [--self [--dir SHARING_DIR]]
     nearby send --text "..." [--url] [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local]
     nearby receive [--out DIR] [--yes] [--name DEVICE_NAME] [--reannounce SEC]
     nearby identity-check [--dir SHARING_DIR]   (read-only summary of the official Quick Share certificates)
+    (--self: sign with the Quick Share certificates of this PC, as an own device; --dir overrides the Sharing directory)
     (--trace: print frame kinds and sizes in both directions, no payload content)
     """;
 
@@ -23,6 +24,13 @@ var options = new CliOptions(rest);
 var deviceName = options.Value("--name") ?? Environment.MachineName;
 
 var session = new SessionOptions(deviceName);
+if (options.Flag("--self"))
+{
+    var dir = options.Value("--dir") ?? OfficialCertificateStore.DefaultSharingDirectory;
+    using var store = new OfficialCertificateStore(dir, () => DateTimeOffset.UtcNow);
+    if (!store.TryLoad(out var identity, out var failure)) return Fail($"--self: certificates unavailable ({failure})");
+    session = session with { Identity = identity };
+}
 if (options.Flag("--trace"))
     NearbyLog.Log = e => Console.WriteLine($"[trace] {e.Kind}{(e.Size is null ? "" : " " + e.Size)}{(e.Value is null ? "" : " " + e.Value)}");
 
@@ -227,7 +235,7 @@ internal sealed class ConsoleObserver : ITransferObserver
 
 internal sealed class CliOptions
 {
-    private static readonly HashSet<string> Flags = ["--yes", "--trace", "--include-local", "--url"];
+    private static readonly HashSet<string> Flags = ["--yes", "--trace", "--include-local", "--url", "--self"];
     private readonly Dictionary<string, string> _values = new();
     private readonly HashSet<string> _flags = [];
     public List<string> Positional { get; } = [];

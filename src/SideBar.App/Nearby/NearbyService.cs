@@ -3,15 +3,17 @@ using Microsoft.UI.Dispatching;
 using SideBar.Core.Nearby;
 using SideBar.Nearby;
 using SideBar.Nearby.Discovery;
+using SideBar.Nearby.Identity;
 using SideBar.Nearby.Session;
 using SideBar.Nearby.Wire;
+using SideBar.Sharing;
 
 namespace SideBar.Nearby;
 
 /// <summary>
 /// Отправка с плитки Quick Share: поиск устройств (mDNS), TCP-соединение, <see cref="SendSession"/>.
 /// Один общий сеанс за раз; события приходят на UI-поток и только от актуального сеанса (устаревшие отбрасываются).
-/// Отправляет анонимно (режим «Все»); сертификаты придут в M4.
+/// Своим устройствам (сертификат найден по рекламе) отправляет с <see cref="CertificateIdentity"/>, остальным анонимно, с PIN, как в M3.
 /// </summary>
 sealed class NearbyService : IDisposable
 {
@@ -23,6 +25,7 @@ sealed class NearbyService : IDisposable
     static readonly TimeSpan LostGrace = TimeSpan.FromSeconds(2);
 
     readonly DispatcherQueue _ui;
+    readonly IdentityProvider _identity;
     readonly object _gate = new();
     readonly Dictionary<string, DiscoveredEndpoint> _endpoints = new(StringComparer.OrdinalIgnoreCase);
     QuickShareBrowser? _browser;
@@ -37,9 +40,10 @@ sealed class NearbyService : IDisposable
     public event Action<double>? Progress;
     public event Action<bool, string?>? Finished;
 
-    public NearbyService(DispatcherQueue ui)
+    public NearbyService(DispatcherQueue ui, IdentityProvider identity)
     {
         _ui = ui;
+        _identity = identity;
         // белый список: тип кадра, размеры, enum-поля; имена файлов и устройств сюда не попадают
         NearbyLog.Log = e => Log.Write($"nearby {e.Kind}{(e.Size is { } n ? " " + n : "")}{(e.Value is { } v ? " " + v : "")}");
     }
@@ -134,8 +138,25 @@ sealed class NearbyService : IDisposable
             if (_lostGrace.Remove(endpoint.InstanceName, out var pending)) pending.Dispose();
         }
         Log.Write($"share: device found, kind {endpoint.Kind}");
-        var view = new DeviceView(endpoint.InstanceName, DisplayText.SanitizeName(endpoint.DisplayName, Strings.UnknownDevice), Map(endpoint.Kind));   // имя из mDNS задаёт пир
+        // своё устройство рекламирует себя без имени: имя берётся из его сертификата; чужое называется по mDNS (имя задаёт пир)
+        var own = OwnIdentity(endpoint);
+        string name = own is null
+            ? DisplayText.SanitizeName(endpoint.DisplayName, Strings.UnknownDevice)
+            : DisplayText.SanitizeName(own.TryGetPeerName(endpoint.Info), Strings.OwnDevice);
+        var view = new DeviceView(endpoint.InstanceName, name, Map(endpoint.Kind), own is not null);
         Post(epoch, () => DeviceFound?.Invoke(view));
+    }
+
+    /// <summary>Текущая идентичность, если сертификат этого устройства среди наших; иначе null. Сбой проверки = не своё.</summary>
+    CertificateIdentity? OwnIdentity(DiscoveredEndpoint endpoint)
+    {
+        var identity = _identity.Current;
+        try { return identity is not null && identity.Identify(endpoint.Info) ? identity : null; }
+        catch (Exception e)
+        {
+            Log.Write("share: identify failed: " + Log.Describe(e));
+            return null;
+        }
     }
 
     void OnLost(int epoch, string name)
@@ -222,7 +243,8 @@ sealed class NearbyService : IDisposable
                 connectCts.CancelAfter(ConnectTimeout);
                 await client.ConnectAsync(target.Address, target.Port, connectCts.Token).ConfigureAwait(false);
             }
-            var options = new SessionOptions(Environment.MachineName, DeviceKind.Laptop, new AnonymousIdentity()) { RemoteEndpointInfo = target.Info };
+            IShareIdentity identity = OwnIdentity(target) ?? (IShareIdentity)new AnonymousIdentity();   // идентичность фиксируется на старте отправки
+            var options = new SessionOptions(Environment.MachineName, DeviceKind.Laptop, identity) { RemoteEndpointInfo = target.Info };
             var observer = new ProgressObserver(f => Post(epoch, () => Progress?.Invoke(f)));
             var result = await SendSession.SendFilesAsync(client.GetStream(), options, files, observer, ct).ConfigureAwait(false);
             Log.Write($"share: result {result.Status}");

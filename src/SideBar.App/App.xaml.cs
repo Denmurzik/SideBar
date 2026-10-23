@@ -36,6 +36,7 @@ public partial class App : Application
     FanWindow? _fan;
     Notifications? _notifications;
     ReceiveHost? _receive;
+    IdentityProvider? _identity;
     readonly BumpGate _bump = new();
     readonly AttentionBounce _attention = new();
     readonly ReceiveTileModel _recv = new();
@@ -62,6 +63,8 @@ public partial class App : Application
         _window = new CardWindow();
         _window.BindShelf(_shelf);
         _window.FanRequested += OnFanRequested;
+        _identity = new IdentityProvider();   // сертификаты нужны и плитке (метка «своё»), и приёму
+        _identity.Start();
         InitShare();
         _window.Settled += s =>
         {
@@ -105,11 +108,11 @@ public partial class App : Application
         try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
         _messages = new MessageWindow(OnDisplaysChanged);
         _notifications = new Notifications(_ui, _messages.Handle, _recv);
-        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce);
+        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity);
 #if DEBUG
-        if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.ToggleEveryone();   // автотест без клика по меню трея
+        if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.SetMode(SideBar.Core.Nearby.Visibility.Everyone, persist: false);   // автотест без клика по меню трея
 #endif
-        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.IsEveryone, _receive.ToggleEveryone);
+        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m));
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) CardHidden(); }), null, 2000, Timeout.Infinite);
@@ -121,7 +124,7 @@ public partial class App : Application
     void InitShare()
     {
         _share = new ShareTileModel();
-        _nearby = new NearbyService(_ui!);
+        _nearby = new NearbyService(_ui!, _identity!);
         _window!.BindShare(_share, _recv, (id, accept) => _notifications?.Decide(id, accept));
         _window.OwnItemsDropped += OnShareDrop;
         _share.Changed += OnShareChanged;
@@ -222,6 +225,7 @@ public partial class App : Application
             try { _hook?.Dispose(); } catch { }
             try { _dropTarget?.Dispose(); } catch { }
             try { _receive?.Dispose(); } catch { }
+            try { _identity?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
             try { _messages?.Dispose(); } catch { }
         }

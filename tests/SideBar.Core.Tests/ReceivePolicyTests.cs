@@ -53,4 +53,15 @@ public class ReceivePolicyTests
         Assert.True(d.CancelUnaccepted);
         Assert.False(d.CancelAccepted);
     }
+
+    [Fact]
+    public void Own_devices_on_private_network_listens_and_on_public_cancels_everything()
+    {
+        Assert.True(ReceivePolicy.Decide(Visibility.OwnDevices, NetworkCategory.Private).Listen);
+        var d = ReceivePolicy.Decide(Visibility.OwnDevices, NetworkCategory.Public);
+        Assert.False(d.Listen);
+        Assert.True(d.CancelAccepted);
+        Assert.Equal(ReceiveBlock.PublicNetwork, ReceiveBlockReason.Of(Visibility.OwnDevices, true, NetworkCategory.Public));
+        Assert.Equal(ReceiveBlock.None, ReceiveBlockReason.Of(Visibility.OwnDevices, true, NetworkCategory.Private));
+    }
 }
