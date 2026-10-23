@@ -39,4 +39,13 @@ static class Strings
             : onlyLinks ? (texts > 1 ? "поделиться ссылками" : "поделиться ссылкой") : "поделиться текстом";
         return $"{device} хочет {what} · PIN {pin}";
     }
+    public const string Searching = "Поиск устройств…";
+    public const string SendToDevice = "Отправить на устройство";
+    public const string Sent = "Отправлено";
+    public const string SendFailed = "Не удалось отправить";
+    public const string SendRejected = "Получатель отклонил";
+    public const string SendCancelled = "Получатель отменил передачу";
+    public static readonly string OnlyFirstFiles = $"Отправлены только первые {Nearby.NearbyService.MaxFiles} файлов";
+    public const string SendTimedOut = "Получатель не ответил";
+    public const string NothingToSend = "Нечего отправлять";
 }

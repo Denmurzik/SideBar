@@ -1,11 +1,13 @@
 using System.Diagnostics;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Visibility = Microsoft.UI.Xaml.Visibility;   // SideBar.Core.Nearby.Visibility (Hidden/Everyone) конфликтует
 using Microsoft.UI.Xaml.Media;
 using SideBar.Core;
 using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Core.Motion;
+using SideBar.Core.Nearby;
 using SideBar.Native;
 using SideBar.Shelf;
 using Windows.Graphics;
@@ -34,6 +36,14 @@ public sealed partial class CardWindow : Window
     /// <summary>Клик по непустой стопке: App показывает веер.</summary>
     public event Action? FanRequested;
 
+    /// <summary>Клик по иконке найденного устройства в плитке Quick Share.</summary>
+    public event Action<string>? ShareDeviceChosen;
+
+    /// <summary>Свой drag стопки/веера брошен на плитку Quick Share: пути переносимых элементов (они остаются в стопке).</summary>
+    public event Action<IReadOnlyList<string>>? OwnItemsDropped;
+
+    ShareTileModel? _share;
+
     public CardWindow()
     {
         InitializeComponent();
@@ -48,6 +58,64 @@ public sealed partial class CardWindow : Window
         Stack.HasItemsChanged += has => ShelfEmptyIcon.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         Stack.FanRequested += () => FanRequested?.Invoke();
         Stack.Bind(shelf);
+    }
+
+    // Свой drag (XAML DragStarting) в OLE-цель карточки не приходит: WinUI ведёт его сама, поэтому приём - событиями плитки.
+    void QsTile_DragOver(object sender, DragEventArgs e)
+    {
+        if (!DragOut.IsActive || _share?.State == ShareTileState.Sending) return;
+        e.AcceptedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
+        e.DragUIOverride.Caption = Strings.SendToDevice;
+        e.DragUIOverride.IsGlyphVisible = false;
+        e.Handled = true;
+    }
+
+    void QsTile_Drop(object sender, DragEventArgs e)
+    {
+        if (!DragOut.IsActive || _share?.State == ShareTileState.Sending) return;
+        var paths = DragOut.CarriedPaths;
+        if (paths.Count == 0) return;
+        DragOut.KeepItemsAfterDrop();   // отправка не уносит элементы из стопки
+        e.Handled = true;
+        OwnItemsDropped?.Invoke(paths);
+    }
+
+    internal void BindShare(ShareTileModel share)
+    {
+        _share = share;
+        Share.DeviceChosen += id => ShareDeviceChosen?.Invoke(id);
+        share.Changed += RenderShare;
+        RenderShare();
+    }
+
+    void RenderShare()
+    {
+        if (_share is null) return;
+        try
+        {
+            bool busy = Share.Render(_share);
+            QsLogo.Visibility = busy ? Visibility.Collapsed : Visibility.Visible;
+        }
+        catch (Exception e) { Log.Write("share render failed: " + Log.Describe(e)); }   // не должен пропустить обновление HoldOpen у остальных подписчиков
+    }
+
+    /// <summary>Плитка Quick Share в физических пикселях экрана (для drop на плитку); null, пока карточка не построена. UI-поток.</summary>
+    internal PxRect? QsTileScreenRect()
+    {
+        try
+        {
+            if (Root.XamlRoot is not { } xr || QsTile.ActualWidth <= 0) return null;
+            double scale = xr.RasterizationScale;
+            var origin = QsTile.TransformToVisual(Root).TransformPoint(new Windows.Foundation.Point(0, 0));
+            var pos = AppWindow.Position;
+            int left = pos.X + (int)Math.Round(origin.X * scale), top = pos.Y + (int)Math.Round(origin.Y * scale);
+            return new PxRect(left, top, left + (int)Math.Round(QsTile.ActualWidth * scale), top + (int)Math.Round(QsTile.ActualHeight * scale));
+        }
+        catch (Exception e)
+        {
+            Log.Write("tile rect failed: " + Log.Describe(e));
+            return null;
+        }
     }
 
     static double Now => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;

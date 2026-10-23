@@ -251,4 +251,26 @@ public class EdgeStateMachineTests
         Assert.Null(m.Update(At(1500, 540, 100)));
         Assert.Equal(PanelState.Hidden, m.Update(At(1500, 540, 400)));
     }
+
+    [Fact]
+    public void HoldOpen_keeps_card_open_with_cursor_far_away()
+    {
+        var m = Opened();
+        m.HoldOpen = true;
+        Assert.Null(m.Update(At(100, 100, 1000)));
+        Assert.Null(m.Update(At(100, 100, 5000)));
+        Assert.Equal(PanelState.Open, m.State);
+    }
+
+    [Fact]
+    public void Releasing_HoldOpen_starts_hide_delay_from_scratch()
+    {
+        var m = Opened();
+        m.HoldOpen = true;
+        m.Update(At(100, 100, 1000));
+        m.HoldOpen = false;
+        Assert.Null(m.Update(At(100, 100, 5000)));
+        Assert.Null(m.Update(At(100, 100, 5299)));
+        Assert.Equal(PanelState.Hidden, m.Update(At(100, 100, 5300)));
+    }
 }

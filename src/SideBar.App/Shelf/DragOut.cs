@@ -13,9 +13,16 @@ namespace SideBar.Shelf;
 static class DragOut
 {
     static IReadOnlyList<ShelfItem> s_items = [];
+    static bool s_keep;
 
     /// <summary>true между DragStarting и DropCompleted: <c>OleDropTarget</c> отвечает DROPEFFECT_NONE на свой же вынос.</summary>
     public static bool IsActive { get; private set; }
+
+    /// <summary>Пути переносимых сейчас элементов (для drop на плитку Quick Share).</summary>
+    public static IReadOnlyList<string> CarriedPaths => [.. s_items.Select(i => i.Path)];
+
+    /// <summary>Текущий drop — отправка: элементы остаются в стопке, хотя drop принят.</summary>
+    public static void KeepItemsAfterDrop() => s_keep = true;
 
     /// <summary>Заполняет DataPackage (StorageFile для файлов, StorageFolder для каталогов); недоступные элементы пропускает. Нечего нести — Cancel.</summary>
     public static async void Start(DragStartingEventArgs e, IReadOnlyList<ShelfItem> items)
@@ -57,9 +64,12 @@ static class DragOut
     public static void Completed(DropCompletedEventArgs e, ShelfService shelf)
     {
         var carried = s_items;
+        bool keep = s_keep;
         s_items = [];
+        s_keep = false;
         IsActive = false;
-        Log.Write($"drag-out completed: DropResult={e.DropResult}");
+        Log.Write($"drag-out completed: DropResult={e.DropResult}{(keep ? ", items kept (share)" : "")}");
+        if (keep) return;
         if (e.DropResult == DataPackageOperation.None) return;
         shelf.RemoveAfterDragOut(carried.Select(i => i.Id).ToList());
     }
@@ -68,6 +78,7 @@ static class DragOut
     public static void Reset()
     {
         s_items = [];
+        s_keep = false;
         IsActive = false;
     }
 
