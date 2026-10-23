@@ -63,7 +63,7 @@ sealed class OfficialRefreshHost : IDisposable
         Log.Write("official: exe path changed");
     }
 
-    string? _lastExePath;
+    volatile string? _lastExePath;
 
     /// <summary>Идёт цикл обновления (пункт трея недоступен).</summary>
     public bool Busy => _service.IsBusy;

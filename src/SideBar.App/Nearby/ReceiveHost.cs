@@ -119,7 +119,7 @@ sealed class ReceiveHost : IDisposable
     string ReceiveDirectory()
     {
         var target = ReceiveFolders.Resolve(ReceivedFileWriter.DownloadsOverride(), _settings.Current.ReceiveFolder,
-            ReceivedFileWriter.DownloadsFolder, SideBar.Settings.PathProbe.DirectoryExists);
+            ReceivedFileWriter.DownloadsFolder, SideBar.Settings.PathProbe.DirectoryWritable);
         if (target.FellBack) Log.Write("receive: chosen folder unavailable, using Downloads");
         return target.Path;
     }
@@ -133,7 +133,7 @@ sealed class ReceiveHost : IDisposable
         catch (Exception e) { Log.Write("mode changed handler failed: " + Log.Describe(e)); }
     }
 
-    string? _lastPcName;
+    volatile string? _lastPcName;
 
     // имя ПК изменилось: реклама с именем регистрируется заново (новая соль), идущие сессии не трогаем
     void OnSettingsChanged(AppSettings s)

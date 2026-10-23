@@ -370,7 +370,7 @@ public sealed partial class SettingsWindow : Window
             checkedFolder = f;
             folderCard.Warning = null;
             if (f is not null)
-                Background(() => SideBar.Settings.PathProbe.DirectoryExists(f), ok => { if (_store.Current.ReceiveFolder == f) folderCard.Warning = ok ? null : Strings.ReceiveFolderMissing; });
+                Background(() => SideBar.Settings.PathProbe.DirectoryWritable(f), ok => { if (_store.Current.ReceiveFolder == f) folderCard.Warning = ok ? null : Strings.ReceiveFolderMissing; });
         });
 
         // сертификаты
@@ -454,7 +454,7 @@ public sealed partial class SettingsWindow : Window
 
     UIElement BuildPanel()
     {
-        var delay = Choice([EdgeOpenDelay.Ms0, EdgeOpenDelay.Ms150, EdgeOpenDelay.Ms300], [Strings.Ms(0), Strings.Ms(150), Strings.Ms(300)],
+        var delay = Choice([EdgeOpenDelay.Standard, EdgeOpenDelay.Ms0, EdgeOpenDelay.Ms150, EdgeOpenDelay.Ms300], [Strings.DelayStandard, Strings.Ms(0), Strings.Ms(150), Strings.Ms(300)],
             s => s.EdgeOpenDelay, (s, v) => s with { EdgeOpenDelay = v });
         var bounce = Toggle(s => s.BounceOnIncoming, (s, on) => s with { BounceOnIncoming = on });
         var fullscreen = Toggle(s => s.ShowInFullscreen, (s, on) => s with { ShowInFullscreen = on });

@@ -48,7 +48,8 @@ public partial class App : Application
     IdentityProvider? _identity;
     OfficialRefreshHost? _refresh;
     volatile bool _showInFullscreen, _bounceOnIncoming = true;   // настройки «Панель»: читает рабочий поток хука
-    ShelfRetention _lastRetention;
+    ShelfRetention _lastRetention;   // читает и пишет только OnSettingsChanged, но вызывается с разных потоков
+    readonly object _retentionGate = new();
     DispatcherTimer? _retentionTimer;
     readonly BumpGate _bump = new();
     readonly AttentionBounce _attention = new();
@@ -113,6 +114,7 @@ public partial class App : Application
         ApplySettings(_settings.Current);
         _lastRetention = _settings.Current.ShelfRetention;
         _settings.Changed += OnSettingsChanged;
+        _settings.HandlerFailed += e => Log.Write("settings handler failed: " + Log.Describe(e));
         InitRetention();
         CardHidden();
         // после первого Show (его ставит в очередь Initialize): к этому времени у окна есть дочерние HWND WinUI
@@ -202,11 +204,13 @@ public partial class App : Application
     void OnSettingsChanged(AppSettings s)
     {
         ApplySettings(s);
-        if (s.ShelfRetention != _lastRetention)
+        bool retentionChanged;
+        lock (_retentionGate)
         {
+            retentionChanged = s.ShelfRetention != _lastRetention;
             _lastRetention = s.ShelfRetention;
-            _ui?.TryEnqueue(ExpireShelf);   // новый срок действует сразу, не через час
         }
+        if (retentionChanged) _ui?.TryEnqueue(ExpireShelf);   // новый срок действует сразу, не через час
     }
 
     void ApplySettings(AppSettings s)
@@ -228,10 +232,27 @@ public partial class App : Application
         _retentionTimer.Start();
     }
 
+    DispatcherTimer? _expireRetry;
+
+    void RetryExpire(object? sender, object e)
+    {
+        _expireRetry?.Stop();
+        ExpireShelf();
+    }
+
     // UI-поток. Тот же путь, что у корзины: Reference только уходят с полки, Owned получают отложенное удаление
     void ExpireShelf()
     {
-        if (_shelf is null || _settings is null || DragOut.IsActive) return;   // во время переноса из карточки полку не трогаем
+        if (_shelf is null || _settings is null) return;
+        if (DragOut.IsActive)
+        {
+            // во время переноса из карточки полку не трогаем; повтор сразу после его конца
+            _expireRetry ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _expireRetry.Tick -= RetryExpire;
+            _expireRetry.Tick += RetryExpire;
+            if (!_expireRetry.IsEnabled) _expireRetry.Start();
+            return;
+        }
         var ids = ShelfRetentionPolicy.ExpiredIds(_shelf.Model.Items, _settings.Current.ShelfRetention, DateTimeOffset.Now);
         if (ids.Count == 0) return;
         _shelf.Expire(ids);
@@ -550,7 +571,7 @@ public partial class App : Application
             // без движения мыши автомату нужны таймеры: задержка скрытия (Open) и dwell in-place (Hidden у края)
             var band = _layout.ActivationBand;
             bool inBand = y >= band.Top && y <= band.Bottom && x >= band.Left && x < band.Right;
-            fast = machine.State == PanelState.Open || inBand;   // InPlace: dwell у края; Slide: задержка касания (Peek)
+            fast = machine.State == PanelState.Open || (inBand && (_mode == EdgeMode.InPlace || machine.EffectiveOpenDelayMs > 0));   // InPlace: dwell у края; Slide: только пока есть задержка касания
         }
         if (hook is not null) hook.FastTick = fast;
 

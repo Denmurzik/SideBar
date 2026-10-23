@@ -29,6 +29,9 @@ public sealed class EdgeStateMachine(CardLayout layout, EdgeMode mode)
     /// </summary>
     public int? OpenDelayMs { get; set; }
 
+    /// <summary>Действующая задержка открытия, мс (настройка либо умолчание режима).</summary>
+    public int EffectiveOpenDelayMs => DelayMs;
+
     int DelayMs => OpenDelayMs ?? (_mode == EdgeMode.InPlace ? InPlaceDwellMs : 0);
 
     /// <summary>Пока true, Open не скрывается по уходу курсора (поиск устройств и передача из плитки Quick Share).</summary>

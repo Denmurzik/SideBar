@@ -31,6 +31,20 @@ public class SettingsApplyTests
     }
 
     [Fact]
+    public void Edge_open_delay_standard_keeps_old_behaviour_per_mode()
+    {
+        Assert.Null(new AppSettings().EdgeOpenDelayMs);
+        Assert.Equal(0, new AppSettings { EdgeOpenDelay = EdgeOpenDelay.Ms0 }.EdgeOpenDelayMs);
+        Assert.Equal(150, new AppSettings { EdgeOpenDelay = EdgeOpenDelay.Ms150 }.EdgeOpenDelayMs);
+        var slide = new EdgeStateMachine(new CardLayout(Monitor, 1.0), EdgeMode.Slide) { OpenDelayMs = new AppSettings().EdgeOpenDelayMs };
+        Assert.Equal(PanelState.Open, slide.Update(At(1919, 540, 0)));   // Slide: без задержки
+        var inPlace = new EdgeStateMachine(new CardLayout(Monitor, 1.0), EdgeMode.InPlace) { OpenDelayMs = new AppSettings().EdgeOpenDelayMs };
+        Assert.Null(inPlace.Update(At(1890, 540, 0)));
+        Assert.Null(inPlace.Update(At(1890, 540, 149)));
+        Assert.Equal(PanelState.Open, inPlace.Update(At(1890, 540, 150)));   // InPlace: 150 мс
+    }
+
+    [Fact]
     public void Edge_open_delay_restarts_after_leaving_the_edge()
     {
         var m = new EdgeStateMachine(new CardLayout(Monitor, 1.0), EdgeMode.Slide) { OpenDelayMs = 150 };

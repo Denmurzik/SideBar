@@ -66,6 +66,22 @@ public sealed class SettingsStore
 
     public event Action? SaveFailed;
 
+    /// <summary>Обработчик <see cref="Changed"/> бросил исключение: оно перехвачено, остальные подписчики и очередь не пострадали (приложение пишет причину в лог).</summary>
+    public event Action<Exception>? HandlerFailed;
+
+    void RaiseChanged(AppSettings value)
+    {
+        if (Changed is not { } handlers) return;
+        foreach (var handler in handlers.GetInvocationList().Cast<Action<AppSettings>>())
+        {
+            try { handler(value); }
+            catch (Exception e)
+            {
+                try { HandlerFailed?.Invoke(e); } catch (Exception) { }
+            }
+        }
+    }
+
     /// <summary>
     /// Применяет изменение, нормализует результат и сохраняет. <see cref="Changed"/> — по одному разу на реальное изменение.
     /// <paramref name="change"/> вернул null или то же значение — ничего не происходит. Сбой записи не бросает: <see cref="Current"/> обновлён,
@@ -120,7 +136,7 @@ public sealed class SettingsStore
                 {
                     if (!_pending.TryDequeue(out value!)) { _draining = false; return; }
                 }
-                Changed?.Invoke(value);
+                RaiseChanged(value);
             }
         }
         catch

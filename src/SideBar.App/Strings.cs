@@ -102,7 +102,7 @@ static class Strings
     public const string PcNameDesc = "Так компьютер видят другие устройства (до 32 символов)";
     public const string ReceiveFolderTitle = "Папка для принятых файлов";
     public const string DownloadsName = "Загрузки";
-    public const string ReceiveFolderMissing = "Папка недоступна — файлы принимаются в «Загрузки»";
+    public const string ReceiveFolderMissing = "Папка недоступна для записи — файлы принимаются в «Загрузки»";
     public const string CertsTitle = "Сертификаты Quick Share";
     public static string CertsLoaded(int peers, string until) => $"загружены · устройств {peers} · действуют до {until}";
     public static string CertsFailed(string reason) => $"недоступны: {reason}";
@@ -118,6 +118,7 @@ static class Strings
     public const string OfficialPathTitle = "Путь к официальному Quick Share";
     public const string OfficialPathMissing = "Файл не найден — официальное приложение не будет запускаться";
 
+    public const string DelayStandard = "Стандартная";
     public const string EdgeDelayTitle = "Задержка открытия у края";
     public const string EdgeDelayDesc = "Сколько курсор держится у края, прежде чем карточка откроется";
     public static string Ms(int n) => $"{n} мс";

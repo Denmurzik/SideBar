@@ -22,8 +22,8 @@ public sealed class SettingsTests : IDisposable
         Assert.Null(s.PcName);
         Assert.Null(s.ReceiveFolder);
         Assert.Null(s.OfficialExePath);
-        Assert.Equal(EdgeOpenDelay.Ms150, s.EdgeOpenDelay);
-        Assert.Equal(150, s.EdgeOpenDelayMs);
+        Assert.Equal(EdgeOpenDelay.Standard, s.EdgeOpenDelay);
+        Assert.Null(s.EdgeOpenDelayMs);
         Assert.True(s.BounceOnIncoming);
         Assert.False(s.ShowInFullscreen);
         Assert.Equal(ShelfRetention.Never, s.ShelfRetention);
@@ -109,14 +109,14 @@ public sealed class SettingsTests : IDisposable
         var s = new SettingsStore(FilePath).Current;
         Assert.Equal(Language.Auto, s.Language);
         Assert.Equal(Visibility.OwnDevices, s.Visibility);
-        Assert.Equal(EdgeOpenDelay.Ms150, s.EdgeOpenDelay);
+        Assert.Equal(EdgeOpenDelay.Standard, s.EdgeOpenDelay);
         Assert.Equal(ShelfRetention.Never, s.ShelfRetention);
         Assert.False(s.CheckForUpdates);
 
         var store = new SettingsStore(Path.Combine(_dir, "b.json"));
         store.Update(x => x with { Language = (Language)42, EdgeOpenDelay = (EdgeOpenDelay)(-1) });
         Assert.Equal(Language.Auto, store.Current.Language);
-        Assert.Equal(EdgeOpenDelay.Ms150, store.Current.EdgeOpenDelay);
+        Assert.Equal(EdgeOpenDelay.Standard, store.Current.EdgeOpenDelay);
     }
 
     [Fact]
