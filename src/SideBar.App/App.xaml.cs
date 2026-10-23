@@ -37,6 +37,7 @@ public partial class App : Application
     Notifications? _notifications;
     ReceiveHost? _receive;
     PromptWindow? _prompt;
+    readonly BumpGate _bump = new();
     ShareTileModel? _share;
     NearbyService? _nearby;
     DispatcherTimer? _shareTimer;
@@ -205,7 +206,11 @@ public partial class App : Application
     {
         var machine = _machine;
         if (machine is null || _window is null) return;
-        lock (_gate) { if (machine.State != PanelState.Hidden) return; }
+        PxRect primary;
+        lock (_gate) { if (machine.State != PanelState.Hidden) return; primary = _primary; }
+        if (FullscreenProbe.IsBusy(primary)) return;   // то же подавление, что у края
+        if (!_bump.TryBump(Environment.TickCount64)) return;
+        Log.Write("edge Peek (incoming)");
         _window.SetState(PanelState.Peek);
         _ = Task.Delay(1500).ContinueWith(_ => _ui?.TryEnqueue(() =>
         {
