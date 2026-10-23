@@ -14,7 +14,7 @@ sealed unsafe class TrayIcon : IDisposable
     const uint MF_STRING = 0, MF_CHECKED = 8;
     const uint TPM_RIGHTBUTTON = 2, TPM_BOTTOMALIGN = 0x20, TPM_RETURNCMD = 0x100;
     const int SM_CXSMICON = 49;
-    const int CmdAutostart = 1, CmdExit = 2;
+    const int CmdAutostart = 1, CmdExit = 2, CmdVisibility = 3;
 
     [StructLayout(LayoutKind.Sequential)]
     struct NOTIFYICONDATAW
@@ -49,16 +49,20 @@ sealed unsafe class TrayIcon : IDisposable
     readonly Autostart _autostart;
     readonly string _exePath;
     readonly Action _onExit;
+    readonly Func<bool> _isEveryone;
+    readonly Action _toggleEveryone;
     readonly uint _taskbarCreated;
     nint _icon;
     bool _added;
 
-    public TrayIcon(MessageWindow window, Autostart autostart, string exePath, Action onExit)
+    public TrayIcon(MessageWindow window, Autostart autostart, string exePath, Action onExit, Func<bool> isEveryone, Action toggleEveryone)
     {
         _window = window;
         _autostart = autostart;
         _exePath = exePath;
         _onExit = onExit;
+        _isEveryone = isEveryone;
+        _toggleEveryone = toggleEveryone;
         _taskbarCreated = RegisterWindowMessageW("TaskbarCreated");
         _icon = LoadIcon();
         Add();
@@ -100,6 +104,7 @@ sealed unsafe class TrayIcon : IDisposable
     void ShowMenu(int x, int y)
     {
         nint menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING | (_isEveryone() ? MF_CHECKED : 0), CmdVisibility, Strings.VisibilityEveryone);
         AppendMenuW(menu, MF_STRING | (_autostart.IsEnabled ? MF_CHECKED : 0), CmdAutostart, Strings.Autostart);
         AppendMenuW(menu, MF_STRING, CmdExit, Strings.Exit);
         SetForegroundWindow(_window.Handle);   // иначе меню не закрывается кликом вне него
@@ -111,6 +116,7 @@ sealed unsafe class TrayIcon : IDisposable
         {
             if (_autostart.IsEnabled) _autostart.Disable(); else _autostart.Enable(_exePath);
         }
+        else if (cmd == CmdVisibility) _toggleEveryone();
         else if (cmd == CmdExit) _onExit();
     }
 

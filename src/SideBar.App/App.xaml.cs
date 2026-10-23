@@ -7,6 +7,7 @@ using SideBar.Core.Nearby;
 using SideBar.Edge;
 using SideBar.Nearby;
 using SideBar.Shelf;
+using SideBar.Sharing;
 using SideBar.Tray;
 using WinRT.Interop;
 
@@ -33,6 +34,11 @@ public partial class App : Application
     ShelfService? _shelf;
     OleDropTarget.DropRegistration? _dropTarget;
     FanWindow? _fan;
+    Notifications? _notifications;
+    ReceiveHost? _receive;
+    PromptWindow? _prompt;
+    readonly BumpGate _bump = new();
+    PxRect? _promptZone;   // под _gate: зона запасной панели (клик по ней не «снаружи»)
     ShareTileModel? _share;
     NearbyService? _nearby;
     DispatcherTimer? _shareTimer;
@@ -88,7 +94,30 @@ public partial class App : Application
         var autostart = new Autostart();
         try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
         _messages = new MessageWindow(OnDisplaysChanged);
-        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp));
+        _notifications = new Notifications(_ui, _messages.Handle);
+        _notifications.Register();
+        if (!_notifications.Available)
+        {
+            // уведомления Windows недоступны (unpackaged + self-contained): запрос и итоги показываем панелью рядом с карточкой
+            _notifications.SetFallback((spec, ct) =>
+            {
+                if (_prompt is null)
+                {
+                    _prompt = new PromptWindow();
+                    _prompt.SetAnchor(() =>
+                    {
+                        lock (_gate) return new PromptAnchor(_layout.CardRectAt(_layout.LeftFor(PanelState.Open)), _scale, Displays.PrimaryWorkArea(), _fanZone);
+                    });
+                    _prompt.ZoneChanged += z => { lock (_gate) _promptZone = z; };
+                }
+                _prompt.Present(spec, ct);
+            });
+        }
+        _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, PeekForRequest);
+#if DEBUG
+        if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.ToggleEveryone();   // автотест без клика по меню трея
+#endif
+        _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.IsEveryone, _receive.ToggleEveryone);
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) _trimmer.OnHidden(); }), null, 2000, Timeout.Infinite);
@@ -144,6 +173,8 @@ public partial class App : Application
             try { _nearby?.Dispose(); } catch { }
             try { _hook?.Dispose(); } catch { }
             try { _dropTarget?.Dispose(); } catch { }
+            try { _receive?.Dispose(); } catch { }
+            try { _notifications?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
             try { _messages?.Dispose(); } catch { }
         }
@@ -170,6 +201,28 @@ public partial class App : Application
             _trimmer.OnShown();
             _window?.SetState(s);
         }
+    }
+
+    /// <summary>Входящий запрос (UI-поток): карточка выглядывает на 1.5 с, если она скрыта; открытую или уже выглядывающую не трогаем.</summary>
+    void PeekForRequest()
+    {
+        var machine = _machine;
+        if (machine is null || _window is null) return;
+        PxRect primary;
+        lock (_gate) { if (machine.State != PanelState.Hidden) return; primary = _primary; }
+        if (FullscreenProbe.IsBusy(primary)) return;   // то же подавление, что у края
+        if (!_bump.TryBump(Environment.TickCount64)) return;
+        Log.Write("edge Peek (incoming)");
+        _trimmer.OnShown();
+        _window.SetState(PanelState.Peek);
+        _ = Task.Delay(1500).ContinueWith(_ => _ui?.TryEnqueue(() =>
+        {
+            bool stillHidden;
+            lock (_gate) stillHidden = machine.State == PanelState.Hidden;
+            if (!stillHidden) return;
+            _window?.SetState(PanelState.Hidden);
+            _trimmer.OnHidden();
+        }), TaskScheduler.Default);
     }
 
     /// <summary>Клик по стопке (UI-поток): показать веер слева от открытой карточки.</summary>
@@ -202,6 +255,7 @@ public partial class App : Application
             _fanZone = zone;
             _machine?.SetKeepOpenRect(zone);
         }
+        _prompt?.Reposition();   // панель обходит веер
         Log.Write(zone is { } z ? $"fan open {z.Left},{z.Top},{z.Right},{z.Bottom}" : "fan closed");
     }
 
@@ -209,13 +263,15 @@ public partial class App : Application
     void OnPrimaryDown(int x, int y)
     {
         PxRect? zone;
+        PxRect? promptZone;
         PxRect card;
         lock (_gate)
         {
+            promptZone = _promptZone;
             zone = _fanZone;
             card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
         }
-        if (card.Contains(x, y) || (zone is { } z && z.Contains(x, y))) return;
+        if (card.Contains(x, y) || (zone is { } z && z.Contains(x, y)) || (promptZone is { } p && p.Contains(x, y))) return;   // клик по панели запроса — не «снаружи»: веер и отправка остаются
         if (_shareActive) _ui?.TryEnqueue(() => _share?.Cancel());   // клик вне карточки отменяет поиск и передачу
         if (zone is not null) _ui?.TryEnqueue(() => _fan?.Hide());
     }

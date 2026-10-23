@@ -166,7 +166,7 @@ public static class ReceiveSession
                                     ? Share.ConnectionResponseFrame.Types.Status.Reject
                                     : Share.ConnectionResponseFrame.Types.Status.UnsupportedAttachmentType), ct);
                                 return hasWifi
-                                    ? new TransferResult(TransferStatus.RejectedByPeer, saved, "wifi-unsupported")
+                                    ? new TransferResult(TransferStatus.RejectedByPeer, saved, TransferDetails.WifiUnsupported)
                                     : new TransferResult(TransferStatus.Failed, saved, "Introduction has no files.");
                             }
 
@@ -177,7 +177,7 @@ public static class ReceiveSession
                             {
                                 await connection.SendSharingAsync(SharingFrames.Response(
                                     Share.ConnectionResponseFrame.Types.Status.Reject), ct);
-                                return new TransferResult(TransferStatus.RejectedByPeer, saved, "not-enough-space");
+                                return new TransferResult(TransferStatus.RejectedByPeer, saved, TransferDetails.NotEnoughSpace);
                             }
 
                             var offer = new IncomingTransfer(pin, senderName,
