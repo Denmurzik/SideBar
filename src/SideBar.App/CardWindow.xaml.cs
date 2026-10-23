@@ -7,6 +7,7 @@ using SideBar.Core.Edge;
 using SideBar.Core.Layout;
 using SideBar.Core.Motion;
 using SideBar.Native;
+using SideBar.Shelf;
 using Windows.Graphics;
 using WinRT.Interop;
 
@@ -30,6 +31,9 @@ public sealed partial class CardWindow : Window
 
     public event Action<PanelState>? Settled;
 
+    /// <summary>Клик по непустой стопке (веер — Task 5).</summary>
+    public event Action? FanRequested;
+
     public CardWindow()
     {
         InitializeComponent();
@@ -37,6 +41,13 @@ public sealed partial class CardWindow : Window
         // ActualTheme известен только после загрузки дерева и меняется вместе с темой системы
         Root.Loaded += (_, _) => { ApplyStrokes(); _backdrop?.SetTheme(Root.ActualTheme); };
         Root.ActualThemeChanged += (_, _) => { ApplyStrokes(); _backdrop?.SetTheme(Root.ActualTheme); };
+    }
+
+    internal void BindShelf(ShelfService shelf)
+    {
+        Stack.HasItemsChanged += has => ShelfEmptyIcon.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
+        Stack.FanRequested += () => FanRequested?.Invoke();
+        Stack.Bind(shelf);
     }
 
     static double Now => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;

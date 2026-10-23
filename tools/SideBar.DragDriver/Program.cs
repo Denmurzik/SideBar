@@ -47,6 +47,9 @@ sealed class Driver
     readonly Rectangle _scr = Screen.PrimaryScreen!.Bounds;
     readonly List<string> _report = [];
     Form _src = null!, _other = null!;
+    volatile bool _otherRejects;
+    volatile string[] _received = [];
+    volatile string _otherEffect = "";
     volatile object? _pending;
     string _lastLog = "";
     string _lastEffect = "";
@@ -95,6 +98,14 @@ sealed class Driver
                 catch (Exception ex) { Rep("FAIL driver exception: " + ex); _fail++; }
                 finally { _src.BeginInvoke(() => Application.Exit()); }
             });
+            _other.AllowDrop = true;
+            _other.DragEnter += (_, e) => e.Effect = _otherRejects ? DragDropEffects.None : (e.AllowedEffect & DragDropEffects.Copy);
+            _other.DragOver += (_, e) => e.Effect = _otherRejects ? DragDropEffects.None : (e.AllowedEffect & DragDropEffects.Copy);
+            _other.DragDrop += (_, e) =>
+            {
+                _otherEffect = e.Effect.ToString();
+                _received = e.Data?.GetData(DataFormats.FileDrop) as string[] ?? [];
+            };
             _other.Show();
             Application.Run(_src);
         }
@@ -274,24 +285,167 @@ sealed class Driver
             !Directory.Exists(orphan) && Directory.Exists(foreign), $"orphanExists={Directory.Exists(orphan)} foreignExists={Directory.Exists(foreign)}");
         MoveTo(W - 700, H, 200); Thread.Sleep(500);
 
-        // T12: битый shelf.json -> Shelf\<guid> не чистятся, файл уходит в shelf.bad.json, Owned-элементы восстановлены из папок
+        // T12: битый shelf.json -> Shelf\<guid> не чистятся, файл уходит в shelf.bad-<время>.json, Owned-элементы восстановлены из папок
         var ownedBefore = ReadShelf().Where(x => x.Kind == Owned).Select(x => x.Path).ToList();
         int dirsBeforeBad = ShelfDirs();
         StopApp();
         File.WriteAllText(_shelfJson, "{ not json [[[");
         bool restarted2 = StartApp();
-        var bad = Path.Combine(_dataDir, "shelf.bad.json");
+        var bad = Directory.GetFiles(_dataDir, "shelf.bad-*.json").FirstOrDefault() ?? "";
         var rec = ReadShelf();
         bool recovered = RecoveredOk(rec, ownedBefore);
-        Check("T12 corrupt shelf.json -> bad file kept as shelf.bad.json, Shelf folders intact, owned items recovered (Id = folder guid)",
-            restarted2 && ownedBefore.Count > 0 && ShelfDirs() == dirsBeforeBad && File.Exists(bad) && File.ReadAllText(bad).Contains("not json") && recovered,
-            $"owned={ownedBefore.Count} dirs={ShelfDirs()}/{dirsBeforeBad} bad={File.Exists(bad)}" + "\n" + Dump(rec));
+        Check("T12 corrupt shelf.json -> bad file kept as shelf.bad-<timestamp>.json, Shelf folders intact, owned items recovered (Id = folder guid)",
+            restarted2 && ownedBefore.Count > 0 && ShelfDirs() == dirsBeforeBad && bad != "" && File.Exists(bad) && File.ReadAllText(bad).Contains("not json") && recovered,
+            $"owned={ownedBefore.Count} dirs={ShelfDirs()}/{dirsBeforeBad} bad={bad != ""}" + "\n" + Dump(rec));
         StopApp();
         bool restarted3 = StartApp();
         var rec2 = ReadShelf();
         Check("T12b second restart keeps the recovered items (same Ids)",
             restarted3 && RecoveredOk(rec2, ownedBefore) && rec2.Select(x => x.Id).SequenceEqual(rec.Select(x => x.Id)) && ShelfDirs() == dirsBeforeBad, Dump(rec2));
+        DragOutScenarios(W, H, a, refFile, folder);
     }
+
+    // ---- вынос стопки (Task 4) ----
+    Rectangle CardRect(int W, int H) => new(W - (int)(224 * _scale), H - (int)(234.5 * _scale), (int)(216 * _scale), (int)(469 * _scale));
+    Point ShelfTile(int W, int H) => new(W - (int)(116 * _scale), H + (int)(114 * _scale));
+    Point QsTile(int W, int H) => new(W - (int)(116 * _scale), H - (int)(114 * _scale));
+
+    void Shot(string name, int W, int H, bool aroundCursor = false)
+    {
+        try
+        {
+            var dir = Path.Combine(_work, "shots");
+            Directory.CreateDirectory(dir);
+            var r = CardRect(W, H);
+            if (aroundCursor)
+            {
+                GetCursorPos(out var c);
+                r = new Rectangle(c.X - 200, c.Y - 200, 400, 400);
+            }
+            using var bmp = new Bitmap(r.Width, r.Height);
+            using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(r.Location, Point.Empty, r.Size);
+            bmp.Save(Path.Combine(dir, name + ".png"), System.Drawing.Imaging.ImageFormat.Png);
+        }
+        catch (Exception e) { Rep("    (shot " + name + " failed: " + e.Message + ")"); }
+    }
+
+    /// <summary>Открывает карточку касанием края без зажатой кнопки и ждёт, пока пружина успокоится.</summary>
+    bool OpenCard(int W, int H)
+    {
+        try { File.Delete(_appLog); } catch { }
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+        MoveTo(W - 30, H, 300); Thread.Sleep(300);
+        MoveTo(W - 1, H, 200);
+        for (int i = 0; i < 20 && !AppLog().Contains("edge Open"); i++) Thread.Sleep(100);
+        Thread.Sleep(800);
+        return AppLog().Contains("edge Open");
+    }
+
+    /// <summary>Берёт стопку с плитки полки и несёт в точку <paramref name="to"/>; shotName - скриншот посреди drag'а (карточка и окрестность курсора).</summary>
+    bool DragStackTo(Point to, int W, int H, string? shotName = null)
+    {
+        _otherEffect = ""; _received = [];
+        if (!OpenCard(W, H)) { Rep("FAIL card did not open for drag-out"); _fail++; return false; }
+        var tile = ShelfTile(W, H);
+        MoveTo(tile.X, tile.Y, 300); Thread.Sleep(300);
+        Mouse(0x0002);
+        Thread.Sleep(200);
+        MoveTo(tile.X - 40, tile.Y, 200);
+        MoveTo(tile.X - 100, tile.Y - 30, 300);
+        if (shotName != null)
+        {
+            Thread.Sleep(400);
+            Shot(shotName, W, H);
+            Shot(shotName + "-cursor", W, H, aroundCursor: true);
+        }
+        MoveTo(to.X, to.Y, 400); Thread.Sleep(400);
+        Mouse(0x0004);
+        Thread.Sleep(1200);
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+        return true;
+    }
+
+    void DragOutScenarios(int W, int H, string a, string refFile, string folder)
+    {
+        // чистое состояние: перезапуск с пустым каталогом данных
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        if (!StartApp()) { _fail++; return; }
+        var otherCenter = new Point(_other.Left + 150, _other.Top + 75);
+
+        if (!OpenCard(W, H)) { Rep("FAIL card did not open"); _fail++; return; }
+        Shot("1-empty", W, H);
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+
+        // наполняем: ссылка на файл, ссылка на каталог, Owned (виртуальный файл), ещё одна ссылка
+        var one = new DataObject();
+        one.SetData(DataFormats.FileDrop, new[] { a });
+        DragToPanel(one, W, H);
+        var s = WaitShelf(x => x.Count == 1);
+        if (OpenCard(W, H)) Shot("2-one", W, H);
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+        var dirDrop = new DataObject();
+        dirDrop.SetData(DataFormats.FileDrop, new[] { folder });
+        DragToPanel(dirDrop, W, H);
+        DragToPanel(MakeVirtual("owned-out.bin", [1, 2, 3, 4, 5, 6, 7, 8]), W, H);
+        var two = new DataObject();
+        two.SetData(DataFormats.FileDrop, new[] { refFile });
+        DragToPanel(two, W, H);
+        s = WaitShelf(x => x.Count == 4);
+        Check("D0 shelf prepared: file ref, folder ref, owned, file ref", s.Count == 4 && s.Count(x => x.Kind == Owned) == 1, Dump(s));
+        if (OpenCard(W, H)) Shot("3-stack", W, H);
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+        var ids = s.Select(x => x.Id).ToList();
+        var owned = s.First(x => x.Kind == Owned);
+
+        // D1: принимающее окно отказывает -> None, элементы на месте
+        _otherRejects = true;
+        if (DragStackTo(otherCenter, W, H))
+        {
+            var log = AppLog();
+            s = ReadShelf();
+            Check("D1 drag-out onto a rejecting window -> DropResult None, items stay",
+                _otherEffect == "" && s.Select(x => x.Id).SequenceEqual(ids) && log.Contains("DropResult=None"), Dump(s));
+        }
+
+        // D2: вынос на плитку Quick Share своей карточки и на свою же полку -> элементы на месте
+        _otherRejects = false;
+        if (DragStackTo(QsTile(W, H), W, H))
+        {
+            var log = AppLog();
+            s = ReadShelf();
+            Check("D2 drag-out onto own Quick Share tile -> DropResult None, items stay",
+                s.Select(x => x.Id).SequenceEqual(ids) && log.Contains("DropResult=None"), Dump(s));
+        }
+        var shelfTile = ShelfTile(W, H);
+        if (DragStackTo(new Point(shelfTile.X, shelfTile.Y - (int)(20 * _scale)), W, H))
+        {
+            s = ReadShelf();
+            Check("D2b drag-out and drop on own shelf tile -> items stay, not duplicated",
+                s.Select(x => x.Id).SequenceEqual(ids), Dump(s));
+        }
+
+        // D3: принимающее окно -> Copy, элементы сняты, ссылки целы, Owned живёт ещё не менее 30 с
+        if (DragStackTo(otherCenter, W, H, "4-drag"))
+        {
+            s = WaitShelf(x => x.Count == 0, 3000);
+            var t0 = DateTime.UtcNow;   // элементы сняты не позже этого момента; 30 с отсчитываются от снятия
+            var got = _received;
+            bool names = got.Any(p => p.EndsWith("a.txt")) && got.Any(p => p.EndsWith("ref-original.txt")) && got.Any(p => p.EndsWith("owned-out.bin"))
+                && got.Any(p => p.TrimEnd('\\').EndsWith("folder1"));
+            Check("D3 drag-out onto accepting window -> Copy, all 4 items received (files + folder), shelf emptied, reference originals intact",
+                _otherEffect == "Copy" && names && s.Count == 0 && File.Exists(a) && File.Exists(refFile) && Directory.Exists(folder)
+                && AppLog().Contains("DropResult=Copy"), $"effect={_otherEffect} received=[{string.Join("; ", got)}]\n" + Dump(s));
+            Thread.Sleep(2000);
+            Check("D3b owned file is still there shortly after drag-out (receiver may copy asynchronously)", File.Exists(owned.Path), owned.Path);
+            if (OpenCard(W, H)) Shot("5-after", W, H);
+            int wait = 32_000 - (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+            if (wait > 0) Thread.Sleep(wait);
+            Check("D3c owned file and its Shelf\\<guid> folder are deleted ~30 s after drag-out",
+                !File.Exists(owned.Path) && !Directory.Exists(Path.GetDirectoryName(owned.Path)!), owned.Path);
+        }
+    }
+
 
     bool RecoveredOk(List<ShelfEntry> items, List<string> ownedPaths) =>
         items.Count == ownedPaths.Count && items.All(x => x.Kind == Owned && File.Exists(x.Path)

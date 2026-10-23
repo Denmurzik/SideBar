@@ -55,7 +55,7 @@ sealed partial class ShelfService
                 // пустой список ссылок удалил бы все Shelf\<guid>, а они часто единственные копии: не чистим,
                 // файл откладываем, а Owned-элементы восстанавливаем из самих папок
                 Log.Write("shelf.json unreadable: moving the file aside, recovering owned items from Shelf folders");
-                QuarantineStateFile();
+                _store.Quarantine();
                 model = new ShelfModel(RecoverOwned());
                 recovered = model.Items.Count;
             }
@@ -96,16 +96,6 @@ sealed partial class ShelfService
         catch (Exception e) { Log.Write("owned recovery failed: " + Log.Describe(e)); }
         result.Sort((a, b) => a.AddedAt.CompareTo(b.AddedAt));
         return result.Count > ShelfModel.MaxItems ? result[^ShelfModel.MaxItems..] : result;
-    }
-
-    void QuarantineStateFile()
-    {
-        try
-        {
-            var bad = Path.Combine(Path.GetDirectoryName(StatePath)!, "shelf.bad.json");
-            File.Move(StatePath, bad, overwrite: true);
-        }
-        catch (Exception e) { Log.Write("shelf.json quarantine failed: " + Log.Describe(e)); }
     }
 
     /// <summary>Файл или каталог: каталоги кладутся в стопку ссылками.</summary>

@@ -12,8 +12,6 @@ namespace SideBar;
 
 public partial class App : Application
 {
-    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
-
     CardWindow? _window;
     DispatcherQueue? _ui;
     MouseHook? _hook;
@@ -46,6 +44,7 @@ public partial class App : Application
         _shelf = new ShelfService();
         _shelf.Load();
         _window = new CardWindow();
+        _window.BindShelf(_shelf);
         _window.Settled += s => { if (s == PanelState.Hidden) _trimmer.OnHidden(); };
 
         var (layout, mode, scale, primary) = Measure();
@@ -59,7 +58,7 @@ public partial class App : Application
         // после первого Show (его ставит в очередь Initialize): к этому времени у окна есть дочерние HWND WinUI
         _ui.TryEnqueue(() =>
         {
-            _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => false, OnForeignDrag);   // свой вынос — Task 4
+            _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => DragOut.IsActive, OnForeignDrag);
             Log.Write("ready");
         });
         _hook = new MouseHook(OnMouse);
@@ -146,7 +145,7 @@ public partial class App : Application
         var hook = _hook;
         if (machine is null) return;
 
-        bool button = (GetAsyncKeyState(0x01) & 0x8000) != 0;
+        bool button = PrimaryButton.IsDown();
         PxRect primary;
         bool hidden;
         lock (_gate) { primary = _primary; hidden = machine.State == PanelState.Hidden; }
