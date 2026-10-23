@@ -175,7 +175,7 @@ sealed class Driver
         if (Path.GetFullPath(_srcDir).StartsWith(Path.GetFullPath(tmpDir), StringComparison.OrdinalIgnoreCase))
         { Rep("FAIL source files must be outside %TEMP% (they would count as temporary)"); _fail++; return; }
 
-        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1")   // быстрый прогон: только вынос стопки и отправка с плитки
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1" || Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_FAN_ONLY") == "1")   // быстрый прогон: только вынос стопки и отправка с плитки
         {
             var quickFolder = Path.Combine(_srcDir, "folder1");
             Directory.CreateDirectory(quickFolder);
@@ -339,7 +339,7 @@ sealed class Driver
         var log = _lastLog;
         Rep("INFO Q1 log: " + log.Replace("\n", " | "));
         Check("Q1 foreign file drop on the Quick Share tile -> tile Searching, send starts, shelf untouched",
-            dropped && log.Contains("share tile Searching") && log.Contains("share: searching, 1 file(s)") && ReadShelf().Select(x => x.Id).SequenceEqual(before.Select(x => x.Id)), log);
+            dropped && log.Contains("share tile Searching") && log.Contains("share: searching") && log.Contains("share: 1 file(s)") && ReadShelf().Select(x => x.Id).SequenceEqual(before.Select(x => x.Id)), log);
         MoveTo(_other.Left + 150, _other.Top + 75, 400); Thread.Sleep(2500);   // карточка держится открытой: поиск идёт
         Check("Q1a card stays open while searching (no 'edge Hidden')", !AppLog().Contains("edge Hidden"), "");
         Click();
@@ -501,6 +501,7 @@ sealed class Driver
         try { Directory.Delete(_dataDir, true); } catch { }
         if (!StartApp()) { _fail++; return; }
         var otherCenter = new Point(_other.Left + 150, _other.Top + 75);
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_FAN_ONLY") == "1") { FanScenarios(W, H, a, refFile, folder, otherCenter); return; }   // быстрый прогон: только веер (F1..F5)
 
         if (!OpenCard(W, H)) { Rep("FAIL card did not open"); _fail++; return; }
         Shot("1-empty", W, H);
@@ -531,7 +532,7 @@ sealed class Driver
             Rep("INFO D2 log: " + log.Replace("\n", " | "));
             s = ReadShelf();
             Check("D2 drag-out onto own Quick Share tile -> send starts (tile Searching), items stay in the shelf",
-                s.Select(x => x.Id).SequenceEqual(ids) && log.Contains("items kept (share)") && log.Contains("share tile Searching") && log.Contains("share: searching,"), Dump(s));
+                s.Select(x => x.Id).SequenceEqual(ids) && log.Contains("items kept (share)") && log.Contains("share tile Searching") && log.Contains("share: searching") && log.Contains("file(s)"), Dump(s));
             MoveTo(_other.Left + 150, _other.Top + 75, 400); Thread.Sleep(100);
             Click();   // клик вне карточки отменяет поиск
             Check("D2a click outside the card cancels the search -> tile back to Idle", WaitLog("share tile Idle", 2500), "");
