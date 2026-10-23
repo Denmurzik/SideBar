@@ -179,3 +179,64 @@ public class UpdateTests
         Assert.False(Parse("{\"tag_name\":\"v0.2.0\",\"html_url\":\"https://github.com/Denmurzik/SideBar/releases/tag/v0.2.0\",\"body\":\"" + pad + "\"}", out _));
     }
 }
+
+public class UpdateOutcomeTests
+{
+    private static readonly Version Cur = new(0, 1, 0);
+    private static byte[] Body(string tag) => System.Text.Encoding.UTF8.GetBytes(
+        $"{{\"tag_name\":\"{tag}\",\"html_url\":\"https://github.com/Denmurzik/SideBar/releases/tag/{tag}\"}}");
+
+    [Fact]
+    public void Newer_release_is_available()
+    {
+        var o = UpdateOutcome.Evaluate(200, Body("v0.2.0"), Cur);
+        Assert.Equal(UpdateKind.Available, o.Kind);
+        Assert.Equal(new Version(0, 2, 0), o.Release!.Version);
+        Assert.Equal("update: available", o.LogLine);
+    }
+
+    [Fact]
+    public void Same_release_is_up_to_date() =>
+        Assert.Equal(UpdateKind.UpToDate, UpdateOutcome.Evaluate(200, Body("v0.1.0"), Cur).Kind);
+
+    [Fact]
+    public void Private_repo_404_is_not_found_and_logged_as_such()
+    {
+        var o = UpdateOutcome.Evaluate(404, "{\"message\":\"Not Found\"}"u8, Cur);
+        Assert.Equal(UpdateKind.NotFound, o.Kind);
+        Assert.Equal("update: not available (404)", o.LogLine);
+    }
+
+    [Fact]
+    public void Server_error_and_garbage_are_failed_without_body_in_log()
+    {
+        var e = UpdateOutcome.Evaluate(500, "secret"u8, Cur);
+        Assert.Equal(UpdateKind.Failed, e.Kind);
+        Assert.Equal("update: failed (http 500)", e.LogLine);
+        var g = UpdateOutcome.Evaluate(200, "not json"u8, Cur);
+        Assert.Equal(UpdateKind.Failed, g.Kind);
+        Assert.Equal("update: failed (parse)", g.LogLine);
+    }
+
+    [Fact]
+    public void Older_release_is_not_available() =>
+        Assert.Equal(UpdateKind.UpToDate, UpdateOutcome.Evaluate(200, Body("v0.0.9"), Cur).Kind);
+
+    [Fact]
+    public void State_store_roundtrips_and_tolerates_garbage()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "sb-upd-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var p = Path.Combine(dir, "update-state.json");
+            var store = new UpdateStateStore(p);
+            Assert.Null(store.LastCheck);
+            var t = new DateTimeOffset(2026, 10, 23, 12, 0, 0, TimeSpan.Zero);
+            store.SaveLastCheck(t);
+            Assert.Equal(t, new UpdateStateStore(p).LastCheck);
+            File.WriteAllText(p, "{{{");
+            Assert.Null(store.LastCheck);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+}
