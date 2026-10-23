@@ -326,7 +326,8 @@ public sealed class OfficialCertificateStore(
         var salts = self.ConsumedSalts.Select(s => (ushort)((s[0] << 8) | s[1])).ToHashSet();
         var identity = new CertificateIdentity(
             new PrivateCertificateData(self.SecretKey, self.MetadataEncryptionKey, self.KeyPairPkcs8, salts),
-            peers.Select(c => new PublicCertificateData(c.SecretId, c.SecretKey, c.PublicKey, c.KeyTag, c.EncryptedMetadata))
+            peers.Select(c => new PublicCertificateData(
+                    c.SecretId, c.SecretKey, c.PublicKey, c.KeyTag, c.EncryptedMetadata, c.MetadataEncryptionKey))
                 .ToList());
         var summary = new CertificateSummary(
             "SELF_SHARE", privates.Count, publics.Count, peers.Count, nextExpiry, names);

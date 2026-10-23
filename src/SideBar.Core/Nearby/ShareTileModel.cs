@@ -41,11 +41,20 @@ public sealed class ShareTileModel
     /// <summary>Пометка к успешному итогу (например, отправлена только часть файлов).</summary>
     public string? Note { get; private set; }
 
-    /// <summary>Карточка удерживается открытой, пока плитка не вернулась в покой, чтобы итог (галочка/крестик/подсказка) был виден.</summary>
-    public bool HoldsCardOpen => State != ShareTileState.Idle;
+    /// <summary>
+    /// Карточка удерживается открытой на поиске, выборе и показе итога (галочка/крестик/подсказка), чтобы он был виден.
+    /// Идущая передача карточку не держит: она уходит, отправка продолжается, плитка покажет прогресс при следующем открытии.
+    /// </summary>
+    public bool HoldsCardOpen => State is not (ShareTileState.Idle or ShareTileState.Sending);
 
     /// <summary>Карточка не прячется, пока идёт поиск, выбор или передача.</summary>
     public bool KeepsCardOpen => State is ShareTileState.Searching or ShareTileState.Choosing or ShareTileState.Sending;
+
+    /// <summary>Клик вне карточки отменяет только поиск и выбор; идущая передача (Sending) и итоги не отменяются.</summary>
+    public bool CancelsOnOutsideClick => State is ShareTileState.Searching or ShareTileState.Choosing;
+
+    /// <summary>Карточка сейчас на экране; итог (Done/Failed/подсказка) не истекает, пока её не видно. По умолчанию true.</summary>
+    public bool CardVisible { get; set; } = true;
 
     /// <summary>A consent covers the tile: the choose timeout does not run meanwhile (the time is given back).</summary>
     public bool Covered { get; set; }
@@ -125,11 +134,21 @@ public sealed class ShareTileModel
         Changed?.Invoke();
     }
 
+    /// <summary>Таймер плитки стоял и запускается снова: простой не засчитывается как прошедшее время.</summary>
+    public void Resume(DateTimeOffset now)
+    {
+        _clock = now;
+        // итог мог прийти, пока таймер стоял (_clock устарел): полные ResultDuration отсчитываются с запуска таймера
+        if (State is ShareTileState.Done or ShareTileState.Failed or ShareTileState.OfficialAppRunning) _finishedAt = now;
+    }
+
     public void Tick(DateTimeOffset now)
     {
         var elapsed = now - _clock;
         _clock = now;
         if (Covered && State is ShareTileState.Searching or ShareTileState.Choosing && elapsed > TimeSpan.Zero) _startedAt += elapsed;
+        if (!CardVisible && State is ShareTileState.Done or ShareTileState.Failed or ShareTileState.OfficialAppRunning && elapsed > TimeSpan.Zero)
+            _finishedAt += elapsed;   // итог ждёт, пока карточка не появится на экране
         switch (State)
         {
             case ShareTileState.Searching or ShareTileState.Choosing when now - _startedAt >= ChooseTimeout:

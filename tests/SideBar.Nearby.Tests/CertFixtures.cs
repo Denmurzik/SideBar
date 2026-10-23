@@ -13,7 +13,7 @@ internal static class CertFixtures
     public sealed record Device(string Name, PrivateCertificate Private, PublicCertificate Public);
 
     public static Device NewDevice(
-        string name, int visibility = 2, TimeSpan? offset = null, TimeSpan? lifetime = null)
+        string name, int visibility = 2, TimeSpan? offset = null, TimeSpan? lifetime = null, byte[]? bluetoothMac = null)
     {
         var secret = RandomNumberGenerator.GetBytes(32);
         var metadataKey = RandomNumberGenerator.GetBytes(14);
@@ -21,9 +21,11 @@ internal static class CertFixtures
         var start = Now + (offset ?? TimeSpan.Zero) - TimeSpan.FromHours(1);
         var end = start + (lifetime ?? TimeSpan.FromHours(72));
 
-        // EncryptedMetadata message with only field 1 (device name).
+        // EncryptedMetadata message with field 1 (device name) and, when given, field 4 (Bluetooth MAC).
         var nameBytes = Encoding.UTF8.GetBytes(name);
-        byte[] plain = [0x0A, (byte)nameBytes.Length, .. nameBytes];
+        byte[] plain = bluetoothMac is null
+            ? [0x0A, (byte)nameBytes.Length, .. nameBytes]
+            : [0x0A, (byte)nameBytes.Length, .. nameBytes, (4 << 3) | 2, (byte)bluetoothMac.Length, .. bluetoothMac];
 
         var aesKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, metadataKey, 32, [], []);
         var nonce = HKDF.DeriveKey(HashAlgorithmName.SHA256, secret, 12, [], []);

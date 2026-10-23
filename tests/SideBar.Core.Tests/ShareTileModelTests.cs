@@ -334,4 +334,78 @@ public class ShareTileModelTests
         m.DeviceFound(new DeviceView("pixel", "Pixel 9", ShareDeviceKind.Phone));
         Assert.False(m.Devices.Single(d => d.Id == "pixel").IsOwn);
     }
+
+    [Fact]
+    public void Outside_click_cancels_only_searching_and_choosing()
+    {
+        var m = Searching();
+        Assert.True(m.CancelsOnOutsideClick);
+        m.DeviceFound(Dev(1));
+        Assert.True(m.CancelsOnOutsideClick);
+        m.Choose("id1");
+        Assert.False(m.CancelsOnOutsideClick);
+        m.Finished(true, null);
+        Assert.False(m.CancelsOnOutsideClick);
+    }
+
+    [Fact]
+    public void Sending_does_not_hold_card_open_but_results_do()
+    {
+        var m = Sending();
+        Assert.False(m.HoldsCardOpen);
+        m.Finished(true, null);
+        Assert.True(m.HoldsCardOpen);
+    }
+
+    [Fact]
+    public void Result_is_kept_while_card_hidden_and_expires_after_visible()
+    {
+        var m = Sending();
+        m.CardVisible = false;
+        m.Tick(T0);
+        m.Finished(false, "x");
+        m.Tick(T0.AddMinutes(5));
+        Assert.Equal(ShareTileState.Failed, m.State);
+        m.CardVisible = true;
+        m.Tick(T0.AddMinutes(5).AddSeconds(1));
+        Assert.Equal(ShareTileState.Failed, m.State);
+        m.Tick(T0.AddMinutes(5).AddSeconds(2));
+        Assert.Equal(ShareTileState.Idle, m.State);
+    }
+
+    [Fact]
+    public void Result_after_untimed_sending_gets_full_duration_from_resume()
+    {
+        var m = Sending();
+        m.Finished(true, null);
+        m.Resume(T0.AddMinutes(5));
+        m.Tick(T0.AddMinutes(5).AddSeconds(1));
+        Assert.Equal(ShareTileState.Done, m.State);
+        m.Tick(T0.AddMinutes(5).AddSeconds(2));
+        Assert.Equal(ShareTileState.Idle, m.State);
+    }
+
+    [Fact]
+    public void Result_while_visible_with_ticks_expires_after_duration()
+    {
+        var m = Sending();
+        m.Tick(T0.AddSeconds(1));
+        m.Finished(true, null);
+        m.Tick(T0.AddSeconds(2));
+        Assert.Equal(ShareTileState.Done, m.State);
+        m.Tick(T0.AddSeconds(3));
+        Assert.Equal(ShareTileState.Idle, m.State);
+    }
+
+    [Fact]
+    public void Resume_while_searching_changes_only_the_clock()
+    {
+        var m = Searching();
+        m.Tick(T0.AddSeconds(10));
+        m.Resume(T0.AddSeconds(58));
+        m.Tick(T0.AddSeconds(59));
+        Assert.Equal(ShareTileState.Searching, m.State);
+        m.Tick(T0.AddSeconds(60));
+        Assert.Equal(ShareTileState.Failed, m.State);
+    }
 }

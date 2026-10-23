@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using SideBar.Nearby.Crypto;
 using SideBar.Nearby.Wire;
 using Conn = SideBar.Nearby.Protocol.Connections;
@@ -53,8 +55,9 @@ public static class SendSession
 
             // 1. ConnectionRequest + UKEY2 ClientInit (plaintext).
             var info = identity.CreateEndpointInfo(options.DeviceName, options.DeviceKind);
+            var endpointId = MdnsName.NewEndpointId();
             await connection.WritePlainAsync(
-                OfflineFrames.ConnectionRequest(MdnsName.NewEndpointId(), options.DeviceName, info.Encode()), hct);
+                OfflineFrames.ConnectionRequest(endpointId, options.DeviceName, info.Encode()), hct);
 
             using var ukey = new Ukey2Client();
             await connection.WritePlainAsync(ukey.CreateClientInit(), hct);
@@ -124,6 +127,11 @@ public static class SendSession
                         if (!connection.WriteFaulted) await TrySendCancelAsync(connection);
                         return new TransferResult(TransferStatus.Failed, [], TransferDetails.Unverified);
                     }
+                    // Only now, and only for a verified peer, may the receiver move us to the Wi-Fi LAN address it names
+                    // (an earlier offer waits until here). Not tied to RequireVerifiedPeer: an unverified peer would turn
+                    // the connector into a "dial any address" oracle whatever the caller's options say.
+                    if (peerVerified && options.ConnectWifiLanUpgradeAsync is { } connect)
+                        connection.AllowBandwidthUpgrade(endpointId, connect);
                     introduced = true;
                     await connection.SendSharingAsync(SharingFrames.Introduction(entries.Select(e => e.Metadata), texts.Select(t => t.Metadata)), ct);
                     observer.Status("Introduction sent, waiting for the receiver to accept...");
@@ -147,6 +155,22 @@ public static class SendSession
         finally
         {
             foreach (var entry in entries) entry.Dispose();
+        }
+    }
+
+    /// <summary>A plain TCP connection: the <see cref="SessionOptions.ConnectWifiLanUpgradeAsync"/> for real sessions.</summary>
+    public static async Task<Stream> ConnectWifiLanAsync(IPEndPoint endpoint, CancellationToken ct)
+    {
+        var client = new TcpClient(endpoint.AddressFamily);
+        try
+        {
+            await client.ConnectAsync(endpoint, ct).ConfigureAwait(false);
+            return client.GetStream(); // owns the socket: disposing the stream closes it
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
         }
     }
 

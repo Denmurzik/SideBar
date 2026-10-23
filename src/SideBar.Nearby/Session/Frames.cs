@@ -44,6 +44,25 @@ internal static class OfflineFrames
     public static Conn.OfflineFrame Disconnection() =>
         Wrap(Conn.V1Frame.Types.FrameType.Disconnection, v1 => v1.Disconnection = new Conn.DisconnectionFrame());
 
+    public static Conn.OfflineFrame BandwidthUpgrade(
+        Conn.BandwidthUpgradeNegotiationFrame.Types.EventType type, Action<Conn.BandwidthUpgradeNegotiationFrame>? fill = null) =>
+        Wrap(Conn.V1Frame.Types.FrameType.BandwidthUpgradeNegotiation, v1 =>
+        {
+            v1.BandwidthUpgradeNegotiation = new Conn.BandwidthUpgradeNegotiationFrame { EventType = type };
+            fill?.Invoke(v1.BandwidthUpgradeNegotiation);
+        });
+
+    public static Conn.OfflineFrame BandwidthUpgradeClientIntroduction(string endpointId) =>
+        BandwidthUpgrade(Conn.BandwidthUpgradeNegotiationFrame.Types.EventType.ClientIntroduction, bwu =>
+            bwu.ClientIntroduction = new Conn.BandwidthUpgradeNegotiationFrame.Types.ClientIntroduction { EndpointId = endpointId });
+
+    /// <summary>Tells the peer its offered upgrade path did not work for us; the session stays where it is.</summary>
+    public static Conn.OfflineFrame BandwidthUpgradeFailure(Conn.BandwidthUpgradeNegotiationFrame.Types.UpgradePathInfo? info) =>
+        BandwidthUpgrade(Conn.BandwidthUpgradeNegotiationFrame.Types.EventType.UpgradeFailure, bwu =>
+        {
+            if (info is not null) bwu.UpgradePathInfo = info;
+        });
+
     public static Conn.OfflineFrame PayloadChunk(
         Conn.PayloadTransferFrame.Types.PayloadHeader header, long offset, ReadOnlySpan<byte> body, bool last)
     {
