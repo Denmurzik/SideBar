@@ -2,13 +2,13 @@ namespace SideBar.Core.Motion;
 
 /// <summary>
 /// Dock-style bounce of the hidden card on an incoming request: three hops out from the screen edge with decaying height.
-/// Pure function of time. The result is a fraction of the Peek distance and may exceed 1 (the first hops go past a normal Peek).
+/// Pure function of time; heights are absolute, in epx (scaled to pixels by the caller).
 /// Each hop rises fast (ease-out), then falls on a parabola; the next hop starts at the landing.
 /// </summary>
 public static class Bounce
 {
-    /// <summary>Hop heights as fractions of the Peek distance.</summary>
-    public static readonly IReadOnlyList<double> Peaks = [1.4, 0.75, 0.35];
+    /// <summary>Hop heights in epx.</summary>
+    public static readonly IReadOnlyList<double> Peaks = [40, 22, 10];
 
     public static readonly TimeSpan Duration = TimeSpan.FromSeconds(1.3);
 
@@ -30,7 +30,8 @@ public static class Bounce
 
     public static double HopLength(int index) => HopSeconds[index];
 
-    public static double OffsetFraction(double tSeconds)
+    /// <summary>Distance of the card from its hidden position, in epx.</summary>
+    public static double OffsetEpx(double tSeconds)
     {
         if (tSeconds <= 0 || tSeconds >= Duration.TotalSeconds) return 0;
         double start = 0;

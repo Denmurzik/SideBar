@@ -29,7 +29,8 @@ public sealed partial class CardWindow : Window
     bool _ticking, _raiseOnTick;
     bool _bouncing;
     double _bounceStart;
-    int _bouncePeekPx, _bounceLeft;
+    double _bounceScale;
+    int _bounceLeft;
     bool IsShown { get => _shown; set { _shown = value; ZOrder.Visible = value; } }
     bool _shown;
     AlwaysActiveAcrylicBackdrop? _backdrop;
@@ -193,8 +194,7 @@ public sealed partial class CardWindow : Window
     public bool StartBounce()
     {
         if (_mode != EdgeMode.Slide || _state != PanelState.Hidden || _ticking || _bouncing) return false;
-        // не дальше ширины карточки
-        _bouncePeekPx = (int)Math.Min(_layout.LeftFor(PanelState.Hidden) - _layout.LeftFor(PanelState.Peek), _layout.CardWidthPx / Bounce.Peaks.Max());
+        _bounceScale = _scale;
         _bounceLeft = _layout.LeftFor(PanelState.Hidden);
         _bounceStart = Now;
         _bouncing = true;
@@ -304,7 +304,7 @@ public sealed partial class CardWindow : Window
         {
             double t = Now - _bounceStart;
             if (t >= Bounce.Duration.TotalSeconds) { EndBounce(); return; }
-            _bounceLeft = _layout.LeftFor(PanelState.Hidden) - (int)Math.Round(Bounce.OffsetFraction(t) * _bouncePeekPx);
+            _bounceLeft = _layout.LeftFor(PanelState.Hidden) - (int)Math.Min(Math.Round(Bounce.OffsetEpx(t) * _bounceScale), _layout.CardWidthPx);
             WindowFrame.MoveTo(_hwnd, _bounceLeft, _layout.Top);
 #if DEBUG
             Log.Write($"bounce t={t:F3} offset={_layout.LeftFor(PanelState.Hidden) - _bounceLeft}px");
