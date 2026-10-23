@@ -27,6 +27,9 @@ public sealed partial class CardWindow : Window
     EdgeMode _mode;
     PanelState _state = PanelState.Hidden;
     bool _ticking, _raiseOnTick;
+    bool _bouncing;
+    double _bounceStart;
+    int _bouncePeekPx, _bounceLeft;
     bool IsShown { get => _shown; set { _shown = value; ZOrder.Visible = value; } }
     bool _shown;
     AlwaysActiveAcrylicBackdrop? _backdrop;
@@ -181,8 +184,38 @@ public sealed partial class CardWindow : Window
         });
     }
 
+    /// <summary>
+    /// Прыжок скрытой карточки у края (входящий запрос): три подскока с затуханием, затем снова скрыта. Только Slide и только из Hidden;
+    /// состояние автомата не меняется. false — прыжка не будет. Если курсор дошёл до края, <see cref="SetState"/> передаёт окно пружине с текущей позиции.
+    /// </summary>
+    public bool StartBounce()
+    {
+        if (_mode != EdgeMode.Slide || _state != PanelState.Hidden || _ticking || _bouncing) return false;
+        // не дальше ширины карточки
+        _bouncePeekPx = (int)Math.Min(_layout.LeftFor(PanelState.Hidden) - _layout.LeftFor(PanelState.Peek), _layout.CardWidthPx / Bounce.Peaks.Max());
+        _bounceLeft = _layout.LeftFor(PanelState.Hidden);
+        _bounceStart = Now;
+        _bouncing = true;
+        PlaceAt(_bounceLeft);
+        Show();
+        StartTicking();
+        return true;
+    }
+
+    void EndBounce()
+    {
+        _bouncing = false;
+        CompositionTarget.Rendering -= OnTick;
+        _ticking = false;
+        AppWindow.Hide();
+        IsShown = false;
+        WorkingSet.Trim();
+        Settled?.Invoke(PanelState.Hidden);
+    }
+
     public void Relayout(CardLayout layout, EdgeMode mode, double scale)
     {
+        _bouncing = false;
         if (_ticking)
         {
             CompositionTarget.Rendering -= OnTick;
@@ -212,6 +245,12 @@ public sealed partial class CardWindow : Window
         if (s == prev) return;
         _state = s;
         double now = Now;
+        if (_bouncing)
+        {
+            // обычный автомат главнее прыжка: пружина продолжает с текущей позиции, без скачка
+            _bouncing = false;
+            _pos.Reset(_bounceLeft);
+        }
 
         if (_mode == EdgeMode.Slide)
         {
@@ -259,6 +298,16 @@ public sealed partial class CardWindow : Window
 
     void OnTick(object? sender, object e)
     {
+        if (_bouncing)
+        {
+            double t = Now - _bounceStart;
+            if (t >= Bounce.Duration.TotalSeconds) { EndBounce(); return; }
+            _bounceLeft = _layout.LeftFor(PanelState.Hidden) - (int)Math.Round(Bounce.OffsetFraction(t) * _bouncePeekPx);
+            WindowFrame.MoveTo(_hwnd, _bounceLeft, _layout.Top);
+            if (IsShown && _raiseOnTick) ZOrder.RaiseToTop(_hwnd);
+            _raiseOnTick = false;
+            return;
+        }
         bool slide = _mode == EdgeMode.Slide;
         var spring = slide ? _pos : _fade;
         spring.Step(Now);

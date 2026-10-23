@@ -16,17 +16,17 @@ namespace SideBar.Sharing;
 /// </summary>
 sealed record PromptSpec(string[] Lines, string? Pin, (string Label, Action Act)[] Buttons, TimeSpan? AutoHide);
 
-/// <summary>Где стоит открытая карточка (физические px), масштаб, рабочая область основного экрана и зона веера, которую панель обходит.</summary>
-readonly record struct PromptAnchor(PxRect Card, double Scale, PxRect Work, PxRect? Avoid);
+/// <summary>Где стоит открытая карточка (физические px; скрытая считается стоящей там же), масштаб и рабочая область основного экрана.</summary>
+readonly record struct PromptAnchor(PxRect Card, double Scale, PxRect Work);
 
 /// <summary>
-/// Запасной путь, когда уведомления Windows недоступны: панель того же стиля, что карточка, слева от неё.
+/// Запасной путь, когда уведомления Windows недоступны: панель того же стиля, что карточка, над ней (правые края совпадают), а если сверху нет места — под ней.
 /// Показывает все живые записи стопкой: запросы согласия сверху (у каждого свои PIN и кнопки), ниже — итоговые заметки;
 /// не больше <see cref="MaxEntries"/>, лишними становятся самые старые заметки. Окно не активируется. Только UI-поток.
 /// </summary>
 public sealed partial class PromptWindow : Window
 {
-    const double WidthEpx = 300, GapEpx = 8;
+    const double WidthEpx = 300, GapEpx = 8, PaddingEpx = 24;   // PaddingEpx: поля вокруг содержимого
     const int MaxEntries = 4;
 
     sealed class Entry(PromptSpec spec, CancellationToken ct)
@@ -200,22 +200,33 @@ public sealed partial class PromptWindow : Window
         return new Border { Child = panel };
     }
 
+    /// <summary>Ширина карточки, если в неё влезают кнопки всех записей; иначе обычная ширина панели.</summary>
+    int PreferredWidth(PromptAnchor a)
+    {
+        int card = a.Card.Right - a.Card.Left, normal = (int)Math.Round(WidthEpx * a.Scale);
+        if (card <= 0) return normal;
+        foreach (var view in _views.Values)
+            if (view.Child is StackPanel panel)
+                foreach (var row in panel.Children.OfType<StackPanel>().Where(r => r.Orientation == Orientation.Horizontal))
+                {
+                    row.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+                    if (row.DesiredSize.Width + PaddingEpx > card / a.Scale) return normal;
+                }
+        return card;
+    }
+
     void Place()
     {
-        var a = _anchor?.Invoke() ?? new PromptAnchor(default, 1.0, new PxRect(0, 0, 1920, 1080), null);
+        var a = _anchor?.Invoke() ?? new PromptAnchor(default, 1.0, new PxRect(0, 0, 1920, 1080));
         Root.UpdateLayout();
-        Root.Measure(new Windows.Foundation.Size(WidthEpx, double.PositiveInfinity));
-        int w = (int)Math.Round(WidthEpx * a.Scale), h = (int)Math.Round(Root.DesiredSize.Height * a.Scale);
+        int w = PreferredWidth(a);
+        Root.Measure(new Windows.Foundation.Size(w / a.Scale, double.PositiveInfinity));
+        int h = (int)Math.Round(Root.DesiredSize.Height * a.Scale);
         int gap = (int)Math.Round(GapEpx * a.Scale);
-        int left = a.Card.Left - gap - w;
-        int top = (a.Card.Top + a.Card.Bottom) / 2 - h / 2;
-        if (a.Avoid is { } fan && left < fan.Right && left + w > fan.Left && top < fan.Bottom && top + h > fan.Top)
-        {
-            // веер занимает тот же столбец: панель выше него, а если места нет — ниже
-            top = fan.Top - gap - h;
-            if (top < a.Work.Top) top = fan.Bottom + gap;
-        }
-        // окно не выходит за рабочую область (4 записи, размещение под веером)
+        int left = a.Card.Right - w;                // правые края совпадают
+        int top = a.Card.Top - gap - h;             // стопка растёт вверх от карточки
+        if (top < a.Work.Top + gap) top = a.Card.Bottom + gap;   // сверху нет места: под карточкой
+        // окно не выходит за рабочую область (4 записи)
         top = Math.Max(a.Work.Top + gap, Math.Min(top, a.Work.Bottom - gap - h));
         left = Math.Max(a.Work.Left, left);
         AppWindow.MoveAndResize(new RectInt32(left, top, w, h));

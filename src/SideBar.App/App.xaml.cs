@@ -107,7 +107,7 @@ public partial class App : Application
                     _prompt = new PromptWindow();
                     _prompt.SetAnchor(() =>
                     {
-                        lock (_gate) return new PromptAnchor(_layout.CardRectAt(_layout.LeftFor(PanelState.Open)), _scale, Displays.PrimaryWorkArea(), _fanZone);
+                        lock (_gate) return new PromptAnchor(_layout.CardRectAt(_layout.LeftFor(PanelState.Open)), _scale, Displays.PrimaryWorkArea());
                     });
                     _prompt.ZoneChanged += OnPromptZone;
                 }
@@ -220,7 +220,7 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Входящий запрос (UI-поток): карточка выглядывает на 1.5 с, если она скрыта; открытую или уже выглядывающую не трогаем.</summary>
+    /// <summary>Входящий запрос (UI-поток): скрытая карточка подпрыгивает у края (Dock-стиль); открытую или выглядывающую не трогаем.</summary>
     void PeekForRequest()
     {
         var machine = _machine;
@@ -229,17 +229,9 @@ public partial class App : Application
         lock (_gate) { if (machine.State != PanelState.Hidden) return; primary = _primary; }
         if (FullscreenProbe.IsBusy(primary)) return;   // то же подавление, что у края
         if (!_bump.TryBump(Environment.TickCount64)) return;
-        Log.Write("edge Peek (incoming)");
-        _trimmer.OnShown();
-        _window.SetState(PanelState.Peek);
-        _ = Task.Delay(1500).ContinueWith(_ => _ui?.TryEnqueue(() =>
-        {
-            bool stillHidden;
-            lock (_gate) stillHidden = machine.State == PanelState.Hidden;
-            if (!stillHidden) return;
-            _window?.SetState(PanelState.Hidden);
-            CardHidden();
-        }), TaskScheduler.Default);
+        if (!_window.StartBounce()) return;   // InPlace или карточка уже в движении
+        Log.Write("edge Bounce (incoming)");
+        _trimmer.OnShown();   // Settled(Hidden) в конце прыжка вернёт обрезку working set
     }
 
     /// <summary>Клик по стопке (UI-поток): показать веер слева от открытой карточки.</summary>
@@ -272,7 +264,6 @@ public partial class App : Application
             _fanZone = zone;
             _machine?.SetKeepOpenRect(zone);
         }
-        _prompt?.Reposition();   // панель обходит веер
         Log.Write(zone is { } z ? $"fan open {z.Left},{z.Top},{z.Right},{z.Bottom}" : "fan closed");
     }
 
