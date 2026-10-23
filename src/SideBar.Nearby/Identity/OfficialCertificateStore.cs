@@ -220,7 +220,12 @@ public sealed class OfficialCertificateStore(
         lock (_gate)
         {
             if (_disposed) return;
-            if (_watcher is null) TryCreateWatcher();
+            if (_watcher is null)
+            {
+                TryCreateWatcher();
+                // Files written before the watcher existed produced no events: reload once.
+                if (_watcher is not null) NotifyFilesChanged();
+            }
             if (_nextExpiry is { } expiry && now() >= expiry && !_expiryRaised)
             {
                 _expiryRaised = true;

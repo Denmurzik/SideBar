@@ -489,16 +489,19 @@ public class OfficialCertificateStoreTests : IDisposable
     public void Missing_directory_at_start_is_retried_on_the_tick_and_picked_up_later()
     {
         using var store = NewStore();
+        var raised = 0;
+        store.FilesChanged += () => Interlocked.Increment(ref raised);
         store.StartWatching(); // the Sharing directory does not exist yet
         var debounce = _timers.Timers[0];
 
         var pc = NewDevice("PC");
         WriteSharingDir(Dir, [pc.Private], [pc.Public]); // Quick Share gets installed
         _timers.Timers[1].Fire(); // 10-minute tick creates the watcher
-        File.AppendAllText(Path.Combine(Dir, "preferences.json"), " ");
 
-        SpinWait.SpinUntil(() => debounce.Due == TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10));
+        // No file write after the tick: files that predate the watcher still trigger one reload.
         Assert.Equal(TimeSpan.FromSeconds(2), debounce.Due);
+        debounce.Fire();
+        Assert.Equal(1, raised);
     }
 
     [Fact]
