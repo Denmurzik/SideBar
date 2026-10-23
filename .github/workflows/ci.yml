@@ -123,6 +123,7 @@ jobs:
 
           if (Get-Process SideBar -ErrorAction SilentlyContinue) { Fail 'SideBar was launched in silent mode' }
 
+          New-Item -Path $runKey -Force | Out-Null
           New-ItemProperty -Path $runKey -Name SideBar -Value "$dir\SideBar.exe" -PropertyType String -Force | Out-Null
           $p = Start-Process "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
           if ($p.ExitCode -ne 0) { Fail "uninstall exit $($p.ExitCode)" }
