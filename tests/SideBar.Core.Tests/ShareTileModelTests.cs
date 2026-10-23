@@ -256,4 +256,46 @@ public class ShareTileModelTests
         m.Finished(true, null);
         Assert.Equal(5, n);
     }
+
+    [Fact]
+    public void Success_note_is_kept_until_idle()
+    {
+        var m = Sending();
+        m.Finished(true, "Отправлены только первые 100 файлов");
+        Assert.Equal(ShareTileState.Done, m.State);
+        Assert.Equal("Отправлены только первые 100 файлов", m.Note);
+        Assert.Null(m.FailReason);
+        m.Tick(T0.AddSeconds(2));
+        Assert.Null(m.Note);
+    }
+
+    [Fact]
+    public void HoldsCardOpen_covers_results_until_idle()
+    {
+        var m = Sending();
+        m.Finished(false, "x");
+        Assert.False(m.KeepsCardOpen);
+        Assert.True(m.HoldsCardOpen);
+        m.Tick(T0.AddSeconds(2));
+        Assert.False(m.HoldsCardOpen);
+    }
+
+    [Fact]
+    public void Card_stays_open_in_Failed_until_Idle()
+    {
+        var layout = new Layout.CardLayout(new PxRect(0, 0, 1920, 1080), 1.0);
+        var machine = new Edge.EdgeStateMachine(layout, Edge.EdgeMode.Slide);
+        Assert.Equal(PanelState.Open, machine.Update(new Edge.EdgeInput(1919, 540, false, false, 0)));
+        var m = Searching();
+        machine.HoldOpen = m.HoldsCardOpen;
+        m.Tick(T0.AddSeconds(60));   // Failed: подсказка «Устройства не найдены»
+        Assert.Equal(ShareTileState.Failed, m.State);
+        machine.HoldOpen = m.HoldsCardOpen;
+        long t = 1000;
+        for (; t <= 3000; t += 100) Assert.Null(machine.Update(new Edge.EdgeInput(100, 100, false, false, t)));
+        m.Tick(T0.AddSeconds(61.5));
+        machine.HoldOpen = m.HoldsCardOpen;
+        Assert.Null(machine.Update(new Edge.EdgeInput(100, 100, false, false, 4000)));
+        Assert.Equal(PanelState.Hidden, machine.Update(new Edge.EdgeInput(100, 100, false, false, 4300)));
+    }
 }

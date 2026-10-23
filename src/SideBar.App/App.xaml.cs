@@ -75,7 +75,7 @@ public partial class App : Application
         {
             try
             {
-                _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => DragOut.IsActive, OnForeignDrag, IsOverShareTile, OnShareDrop);
+                _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => DragOut.IsActive, OnForeignDrag, IsOverShareTile, () => _share?.State != ShareTileState.Sending, OnShareDrop);
             }
             catch (Exception e)
             {
@@ -128,7 +128,7 @@ public partial class App : Application
     {
         bool keep = _share!.KeepsCardOpen;
         _shareActive = keep;
-        lock (_gate) { if (_machine is not null) _machine.HoldOpen = keep; }
+        lock (_gate) { if (_machine is not null) _machine.HoldOpen = _share.HoldsCardOpen; }
         if (_share.State == ShareTileState.Idle) _shareTimer?.Stop();
         else _shareTimer?.Start();
         // поиск и соединение больше не нужны ни при итоге, ни при отмене; Cancel идемпотентна

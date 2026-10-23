@@ -19,13 +19,17 @@ sealed class NearbyService : IDisposable
     public const int MaxFiles = 100;
 
     static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
+    /// <summary>Устройство, пропавшее из mDNS, исчезает из плитки не сразу: повторное объявление (Lost/Found) не должно мигать.</summary>
+    static readonly TimeSpan LostGrace = TimeSpan.FromSeconds(2);
 
     readonly DispatcherQueue _ui;
     readonly object _gate = new();
     readonly Dictionary<string, DiscoveredEndpoint> _endpoints = new(StringComparer.OrdinalIgnoreCase);
     QuickShareBrowser? _browser;
     CancellationTokenSource? _cts;
-    List<string> _files = [];
+    readonly Dictionary<string, Timer> _lostGrace = new(StringComparer.OrdinalIgnoreCase);
+    Task<List<string>> _files = Task.FromResult(new List<string>());
+    bool _truncated;
     int _epoch;
 
     public event Action<DeviceView>? DeviceFound;
@@ -40,25 +44,23 @@ sealed class NearbyService : IDisposable
         NearbyLog.Log = e => Log.Write($"nearby {e.Kind}{(e.Size is { } n ? " " + n : "")}{(e.Value is { } v ? " " + v : "")}");
     }
 
-    /// <summary>Каталоги раскрываются в файлы (до <see cref="MaxFiles"/>); недоступные пути пропускаются.</summary>
-    public static List<string> ExpandFiles(IEnumerable<string> paths)
+    /// <summary>Каталоги раскрываются в файлы (до <see cref="MaxFiles"/>); недоступные пути пропускаются. Вызывать вне UI-потока.</summary>
+    public static List<string> ExpandFiles(IEnumerable<string> paths, out bool truncated)
     {
         var files = new List<string>();
+        truncated = false;
         foreach (var path in paths)
         {
-            if (files.Count >= MaxFiles) break;
             try
             {
                 if (File.Exists(path)) files.Add(path);
                 else if (Directory.Exists(path))
-                    foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
-                    {
-                        if (files.Count >= MaxFiles) break;
-                        files.Add(f);
-                    }
+                    foreach (var f in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)) files.Add(f);
             }
             catch (Exception e) { Log.Write("share path skipped: " + Log.Describe(e)); }
+            if (files.Count > MaxFiles) break;
         }
+        if (files.Count > MaxFiles) { truncated = true; files.RemoveRange(MaxFiles, files.Count - MaxFiles); }
         return files;
     }
 
@@ -67,26 +69,31 @@ sealed class NearbyService : IDisposable
     {
         Cancel();
         int epoch;
+        Task<List<string>> files;
         lock (_gate)
         {
             epoch = ++_epoch;
-            _files = ExpandFiles(paths);
             _endpoints.Clear();
+            // перечисление каталогов может быть долгим: не на UI-потоке
+            files = _files = Task.Run(() => ExpandFiles(paths, out _truncated));
         }
-        if (_files.Count == 0)
+        _ = files.ContinueWith(t =>
         {
-            Log.Write("share: nothing to send");
-            Post(epoch, () => Finished?.Invoke(false, Strings.NothingToSend));
-            return;
-        }
-        Log.Write($"share: searching, {_files.Count} file(s)");
+            if (t.IsFaulted || t.Result.Count == 0)
+            {
+                Log.Write("share: nothing to send");
+                Post(epoch, () => Finished?.Invoke(false, Strings.NothingToSend));
+            }
+            else Log.Write($"share: {t.Result.Count} file(s)");
+        }, TaskScheduler.Default);
+        Log.Write("share: searching");
         try
         {
             var browser = new QuickShareBrowser();
             browser.Found += e => OnFound(epoch, e);
             browser.Lost += name => OnLost(epoch, name);
             browser.Start();
-            lock (_gate) _browser = browser;
+            lock (_gate) { if (epoch == _epoch) _browser = browser; else browser.Dispose(); }
         }
         catch (Exception e)
         {
@@ -104,6 +111,7 @@ sealed class NearbyService : IDisposable
         {
             if (epoch != _epoch) return;
             _endpoints[endpoint.InstanceName] = endpoint;
+            if (_lostGrace.Remove(endpoint.InstanceName, out var pending)) pending.Dispose();
         }
         Log.Write($"share: device found, kind {endpoint.Kind}");
         var view = new DeviceView(endpoint.InstanceName, endpoint.DisplayName, Map(endpoint.Kind));
@@ -114,9 +122,18 @@ sealed class NearbyService : IDisposable
     {
         lock (_gate)
         {
-            if (epoch != _epoch || !_endpoints.Remove(name)) return;
+            if (epoch != _epoch || !_endpoints.ContainsKey(name) || _lostGrace.ContainsKey(name)) return;
+            _lostGrace[name] = new Timer(_ =>
+            {
+                lock (_gate)
+                {
+                    if (epoch != _epoch || !_lostGrace.Remove(name, out var t)) return;
+                    t.Dispose();
+                    _endpoints.Remove(name);
+                }
+                Post(epoch, () => DeviceLost?.Invoke(name));
+            }, null, LostGrace, Timeout.InfiniteTimeSpan);
         }
-        Post(epoch, () => DeviceLost?.Invoke(name));
     }
 
     static bool IncludeLocal =>
@@ -144,32 +161,43 @@ sealed class NearbyService : IDisposable
         _ => ShareDeviceKind.Other,
     };
 
-    /// <summary>Выбрано устройство: поиск останавливается, начинается отправка. UI-поток.</summary>
+    /// <summary>Выбрано устройство: поиск останавливается, начинается отправка. Повторный вызов в том же сеансе игнорируется. UI-поток.</summary>
     public void Choose(string id)
     {
         DiscoveredEndpoint? target;
         int epoch;
         CancellationToken ct;
-        List<string> files;
+        Task<List<string>> files;
+        bool truncated;
         QuickShareBrowser? browser;
         lock (_gate)
         {
-            if (!_endpoints.TryGetValue(id, out target)) return;
+            if (_cts is not null) return;   // отправка уже идёт
             epoch = _epoch;
+            if (!_endpoints.TryGetValue(id, out target))
+            {
+                // устройство пропало между кликом и выбором: плитка не должна остаться в «отправке»
+                Log.Write("share: chosen device is gone");
+                Post(epoch, () => Finished?.Invoke(false, Strings.SendFailed));
+                return;
+            }
             files = _files;
+            truncated = _truncated;
             browser = _browser;
             _browser = null;
             _cts = new CancellationTokenSource();
             ct = _cts.Token;
         }
         try { browser?.Dispose(); } catch (Exception e) { Log.Write("share: browser dispose failed: " + Log.Describe(e)); }
-        _ = Task.Run(() => SendAsync(epoch, target, files, ct));
+        _ = Task.Run(() => SendAsync(epoch, target, files, truncated, ct));
     }
 
-    async Task SendAsync(int epoch, DiscoveredEndpoint target, List<string> files, CancellationToken ct)
+    async Task SendAsync(int epoch, DiscoveredEndpoint target, Task<List<string>> filesTask, bool truncated, CancellationToken ct)
     {
         try
         {
+            var files = await filesTask.ConfigureAwait(false);
+            if (files.Count == 0) return;   // «нечего отправлять» уже показано
             using var client = new TcpClient { NoDelay = true };
             using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
@@ -180,9 +208,11 @@ sealed class NearbyService : IDisposable
             var observer = new ProgressObserver(f => Post(epoch, () => Progress?.Invoke(f)));
             var result = await SendSession.SendFilesAsync(client.GetStream(), options, files, observer, ct).ConfigureAwait(false);
             Log.Write($"share: result {result.Status}");
+            // TimedOut приходит из Task 2 (защита сессий); сравнение по имени, пока ветки не слиты
             var reason = result.Status switch
             {
-                TransferStatus.Completed => null,
+                TransferStatus.Completed => truncated ? Strings.OnlyFirstFiles : null,
+                _ when result.Status.ToString() == "TimedOut" => Strings.SendTimedOut,
                 TransferStatus.RejectedByPeer => Strings.SendRejected,
                 TransferStatus.CancelledByPeer => Strings.SendCancelled,
                 _ => Strings.SendFailed,
@@ -213,6 +243,8 @@ sealed class NearbyService : IDisposable
             _browser = null;
             _cts = null;
             _endpoints.Clear();
+            foreach (var t in _lostGrace.Values) t.Dispose();
+            _lostGrace.Clear();
         }
         try { cts?.Cancel(); } catch (Exception e) { Log.Write("share: cancel failed: " + Log.Describe(e)); }
         try { browser?.Dispose(); } catch (Exception e) { Log.Write("share: browser dispose failed: " + Log.Describe(e)); }

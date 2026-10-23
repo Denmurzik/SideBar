@@ -32,6 +32,12 @@ public sealed class ShareTileModel
     public double Fraction { get; private set; }
     public string? FailReason { get; private set; }
 
+    /// <summary>Пометка к успешному итогу (например, отправлена только часть файлов).</summary>
+    public string? Note { get; private set; }
+
+    /// <summary>Карточка удерживается открытой, пока плитка не вернулась в покой, чтобы итог (галочка/крестик/подсказка) был виден.</summary>
+    public bool HoldsCardOpen => State != ShareTileState.Idle;
+
     /// <summary>Карточка не прячется, пока идёт поиск, выбор или передача.</summary>
     public bool KeepsCardOpen => State is ShareTileState.Searching or ShareTileState.Choosing or ShareTileState.Sending;
 
@@ -87,6 +93,7 @@ public sealed class ShareTileModel
         if (!valid) return;
         _finishedAt = _clock;
         FailReason = ok ? null : reason;
+        Note = ok ? reason : null;
         State = ok ? ShareTileState.Done : ShareTileState.Failed;
         Changed?.Invoke();
     }
@@ -124,5 +131,6 @@ public sealed class ShareTileModel
         ChosenId = null;
         Fraction = 0;
         FailReason = null;
+        Note = null;
     }
 }

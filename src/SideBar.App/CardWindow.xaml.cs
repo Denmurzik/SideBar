@@ -62,7 +62,7 @@ public sealed partial class CardWindow : Window
     // Свой drag (XAML DragStarting) в OLE-цель карточки не приходит: WinUI ведёт его сама, поэтому приём - событиями плитки.
     void QsTile_DragOver(object sender, DragEventArgs e)
     {
-        if (!DragOut.IsActive) return;
+        if (!DragOut.IsActive || _share?.State == ShareTileState.Sending) return;
         e.AcceptedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy;
         e.DragUIOverride.Caption = Strings.SendToDevice;
         e.DragUIOverride.IsGlyphVisible = false;
@@ -71,7 +71,7 @@ public sealed partial class CardWindow : Window
 
     void QsTile_Drop(object sender, DragEventArgs e)
     {
-        if (!DragOut.IsActive) return;
+        if (!DragOut.IsActive || _share?.State == ShareTileState.Sending) return;
         var paths = DragOut.CarriedPaths;
         if (paths.Count == 0) return;
         DragOut.KeepItemsAfterDrop();   // отправка не уносит элементы из стопки
@@ -90,8 +90,12 @@ public sealed partial class CardWindow : Window
     void RenderShare()
     {
         if (_share is null) return;
-        bool busy = Share.Render(_share);
-        QsLogo.Visibility = busy ? Visibility.Collapsed : Visibility.Visible;
+        try
+        {
+            bool busy = Share.Render(_share);
+            QsLogo.Visibility = busy ? Visibility.Collapsed : Visibility.Visible;
+        }
+        catch (Exception e) { Log.Write("share render failed: " + Log.Describe(e)); }   // не должен пропустить обновление HoldOpen у остальных подписчиков
     }
 
     /// <summary>Плитка Quick Share в физических пикселях экрана (для drop на плитку); null, пока карточка не построена. UI-поток.</summary>

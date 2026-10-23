@@ -67,7 +67,7 @@ public sealed partial class ShareTileView : UserControl
                 RingTrack.Visibility = Visibility.Collapsed;
                 RingArc.Data = null;
                 ChosenIcon.Glyph = CheckGlyph;
-                ChosenText.Text = Strings.Sent;
+                ChosenText.Text = m.Note ?? Strings.Sent;
                 break;
             case ShareTileState.Failed:
                 RingTrack.Visibility = Visibility.Collapsed;

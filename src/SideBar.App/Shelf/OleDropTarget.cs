@@ -22,7 +22,7 @@ internal partial interface IDropTarget
 [GeneratedComClass]
 internal sealed partial class ShelfDropTarget(
     ShelfService shelf, Func<bool> isOwnDragActive, Action<bool> onDragActive,
-    Func<int, int, bool> isOverShareTile, Action<IReadOnlyList<string>> onShareDrop) : IDropTarget
+    Func<int, int, bool> isOverShareTile, Func<bool> canShare, Action<IReadOnlyList<string>> onShareDrop) : IDropTarget
 {
     const int Copy = ShelfService.DropEffectCopy;
     bool _accepts, _hasFiles;
@@ -52,7 +52,7 @@ internal sealed partial class ShelfDropTarget(
         try
         {
             bool own = isOwnDragActive();
-            if (isOverShareTile(pt.X, pt.Y)) return (own || _hasFiles) ? offered & Copy : 0;
+            if (isOverShareTile(pt.X, pt.Y)) return canShare() && (own || _hasFiles) ? offered & Copy : 0;   // идёт отправка: новую не начинаем
             return _accepts && !own ? offered & Copy : 0;
         }
         catch (Exception e)
@@ -81,7 +81,7 @@ internal sealed partial class ShelfDropTarget(
             {
                 if (isOverShareTile(pt.X, pt.Y))
                 {
-                    var paths = own ? DragOut.CarriedPaths : OleData.ReadHDrop(dataObj);
+                    var paths = canShare() ? (own ? DragOut.CarriedPaths : OleData.ReadHDrop(dataObj)) : [];
                     if (paths.Count > 0)
                     {
                         if (own) DragOut.KeepItemsAfterDrop();   // отправка не уносит элементы из стопки
@@ -116,11 +116,11 @@ static unsafe partial class OleDropTarget
     /// мы их заменяем: карточке нужен только наш приём). Вызывать на UI-потоке после создания содержимого окна.
     /// </summary>
     public static DropRegistration Register(nint topHwnd, ShelfService shelf, Func<bool> isOwnDragActive, Action<bool> onDragActive,
-        Func<int, int, bool> isOverShareTile, Action<IReadOnlyList<string>> onShareDrop)
+        Func<int, int, bool> isOverShareTile, Func<bool> canShare, Action<IReadOnlyList<string>> onShareDrop)
     {
         int hrInit = OleInitialize(0);   // S_OK / S_FALSE (уже инициализировано) — оба годятся
         var wrappers = new StrategyBasedComWrappers();
-        var target = new ShelfDropTarget(shelf, isOwnDragActive, onDragActive, isOverShareTile, onShareDrop);
+        var target = new ShelfDropTarget(shelf, isOwnDragActive, onDragActive, isOverShareTile, canShare, onShareDrop);
         nint unk = wrappers.GetOrCreateComInterfaceForObject(target, CreateComInterfaceFlags.None);
         Marshal.QueryInterface(unk, in IID_IDropTarget, out nint dt);
         var reg = new DropRegistration(topHwnd, unk, dt, target);

@@ -352,6 +352,8 @@ sealed class Driver
 
         var cli = Environment.GetEnvironmentVariable("SIDEBAR_E2E_CLI");
         if (string.IsNullOrEmpty(cli)) { Rep("SKIP Q3 loopback e2e (set SIDEBAR_E2E_CLI to SideBar.Nearby.Cli.exe and run a Debug app)"); return; }
+        if (!_exe.Contains(Path.DirectorySeparatorChar + "Debug" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        { Rep("SKIP Q3 loopback e2e needs a Debug app (name filter)"); return; }
         LoopbackE2E(W, H, cli);
     }
 
@@ -386,6 +388,10 @@ sealed class Driver
             var slot0 = new Point(QsTile(W, H).X - (int)(48 * _scale), QsTile(W, H).Y - (int)(52 * _scale));
             MoveTo(slot0.X, slot0.Y, 400); Thread.Sleep(300);
             Shot("6-choosing", W, H);
+            // Имена устройств в лог не пишутся, поэтому опора - фильтр SIDEBAR_NEARBY_ONLY_NAME, который есть только в Debug-сборке:
+            // с Release-приложением в плитке мог бы оказаться настоящий телефон, и клик по первой иконке ушёл бы на него.
+            if (!_exe.Contains(Path.DirectorySeparatorChar + "Debug" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            { Rep("SKIP Q3b not a Debug app: the name filter is unavailable, not clicking (a real phone could be in the tile)"); return; }
             Click();
             bool sending = WaitLog("share tile Sending", 3000);
             bool done = sending && WaitLog("share tile Done", 40000);
