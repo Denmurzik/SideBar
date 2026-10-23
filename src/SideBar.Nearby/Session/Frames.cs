@@ -97,11 +97,12 @@ internal static class SharingFrames
         Wrap(Share.V1Frame.Types.FrameType.PairedKeyResult,
             v1 => v1.PairedKeyResult = new Share.PairedKeyResultFrame { Status = status });
 
-    public static Share.Frame Introduction(IEnumerable<Share.FileMetadata> files) =>
+    public static Share.Frame Introduction(IEnumerable<Share.FileMetadata> files, IEnumerable<Share.TextMetadata>? texts = null) =>
         Wrap(Share.V1Frame.Types.FrameType.Introduction, v1 =>
         {
             v1.Introduction = new Share.IntroductionFrame();
             v1.Introduction.FileMetadata.AddRange(files);
+            if (texts is not null) v1.Introduction.TextMetadata.AddRange(texts);
         });
 
     public static Share.Frame Response(Share.ConnectionResponseFrame.Types.Status status) =>

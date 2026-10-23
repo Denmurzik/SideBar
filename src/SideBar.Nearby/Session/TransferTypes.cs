@@ -15,7 +15,18 @@ public enum TransferStatus
     Failed,
 }
 
-public sealed record TransferResult(TransferStatus Status, IReadOnlyList<string> Files, string? Detail = null);
+public sealed record TransferResult(TransferStatus Status, IReadOnlyList<string> Files, string? Detail = null)
+{
+    /// <summary>Texts and links received in a completed transfer; their values are never logged or put into <see cref="Detail"/>.</summary>
+    public IReadOnlyList<ReceivedText> ReceivedTexts { get; init; } = [];
+}
+
+public enum TextKind { Text, Url, Address, Phone }
+
+public sealed record ReceivedText(TextKind Kind, string Value);
+
+/// <summary>A text announced in the Introduction; the content (and its preview title) is deliberately not exposed here.</summary>
+public sealed record IncomingText(TextKind Kind, long Size);
 
 public sealed record TransferProgress(string FileName, long FileBytes, long FileTotal, long TotalBytes, long TotalSize);
 
@@ -68,4 +79,9 @@ public sealed record IncomingTransfer(string Pin, string? SenderName, IReadOnlyL
 {
     /// <summary>Whether the sender's identity was verified through a paired certificate; always false until M4.</summary>
     public bool Verified { get; init; }
+
+    public IReadOnlyList<IncomingText> Texts { get; init; } = [];
+
+    /// <summary>The Introduction also carries Wi-Fi credentials; they are ignored (never accepted).</summary>
+    public bool HasWifiCredentials { get; init; }
 }

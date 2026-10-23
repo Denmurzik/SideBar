@@ -8,12 +8,31 @@ namespace SideBar.Nearby.Session;
 /// <summary>Client (sending) side of a Quick Share transfer over an already connected stream.</summary>
 public static class SendSession
 {
-    public static async Task<TransferResult> SendFilesAsync(
+    public static Task<TransferResult> SendFilesAsync(
         Stream stream,
         SessionOptions options,
         IReadOnlyList<string> files,
         ITransferObserver? observer = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default) =>
+        SendAsync(stream, options, files, [], observer, ct);
+
+    /// <summary>Sends one text or link as a BYTES payload announced by a TextMetadata (the sender-side counterpart of text receiving).</summary>
+    public static Task<TransferResult> SendTextAsync(
+        Stream stream,
+        SessionOptions options,
+        string text,
+        TextKind kind = TextKind.Text,
+        ITransferObserver? observer = null,
+        CancellationToken ct = default) =>
+        SendAsync(stream, options, [], [OutgoingText.Create(text, kind)], observer, ct);
+
+    private static async Task<TransferResult> SendAsync(
+        Stream stream,
+        SessionOptions options,
+        IReadOnlyList<string> files,
+        IReadOnlyList<OutgoingText> texts,
+        ITransferObserver? observer,
+        CancellationToken ct)
     {
         observer ??= new NullObserver();
         var identity = options.ResolvedIdentity;
@@ -26,6 +45,9 @@ public static class SendSession
         var hct = handshakeCts.Token;
         try
         {
+            if (texts.Any(t => t.Content.Length > options.MaxBytesPayload))
+                throw new InvalidDataException("A text to send is too large.");
+
             // Files are opened inside the try so that a failure on the Nth one still releases the first N-1.
             foreach (var path in files) entries.Add(OutgoingFile.Create(path));
 
@@ -87,13 +109,13 @@ public static class SendSession
                             throw new InvalidDataException("Response before Introduction.");
                         if (v1.ConnectionResponse is null)
                             throw new InvalidDataException("Response frame without a body.");
-                        return await HandleResponseAsync(connection, v1.ConnectionResponse.Status, entries, observer, options, ct);
+                        return await HandleResponseAsync(connection, v1.ConnectionResponse.Status, entries, texts, observer, options, ct);
                 }
 
                 if (!introduced && gotKeyEncryption && gotKeyResult)
                 {
                     introduced = true;
-                    await connection.SendSharingAsync(SharingFrames.Introduction(entries.Select(e => e.Metadata)), ct);
+                    await connection.SendSharingAsync(SharingFrames.Introduction(entries.Select(e => e.Metadata), texts.Select(t => t.Metadata)), ct);
                     observer.Status("Introduction sent, waiting for the receiver to accept...");
                 }
             }
@@ -133,12 +155,16 @@ public static class SendSession
         /// <summary>The abort is an explicit cancel by the peer, not just a disconnection or a read error.</summary>
         public volatile bool Explicit;
         public volatile bool SendFinished;
+
+        /// <summary>The peer cancelled after everything was sent but before it disconnected.</summary>
+        public volatile bool LateCancel;
     }
 
     private static async Task<TransferResult> HandleResponseAsync(
         NearbyConnection connection,
         Share.ConnectionResponseFrame.Types.Status status,
         List<OutgoingFile> entries,
+        IReadOnlyList<OutgoingText> texts,
         ITransferObserver observer,
         SessionOptions options,
         CancellationToken ct)
@@ -156,7 +182,7 @@ public static class SendSession
         var reader = Task.Run(() => WatchPeerAsync(connection, watch, sendCts, readerCts.Token));
         try
         {
-            try { await SendAllAsync(connection, entries, observer, sendCts.Token); }
+            try { await SendAllAsync(connection, entries, texts, observer, sendCts.Token); }
             catch (Exception e) when (!ct.IsCancellationRequested
                 && (e is OperationCanceledException || SessionErrors.IsHandled(e)))
             {
@@ -180,6 +206,9 @@ public static class SendSession
             catch (IOException) { }
             await Task.WhenAny(reader, Task.Delay(TimeSpan.FromSeconds(2), ct));
             ct.ThrowIfCancellationRequested();
+            // Wire behaviour above is unchanged; a cancel that came in after the last chunk only changes the verdict.
+            if (watch.LateCancel)
+                return new TransferResult(TransferStatus.CancelledByPeer, [], "Receiver cancelled the transfer.");
             return new TransferResult(TransferStatus.Completed, entries.Select(e => e.Metadata.Name).ToList());
         }
         finally
@@ -192,7 +221,8 @@ public static class SendSession
     }
 
     private static async Task SendAllAsync(
-        NearbyConnection connection, List<OutgoingFile> entries, ITransferObserver observer, CancellationToken ct)
+        NearbyConnection connection, List<OutgoingFile> entries, IReadOnlyList<OutgoingText> texts,
+        ITransferObserver observer, CancellationToken ct)
     {
         var total = entries.Sum(e => e.Size);
         long sentTotal = 0;
@@ -214,6 +244,12 @@ public static class SendSession
                 throw new SafeIoException("A file changed size while sending.");
             await connection.SendOfflineAsync(OfflineFrames.PayloadChunk(header, sent, [], last: true), ct);
         }
+        foreach (var text in texts)
+        {
+            var header = OfflineFrames.BytesHeader(text.Metadata.PayloadId, text.Content.Length);
+            await connection.SendOfflineAsync(OfflineFrames.PayloadChunk(header, 0, text.Content, last: false), ct);
+            await connection.SendOfflineAsync(OfflineFrames.PayloadChunk(header, text.Content.Length, [], last: true), ct);
+        }
     }
 
     private static async Task WatchPeerAsync(
@@ -232,8 +268,9 @@ public static class SendSession
             {
                 var frame = await connection.ReadSharingAsync(null, token);
                 // Once everything is sent, anything but the Disconnection is of no interest (as before).
-                if (frame?.V1?.Type == Share.V1Frame.Types.FrameType.Cancel && !watch.SendFinished)
+                if (frame?.V1?.Type == Share.V1Frame.Types.FrameType.Cancel)
                 {
+                    if (watch.SendFinished) { watch.LateCancel = true; continue; }
                     Abort(new TransferResult(TransferStatus.CancelledByPeer, [], "Receiver cancelled the transfer."), explicitCancel: true);
                     return;
                 }
@@ -244,7 +281,7 @@ public static class SendSession
                 Abort(SessionErrors.ToResult(e), explicitCancel: true);
                 return;
             }
-            catch (PeerCancelledException) { }
+            catch (PeerCancelledException) { watch.LateCancel = true; }
             catch (Exception e) when (SessionErrors.IsHandled(e))
             {
                 if (!watch.SendFinished) Abort(SessionErrors.ToResult(e));
@@ -254,6 +291,37 @@ public static class SendSession
     }
 
     private sealed class NullObserver : ITransferObserver;
+
+    private sealed class OutgoingText
+    {
+        public required Share.TextMetadata Metadata { get; init; }
+        public required byte[] Content { get; init; }
+
+        public static OutgoingText Create(string text, TextKind kind)
+        {
+            var content = System.Text.Encoding.UTF8.GetBytes(text);
+            // The preview title is content too; it is cut at a character boundary.
+            var title = text.Length <= 32 ? text : text[..(char.IsHighSurrogate(text[31]) ? 31 : 32)];
+            return new OutgoingText
+            {
+                Content = content,
+                Metadata = new Share.TextMetadata
+                {
+                    TextTitle = title,
+                    Type = kind switch
+                    {
+                        TextKind.Url => Share.TextMetadata.Types.Type.Url,
+                        TextKind.Address => Share.TextMetadata.Types.Type.Address,
+                        TextKind.Phone => Share.TextMetadata.Types.Type.PhoneNumber,
+                        _ => Share.TextMetadata.Types.Type.Text,
+                    },
+                    Size = content.Length,
+                    Id = Random.Shared.NextInt64(long.MinValue, long.MaxValue),
+                    PayloadId = Random.Shared.NextInt64(long.MinValue, long.MaxValue),
+                },
+            };
+        }
+    }
 
     private sealed class OutgoingFile : IDisposable
     {

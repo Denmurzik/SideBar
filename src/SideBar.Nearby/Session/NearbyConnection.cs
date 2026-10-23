@@ -26,6 +26,11 @@ internal sealed class NearbyConnection : IAsyncDisposable
     // In-flight BYTES payloads (negotiation messages), keyed by payload id.
     private readonly Dictionary<long, MemoryStream> _bytesPayloads = new();
 
+    // BYTES payloads that carry raw content (text) instead of a Quick Share frame: announced ids, then the finished ones.
+    private readonly HashSet<long> _rawExpected = new();
+    private readonly HashSet<long> _rawDone = new();
+    private Func<long, byte[], bool>? _onRawBytes;
+
     private readonly string _role;
 
     /// <summary>True once a write failed: the stream may be mid-frame and must not be written to again.</summary>
@@ -59,6 +64,16 @@ internal sealed class NearbyConnection : IAsyncDisposable
         else
             Log(direction, "PayloadTransfer", chunk.Body.Length,
                 (chunk.Flags & (int)Conn.PayloadTransferFrame.Types.PayloadChunk.Types.Flags.LastChunk) != 0 ? "LastChunk" : "Chunk");
+    }
+
+    /// <summary>
+    /// Announces BYTES payloads whose content is raw (not a Quick Share frame). A finished one goes to
+    /// <paramref name="onPayload"/>; when it returns true, <see cref="ReadSharingAsync"/> stops and returns null.
+    /// </summary>
+    public void ExpectRawBytes(IEnumerable<long> payloadIds, Func<long, byte[], bool> onPayload)
+    {
+        foreach (var id in payloadIds) _rawExpected.Add(id);
+        _onRawBytes = onPayload;
     }
 
     public async ValueTask<byte[]> ReadPlainAsync(CancellationToken ct)
@@ -162,9 +177,17 @@ internal sealed class NearbyConnection : IAsyncDisposable
                         throw new InvalidDataException("Payload frame without a chunk.");
                     if (header.Type == Conn.PayloadTransferFrame.Types.PayloadHeader.Types.PayloadType.Bytes)
                     {
+                        if (_rawDone.Contains(header.Id))
+                            throw new InvalidDataException("BYTES payload id repeated.");
                         var complete = AppendBytesChunk(transfer);
                         if (complete is not null)
                         {
+                            if (_rawExpected.Remove(header.Id))
+                            {
+                                _rawDone.Add(header.Id);
+                                if (_onRawBytes!(header.Id, complete)) return null;
+                                break;
+                            }
                             try
                             {
                                 var sharing = Share.Frame.Parser.ParseFrom(complete);

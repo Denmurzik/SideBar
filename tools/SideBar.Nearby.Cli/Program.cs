@@ -8,6 +8,7 @@ using SideBar.Nearby.Wire;
 const string Usage = """
     nearby discover [--timeout SEC] [--include-local]
     nearby send <file>... [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local]
+    nearby send --text "..." [--url] [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local]
     nearby receive [--out DIR] [--yes] [--name DEVICE_NAME] [--reannounce SEC]
     (--trace: print frame kinds and sizes in both directions, no payload content)
     """;
@@ -86,8 +87,13 @@ static async Task<int> Discover(CliOptions options, CancellationToken ct)
 
 static async Task<int> Send(CliOptions options, SessionOptions session, CancellationToken ct)
 {
+    var text = options.Value("--text");
     var files = options.Positional.Select(Path.GetFullPath).ToList();
-    if (files.Count == 0 || files.Any(f => !File.Exists(f))) return Fail("Specify existing files to send.");
+    if (text is not null)
+    {
+        if (files.Count > 0) return Fail("Specify either files or --text.");
+    }
+    else if (files.Count == 0 || files.Any(f => !File.Exists(f))) return Fail("Specify existing files to send.");
 
     var found = await BrowseAsync(TimeSpan.FromSeconds(options.Int("--timeout", 10)), options.Flag("--include-local"), ct);
     if (found.Count == 0) return Fail("No devices found.");
@@ -112,7 +118,11 @@ static async Task<int> Send(CliOptions options, SessionOptions session, Cancella
     using var client = new TcpClient { NoDelay = true };
     await client.ConnectAsync(target.Address, target.Port, ct);
 
-    var result = await SendSession.SendFilesAsync(client.GetStream(), session with { RemoteEndpointInfo = target.Info }, files, new ConsoleObserver(), ct);
+    var sessionToTarget = session with { RemoteEndpointInfo = target.Info };
+    var result = text is null
+        ? await SendSession.SendFilesAsync(client.GetStream(), sessionToTarget, files, new ConsoleObserver(), ct)
+        : await SendSession.SendTextAsync(client.GetStream(), sessionToTarget, text,
+            options.Flag("--url") ? TextKind.Url : TextKind.Text, new ConsoleObserver(), ct);
     Console.WriteLine();
     Console.WriteLine($"Result: {result.Status}{(result.Detail is null ? "" : " - " + result.Detail)}");
     return result.Status == TransferStatus.Completed ? 0 : 1;
@@ -158,6 +168,8 @@ static async Task<int> Receive(CliOptions options, SessionOptions session, Cance
         Console.WriteLine();
         Console.WriteLine($"Result: {result.Status}{(result.Detail is null ? "" : " - " + result.Detail)}");
         foreach (var file in result.Files) Console.WriteLine($"  saved {file}");
+        // Only the kind and the length: the content itself never reaches the console.
+        foreach (var received in result.ReceivedTexts) Console.WriteLine($"  received {received.Kind}, {received.Value.Length} chars");
     }
     return 0;
 }
@@ -166,6 +178,8 @@ static Task<bool> AskConsent(IncomingTransfer offer, bool autoAccept, Cancellati
 {
     Console.WriteLine($"{offer.SenderName ?? "Unknown device"} wants to send {offer.Files.Count} file(s), PIN {offer.Pin}:");
     foreach (var f in offer.Files) Console.WriteLine($"  {f.Name}  {f.Size:N0} bytes  {f.MimeType}");
+    foreach (var t in offer.Texts) Console.WriteLine($"  {t.Kind}  {t.Size:N0} bytes");
+    if (offer.HasWifiCredentials) Console.WriteLine("  (Wi-Fi credentials are ignored)");
     if (autoAccept) return Task.FromResult(true);
     Console.Write("Accept? [y/N] ");
     return Task.Run(() => string.Equals(Console.ReadLine()?.Trim(), "y", StringComparison.OrdinalIgnoreCase), ct);
@@ -190,7 +204,7 @@ internal sealed class ConsoleObserver : ITransferObserver
 
 internal sealed class CliOptions
 {
-    private static readonly HashSet<string> Flags = ["--yes", "--trace", "--include-local"];
+    private static readonly HashSet<string> Flags = ["--yes", "--trace", "--include-local", "--url"];
     private readonly Dictionary<string, string> _values = new();
     private readonly HashSet<string> _flags = [];
     public List<string> Positional { get; } = [];

@@ -1,3 +1,4 @@
+using System.Text;
 using SideBar.Nearby.Crypto;
 using SideBar.Nearby.Wire;
 using Conn = SideBar.Nearby.Protocol.Connections;
@@ -60,6 +61,9 @@ public static class ReceiveSession
             var saved = new List<string>();
             var introduced = false;
             long totalSize = 0, receivedTotal = 0;
+            var texts = new List<Share.TextMetadata>();
+            var pendingTexts = new HashSet<long>();
+            var receivedTexts = new Dictionary<long, byte[]>();
 
             async Task<bool> OnFileChunk(Conn.PayloadTransferFrame transfer)
             {
@@ -85,7 +89,14 @@ public static class ReceiveSession
                     target.Done = true;
                     saved.Add(target.Path);
                 }
-                return incoming.Values.All(t => t.Done);
+                return incoming.Values.All(t => t.Done) && pendingTexts.Count == 0;
+            }
+
+            bool OnTextPayload(long payloadId, byte[] content)
+            {
+                receivedTexts[payloadId] = content;
+                pendingTexts.Remove(payloadId);
+                return pendingTexts.Count == 0 && incoming.Values.All(t => t.Done);
             }
 
             try
@@ -98,7 +109,11 @@ public static class ReceiveSession
                         try { await connection.SendOfflineAsync(OfflineFrames.Disconnection(), ct); }
                         catch (IOException) { }
                         await WaitForPeerCloseAsync(connection, ct);
-                        return new TransferResult(TransferStatus.Completed, saved);
+                        var delivered = texts
+                            .Where(t => receivedTexts.ContainsKey(t.PayloadId))
+                            .Select(t => new ReceivedText(MapKind(t.Type), Encoding.UTF8.GetString(receivedTexts[t.PayloadId])))
+                            .ToList();
+                        return new TransferResult(TransferStatus.Completed, saved) { ReceivedTexts = delivered };
                     }
                     var v1 = frame.V1;
                     switch (v1?.Type)
@@ -117,7 +132,10 @@ public static class ReceiveSession
                             if (introduced)
                                 throw new InvalidDataException("Duplicate Introduction.");
                             introduced = true;
-                            var files = (v1.Introduction ?? throw new InvalidDataException("Introduction frame without a body.")).FileMetadata;
+                            var introduction = v1.Introduction ?? throw new InvalidDataException("Introduction frame without a body.");
+                            var files = introduction.FileMetadata;
+                            var announcedTexts = introduction.TextMetadata;
+                            var hasWifi = introduction.WifiCredentialsMetadata.Count > 0;
                             if (files.Count > options.MaxFilesPerIntroduction)
                             {
                                 await connection.SendSharingAsync(SharingFrames.Response(
@@ -132,11 +150,24 @@ public static class ReceiveSession
                                 if (!announced.Add(f.PayloadId))
                                     throw new InvalidDataException("Introduction repeats a payload id.");
                             }
-                            if (files.Count == 0)
+                            if (announcedTexts.Count > options.MaxConcurrentBytesPayloads)
+                                throw new InvalidDataException("Introduction has too many texts.");
+                            foreach (var t in announcedTexts)
                             {
-                                await connection.SendSharingAsync(SharingFrames.Response(
-                                    Share.ConnectionResponseFrame.Types.Status.UnsupportedAttachmentType), ct);
-                                return new TransferResult(TransferStatus.Failed, saved, "Introduction has no files.");
+                                if (t.Size < 0 || t.Size > options.MaxBytesPayload)
+                                    throw new InvalidDataException("Introduction has a text of an unsupported size.");
+                                if (!announced.Add(t.PayloadId))
+                                    throw new InvalidDataException("Introduction repeats a payload id.");
+                            }
+                            if (files.Count == 0 && announcedTexts.Count == 0)
+                            {
+                                // Wi-Fi credentials are not supported: decline instead of asking the user.
+                                await connection.SendSharingAsync(SharingFrames.Response(hasWifi
+                                    ? Share.ConnectionResponseFrame.Types.Status.Reject
+                                    : Share.ConnectionResponseFrame.Types.Status.UnsupportedAttachmentType), ct);
+                                return hasWifi
+                                    ? new TransferResult(TransferStatus.RejectedByPeer, saved, "wifi-unsupported")
+                                    : new TransferResult(TransferStatus.Failed, saved, "Introduction has no files.");
                             }
 
                             long needed = 0;
@@ -150,7 +181,11 @@ public static class ReceiveSession
                             }
 
                             var offer = new IncomingTransfer(pin, senderName,
-                                files.Select(f => new IncomingFile(f.Name, f.Size, f.MimeType)).ToList());
+                                files.Select(f => new IncomingFile(f.Name, f.Size, f.MimeType)).ToList())
+                            {
+                                Texts = announcedTexts.Select(t => new IncomingText(MapKind(t.Type), t.Size)).ToList(),
+                                HasWifiCredentials = hasWifi,
+                            };
                             observer.Status("Waiting for the user's decision...");
                             // Only the wait for the user is bounded; the peer's keep-alives are not read meanwhile.
                             var decision = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -179,6 +214,9 @@ public static class ReceiveSession
                                 incoming[f.PayloadId] = target;
                                 totalSize += f.Size;
                             }
+                            texts.AddRange(announcedTexts);
+                            foreach (var t in announcedTexts) pendingTexts.Add(t.PayloadId);
+                            if (pendingTexts.Count > 0) connection.ExpectRawBytes(pendingTexts.ToList(), OnTextPayload);
                             accepted = true;
                             await connection.SendSharingAsync(SharingFrames.Response(
                                 Share.ConnectionResponseFrame.Types.Status.Accept), ct);
@@ -220,6 +258,14 @@ public static class ReceiveSession
             return name;
         return request.EndpointName.IsEmpty ? null : request.EndpointName.ToStringUtf8();
     }
+
+    private static TextKind MapKind(Share.TextMetadata.Types.Type type) => type switch
+    {
+        Share.TextMetadata.Types.Type.Url => TextKind.Url,
+        Share.TextMetadata.Types.Type.Address => TextKind.Address,
+        Share.TextMetadata.Types.Type.PhoneNumber => TextKind.Phone,
+        _ => TextKind.Text,
+    };
 
     private sealed class NullObserver : ITransferObserver;
 

@@ -421,6 +421,29 @@ public sealed class RobustnessTests : IDisposable
         Assert.Equal(TransferStatus.CancelledByPeer, (await send).Status);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Sender_maps_cancel_after_send_finished_to_cancelled_by_peer(bool control)
+    {
+        var ct = Token();
+        using var link = await Link.OpenAsync(ct);
+        var file = MakeFile("late.bin", 10);
+        var send = SendSession.SendFilesAsync(link.Client, new SessionOptions("S"), [file], null, ct);
+        await using var peer = await FakeReceiver.AcceptAsync(link.Server, ct);
+        await peer.AcceptTransferAsync(ct);
+        await peer.ReadUntilLastFileChunkAsync(ct);
+        // Everything is sent: the sender now waits for our Disconnection and must keep doing so after the cancel.
+        if (control)
+            await peer.SendOfflineAsync(TestFrames.Control(1,
+                Conn.PayloadTransferFrame.Types.ControlMessage.Types.EventType.PayloadCanceled), ct);
+        else
+            await peer.SendSharingAsync(TestFrames.Of(Share.V1Frame.Types.FrameType.Cancel), ct);
+        await peer.SendOfflineAsync(OfflineFrames.Disconnection(), ct);
+
+        Assert.Equal(TransferStatus.CancelledByPeer, (await send).Status);
+    }
+
     private sealed class SlowProgress : ITransferObserver
     {
         // Holds the sender after its first chunk so the reader has surely seen the peer's cancel.

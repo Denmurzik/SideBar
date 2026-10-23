@@ -176,5 +176,17 @@ internal sealed class FakeReceiver : IAsyncDisposable
         }
     }
 
+    /// <summary>Reads until the last chunk of a FILE payload has arrived (the sender has then sent everything).</summary>
+    public Task ReadUntilLastFileChunkAsync(CancellationToken ct) =>
+        _connection.ReadSharingAsync(
+            t => Task.FromResult((t.PayloadChunk.Flags & (int)Conn.PayloadTransferFrame.Types.PayloadChunk.Types.Flags.LastChunk) != 0), ct);
+
+    /// <summary>Reads until the sender's Disconnection arrives; false when something else ends the session first.</summary>
+    public async Task<bool> ReadUntilDisconnectionAsync(CancellationToken ct)
+    {
+        try { await _connection.ReadSharingAsync(_ => Task.FromResult(false), ct); return false; }
+        catch (PeerDisconnectedException) { return true; }
+    }
+
     public ValueTask DisposeAsync() => _connection.DisposeAsync();
 }
