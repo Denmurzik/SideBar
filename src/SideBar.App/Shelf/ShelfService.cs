@@ -10,7 +10,17 @@ namespace SideBar.Shelf;
 sealed partial class ShelfService
 {
     public const int DropEffectNone = 0, DropEffectCopy = 1;
-    const int OwnedDeleteDelayMs = 30_000;
+    // приёмники читают файл позже (диалог замены в Проводнике, мессенджеры, <input type=file>, очереди копирования)
+    const int DefaultOwnedDeleteDelaySec = 600, BusyRetrySec = 120, BusyGiveUpSec = 3600;
+    readonly int _ownedDeleteDelayMs = ReadDeleteDelayMs();
+
+    static int ReadDeleteDelayMs()
+    {
+        // SIDEBAR_OWNED_DELETE_DELAY_SEC — для автотеста
+        var raw = Environment.GetEnvironmentVariable("SIDEBAR_OWNED_DELETE_DELAY_SEC");
+        var sec = int.TryParse(raw, out var v) && v >= 0 ? v : DefaultOwnedDeleteDelaySec;
+        return (int)Math.Min(sec * 1000L, int.MaxValue);
+    }
 
     [LibraryImport("kernel32.dll", EntryPoint = "GetLongPathNameW", StringMarshalling = StringMarshalling.Utf16)]
     private static unsafe partial uint GetLongPathName(string path, char* buffer, uint length);
@@ -176,7 +186,7 @@ sealed partial class ShelfService
         }
     }
 
-    /// <summary>Снимает элемент после успешного выноса; Owned-файл удаляется через 30 с (приёмник может копировать асинхронно), только внутри Shelf\.</summary>
+    /// <summary>Снимает элемент после успешного выноса; Owned-файл удаляется не раньше чем через 10 мин и только если не открыт, только внутри Shelf\.</summary>
     public void RemoveAfterDragOut(IReadOnlyCollection<Guid> ids)
     {
         var items = Model.Items.Where(i => ids.Contains(i.Id)).ToList();
@@ -227,7 +237,7 @@ sealed partial class ShelfService
     {
         var item = Model.Add(path, ShelfItemKind.Owned);
         if (item != null) added.Add(item);
-        else Materializer.TryDeleteDir(Path.GetDirectoryName(path)!);
+        else DeleteOwnedDir(path);
     }
 
     void Rollback(List<ShelfItem> added)
@@ -236,7 +246,7 @@ sealed partial class ShelfService
         {
             Model.Remove(item.Id);
             if (item.Kind == ShelfItemKind.Owned && IsStrictlyInsideShelf(item.Path))
-                Materializer.TryDeleteDir(Path.GetDirectoryName(item.Path)!);
+                DeleteOwnedDir(item.Path);
         }
     }
 
@@ -337,17 +347,49 @@ sealed partial class ShelfService
         catch { return false; }
     }
 
-    void ScheduleDelete(string path)
+    /// <summary>Удаляет каталог Shelf\&lt;guid&gt; файла, только если он Guid-папка строго внутри Shelf\ (как в ScheduleDelete).</summary>
+    void DeleteOwnedDir(string filePath)
+    {
+        var dir = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(dir) && IsStrictlyInsideShelf(dir) && Guid.TryParse(Path.GetFileName(dir), out _))
+            Materializer.TryDeleteDir(dir);
+    }
+
+    /// <summary>Файл не открыт никем (в т.ч. приёмником): открывается с FileShare.None.</summary>
+    static bool IsFree(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return true;
+            using var _ = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    /// <summary>Через задержку (≥ 10 мин по умолчанию) удаляет файл, если он не занят; занят — повтор раз в 2 мин до часа, дальше уберёт очистка при старте.</summary>
+    void ScheduleDelete(string path, int delayMs = -1, int waitedSec = 0)
     {
         Timer? timer = null;
         timer = new Timer(state =>
         {
             try
             {
-                File.Delete(path);
-                var dir = Path.GetDirectoryName(path)!;
-                if (IsStrictlyInsideShelf(dir) && Guid.TryParse(Path.GetFileName(dir), out _) && !Directory.EnumerateFileSystemEntries(dir).Any())
-                    Directory.Delete(dir);
+                if (!IsFree(path))
+                {
+                    if (waitedSec + BusyRetrySec <= BusyGiveUpSec)
+                    {
+                        ScheduleDelete(path, BusyRetrySec * 1000, waitedSec + BusyRetrySec);
+                    }
+                    else Log.Write("owned file still busy, left to the startup sweep");
+                }
+                else
+                {
+                    File.Delete(path);
+                    var dir = Path.GetDirectoryName(path)!;
+                    if (IsStrictlyInsideShelf(dir) && Guid.TryParse(Path.GetFileName(dir), out _) && !Directory.EnumerateFileSystemEntries(dir).Any())
+                        Directory.Delete(dir);
+                }
             }
             catch (Exception e)
             {
@@ -358,7 +400,7 @@ sealed partial class ShelfService
                 lock (_pendingGate) _pending.Remove(timer!);
                 timer!.Dispose();
             }
-        }, null, OwnedDeleteDelayMs, Timeout.Infinite);
+        }, null, delayMs < 0 ? _ownedDeleteDelayMs : delayMs, Timeout.Infinite);
         lock (_pendingGate) _pending.Add(timer);
     }
 
