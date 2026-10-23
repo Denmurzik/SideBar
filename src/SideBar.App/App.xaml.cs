@@ -145,10 +145,20 @@ public partial class App : Application
     void OnTileTick()
     {
         var now = DateTimeOffset.UtcNow;
+        if (_share is { } share) share.Covered = _recv.HasConsent;   // запрос закрывает плитку: таймаут выбора стоит
         _share?.Tick(now);
-        _recv.Tick(now);
+        _recv.Tick(now, NoteVisible());
         RefreshTileHold();
         AttentionTick();
+    }
+
+    // заметка на экране: карточка Open/Peek, плитка показывает именно её
+    bool NoteVisible()
+    {
+        PanelState state;
+        lock (_gate) state = _machine?.State ?? PanelState.Hidden;
+        bool shown = _debugOpen || state != PanelState.Hidden;
+        return shown && _recv.Content(_share?.State ?? ShareTileState.Idle) == TileContent.Note;
     }
 
     // карточка открыта, пока идёт отправка/показ итога или ждёт запрос (плюс 1.5 с после последнего решения)
@@ -170,9 +180,9 @@ public partial class App : Application
         PxRect primary;
         lock (_gate) { state = machine.State; primary = _primary; }
         if (!_attention.Due(Environment.TickCount64, _recv.HasConsent, state, () => FullscreenProbe.IsBusy(primary))) return;
-        if (_window.StartBounce())
+        if (_window.StartAttention())
         {
-            Log.Write("edge Bounce (attention)");
+            Log.Write("edge attention cue");
             _trimmer.OnShown();   // Settled(Hidden) в конце прыжка вернёт обрезку
         }
     }
@@ -244,8 +254,8 @@ public partial class App : Application
         lock (_gate) { if (machine.State != PanelState.Hidden) return; primary = _primary; }
         if (FullscreenProbe.IsBusy(primary)) return;   // то же подавление, что у края
         if (!_bump.TryBump(Environment.TickCount64)) return;
-        if (!_window.StartBounce()) return;   // InPlace или карточка уже в движении
-        Log.Write("edge Bounce (incoming)");
+        if (!_window.StartAttention()) return;   // карточка уже в движении
+        Log.Write("edge attention cue (incoming)");
         _trimmer.OnShown();   // Settled(Hidden) в конце прыжка вернёт обрезку working set
     }
 

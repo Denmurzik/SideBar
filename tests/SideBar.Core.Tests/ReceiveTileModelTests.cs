@@ -80,14 +80,53 @@ public class ReceiveTileModelTests
     }
 
     [Fact]
-    public void Note_hides_after_eight_seconds()
+    public void Visible_note_hides_after_eight_seconds()
     {
         var m = new ReceiveTileModel();
         m.AddNote(["x"], [], T0);
-        m.Tick(T0.AddSeconds(7.9));
+        m.Tick(T0, true);
+        m.Tick(T0.AddSeconds(7.9), true);
         Assert.NotNull(m.CurrentNote);
-        m.Tick(T0.AddSeconds(8.1));
+        m.Tick(T0.AddSeconds(8.1), true);
         Assert.Null(m.CurrentNote);
+    }
+
+    [Fact]
+    public void Unseen_note_is_kept_and_gets_its_full_time_once_visible()
+    {
+        var m = new ReceiveTileModel();
+        m.AddNote(["x"], [], T0);
+        m.Tick(T0, false);
+        m.Tick(T0.AddMinutes(5), false);
+        Assert.NotNull(m.CurrentNote);
+        m.Tick(T0.AddMinutes(5).AddSeconds(7), true);
+        Assert.NotNull(m.CurrentNote);
+        m.Tick(T0.AddMinutes(5).AddSeconds(8.5), true);
+        Assert.Null(m.CurrentNote);
+    }
+
+    [Fact]
+    public void Countdown_pauses_when_the_card_hides_again()
+    {
+        var m = new ReceiveTileModel();
+        m.AddNote(["x"], [], T0);
+        m.Tick(T0, true);
+        m.Tick(T0.AddSeconds(5), true);
+        m.Tick(T0.AddSeconds(60), false);   // hidden for a minute
+        m.Tick(T0.AddSeconds(62), true);
+        Assert.NotNull(m.CurrentNote);      // 5 + 2 s seen
+        m.Tick(T0.AddSeconds(65), true);
+        Assert.Null(m.CurrentNote);
+    }
+
+    [Fact]
+    public void Only_MaxNotes_unseen_notes_are_kept()
+    {
+        var m = new ReceiveTileModel();
+        for (int i = 0; i < ReceiveTileModel.MaxNotes + 3; i++) m.AddNote([$"n{i}"], [], T0);
+        int seen = 0;
+        while (m.CurrentNote is not null && seen < 100) { m.RemoveNote(m.CurrentNote.Id); seen++; }
+        Assert.Equal(ReceiveTileModel.MaxNotes, seen);
     }
 
     [Fact]
@@ -95,13 +134,15 @@ public class ReceiveTileModelTests
     {
         var m = new ReceiveTileModel();
         m.AddNote(["x"], [], T0);
-        m.SetHovered(true, T0.AddSeconds(5));
-        m.Tick(T0.AddSeconds(60));
+        m.Tick(T0, true);
+        m.Tick(T0.AddSeconds(6), true);   // 2 s left
+        m.SetHovered(true, T0.AddSeconds(6));
+        m.Tick(T0.AddSeconds(60), true);
         Assert.NotNull(m.CurrentNote);
         m.SetHovered(false, T0.AddSeconds(60));
-        m.Tick(T0.AddSeconds(62));
+        m.Tick(T0.AddSeconds(62), true);
         Assert.NotNull(m.CurrentNote);
-        m.Tick(T0.AddSeconds(63.1));
+        m.Tick(T0.AddSeconds(63.1), true);
         Assert.Null(m.CurrentNote);
     }
 

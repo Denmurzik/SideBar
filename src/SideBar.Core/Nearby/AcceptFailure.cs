@@ -6,6 +6,16 @@ namespace SideBar.Core.Nearby;
 public static class AcceptFailure
 {
     public static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(100);
+    public static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(2);
+    public static readonly TimeSpan LogInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>Delay before the next accept after <paramref name="failures"/> failures in a row (1 = first): 100 ms doubling to a 2 s cap.</summary>
+    public static TimeSpan Backoff(int failures)
+    {
+        if (failures <= 1) return RetryDelay;
+        double ms = RetryDelay.TotalMilliseconds * Math.Pow(2, Math.Min(failures - 1, 10));
+        return TimeSpan.FromMilliseconds(Math.Min(ms, MaxRetryDelay.TotalMilliseconds));
+    }
 
     public static bool ListenerStopped(Exception e) => e switch
     {

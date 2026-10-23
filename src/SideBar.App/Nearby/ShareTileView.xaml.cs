@@ -44,13 +44,16 @@ public sealed partial class ShareTileView : UserControl
 
     ReceiveTileModel? _recv;
     Action<int, bool>? _decide;
+    Func<bool> _settledOpen = () => false;
+    readonly ConsentArming _arming = new();
     string _consentSignature = "", _noteSignature = "";
 
     /// <summary>Приём внутри плитки: модель запросов и заметок и обработчик «Принять»/«Отклонить» (UI-поток).</summary>
-    public void BindReceive(ReceiveTileModel recv, Action<int, bool> decide)
+    public void BindReceive(ReceiveTileModel recv, Action<int, bool> decide, Func<bool> settledOpen)
     {
         _recv = recv;
         _decide = decide;
+        _settledOpen = settledOpen;
         NotePanel.PointerEntered += (_, _) => recv.SetHovered(true, DateTimeOffset.UtcNow);
         NotePanel.PointerExited += (_, _) => recv.SetHovered(false, DateTimeOffset.UtcNow);
     }
@@ -99,12 +102,18 @@ public sealed partial class ShareTileView : UserControl
         return content != TileContent.Idle;
     }
 
+    /// <summary>Карточка приехала на место: строки запроса сдвинулись под курсор, нажатия снова ждут 600 мс.</summary>
+    public void NotifyCardMoved() => _arming.Placed(DateTimeOffset.UtcNow);
+
+    bool CanPress() => _arming.CanAccept(DateTimeOffset.UtcNow, _settledOpen());
+
     void RenderConsents()
     {
         var r = _recv!;
         string signature = string.Join(',', r.VisibleConsents.Select(c => c.Id)) + "|" + r.Paged + "|" + r.Page + "|" + r.Consents.Count;
         if (signature == _consentSignature) return;   // пересборка под курсором сорвала бы клик
         _consentSignature = signature;
+        _arming.Placed(DateTimeOffset.UtcNow);   // новая строка, пропавшая строка или другая страница: под курсором может оказаться чужая кнопка
         ConsentPanel.Children.Clear();
         if (r.Paged) ConsentPanel.Children.Add(PagerRow(r));
         foreach (var c in r.VisibleConsents) ConsentPanel.Children.Add(ConsentRow(c, compact: r.VisibleConsents.Count > 1));
@@ -113,8 +122,8 @@ public sealed partial class ShareTileView : UserControl
     UIElement PagerRow(ReceiveTileModel r)
     {
         var row = new Grid { ColumnDefinitions = { new ColumnDefinition { Width = GridLength.Auto }, new ColumnDefinition(), new ColumnDefinition { Width = GridLength.Auto } } };
-        var prev = Button("‹", () => r.MovePage(-1), accent: false, narrow: true);
-        var next = Button("›", () => r.MovePage(1), accent: false, narrow: true);
+        var prev = Button("‹", () => r.MovePage(-1), accent: false, narrow: true, gate: CanPress);
+        var next = Button("›", () => r.MovePage(1), accent: false, narrow: true, gate: CanPress);
         var label = new TextBlock
         {
             Text = $"{r.Page + 1}/{r.Consents.Count} · {Strings.MoreConsents(r.HiddenCount)}",
@@ -140,8 +149,8 @@ public sealed partial class ShareTileView : UserControl
         // PIN отдельной строкой без усечения: имя отправителя вытеснить его не может
         panel.Children.Add(new TextBlock { Text = Strings.Pin(c.Pin), FontSize = compact ? 15 : 18, FontWeight = Microsoft.UI.Text.FontWeights.Bold, TextWrapping = TextWrapping.NoWrap });
         var buttons = new Grid { ColumnSpacing = 6, ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition() } };
-        var accept = Button(Strings.Accept, () => _decide?.Invoke(c.Id, true), accent: true);
-        var decline = Button(Strings.Decline, () => _decide?.Invoke(c.Id, false), accent: false);
+        var accept = Button(Strings.Accept, () => _decide?.Invoke(c.Id, true), accent: true, gate: CanPress);
+        var decline = Button(Strings.Decline, () => _decide?.Invoke(c.Id, false), accent: false, gate: CanPress);
         Grid.SetColumn(decline, 1);
         buttons.Children.Add(accept);
         buttons.Children.Add(decline);
@@ -180,7 +189,8 @@ public sealed partial class ShareTileView : UserControl
     }
 
     // Кнопка на Border + Tapped, как у иконок устройств: карточка не активируется, штатный Button в ней не проверен
-    static Border Button(string label, Action act, bool accent, bool narrow = false)
+    // gate: нажатие засчитывается, только если оно прошло проверку в момент PointerPressed (карточка открыта и стоит, строки не двигались 600 мс)
+    static Border Button(string label, Action act, bool accent, bool narrow = false, Func<bool>? gate = null)
     {
         Brush normal = accent ? (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
         Brush hover = accent ? (Brush)Application.Current.Resources["AccentFillColorSecondaryBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x3C, 0xFF, 0xFF, 0xFF));
@@ -192,9 +202,12 @@ public sealed partial class ShareTileView : UserControl
         var border = new Border { CornerRadius = new CornerRadius(4), Padding = new Thickness(narrow ? 10 : 6, 5, narrow ? 10 : 6, 5), Background = normal, Child = text };
         border.PointerEntered += (_, _) => border.Background = hover;
         border.PointerExited += (_, _) => border.Background = normal;
+        bool armed = true;
+        border.PointerPressed += (_, _) => armed = gate is null || gate();
         border.Tapped += (_, e) =>
         {
             e.Handled = true;
+            if (!armed) { Log.Write("tile tap ignored (not armed)"); return; }
             try { act(); }
             catch (Exception ex) { Log.Write("tile action failed: " + Log.Describe(ex)); }
         };

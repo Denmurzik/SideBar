@@ -1,3 +1,4 @@
+using SideBar.Core.Nearby;
 using SideBar.Core.Motion;
 
 namespace SideBar.Core.Tests;
@@ -67,5 +68,48 @@ public class BounceTests
     {
         for (double t = 0; t < 1.4; t += 0.003) Assert.True(Bounce.OffsetEpx(t) >= 0);
         Assert.True(Bounce.Peaks[0] > Bounce.Peaks[1] && Bounce.Peaks[1] > Bounce.Peaks[2]);
+    }
+}
+
+public class ConsentArmingTests
+{
+    static readonly DateTimeOffset T0 = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void Nothing_is_armed_before_the_rows_were_placed()
+        => Assert.False(new ConsentArming().CanAccept(T0, true));
+
+    [Fact]
+    public void A_press_counts_only_after_600ms_from_the_last_placement()
+    {
+        var a = new ConsentArming();
+        a.Placed(T0);
+        Assert.False(a.CanAccept(T0.AddMilliseconds(599), true));
+        Assert.True(a.CanAccept(T0.AddMilliseconds(600), true));
+        a.Placed(T0.AddSeconds(5));   // next consent slid under the cursor
+        Assert.False(a.CanAccept(T0.AddSeconds(5.3), true));
+        Assert.True(a.CanAccept(T0.AddSeconds(5.7), true));
+    }
+
+    [Fact]
+    public void A_press_never_counts_while_the_card_is_not_settled_open()
+    {
+        var a = new ConsentArming();
+        a.Placed(T0);
+        Assert.False(a.CanAccept(T0.AddMinutes(1), false));
+    }
+}
+
+public class AttentionPulseTests
+{
+    [Fact]
+    public void Starts_and_ends_at_zero_with_two_peaks()
+    {
+        Assert.Equal(0, AttentionPulse.Opacity(0));
+        Assert.Equal(0, AttentionPulse.Opacity(AttentionPulse.Duration.TotalSeconds));
+        double total = AttentionPulse.Duration.TotalSeconds;
+        Assert.Equal(AttentionPulse.Peak, AttentionPulse.Opacity(total * 0.25), 3);
+        Assert.Equal(AttentionPulse.Peak, AttentionPulse.Opacity(total * 0.75), 3);
+        Assert.InRange(AttentionPulse.Opacity(total * 0.5), 0, 0.01);
     }
 }

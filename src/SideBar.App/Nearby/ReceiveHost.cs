@@ -115,7 +115,7 @@ sealed class ReceiveHost : IDisposable
                 {
                     lan = (r.Address, r.InterfaceIndex);
                     var lookup = NetworkInfo.LookupCategory(r.InterfaceIndex);
-                    category = _network.Observe(lookup);   // один сбой поиска не равен Unknown от NLM
+                    category = _network.Observe(lookup, DateTimeOffset.UtcNow);   // один сбой поиска не равен Unknown от NLM
                     Log.Write(lookup is null ? $"receive network lookup failed, using {category}" : $"receive network {category}");
                 }
                 else
@@ -253,6 +253,8 @@ sealed class ReceiveHost : IDisposable
 
     async Task AcceptLoopCoreAsync(TcpListener listener, CancellationToken ct)
     {
+        int failures = 0;
+        long lastLogMs = long.MinValue / 2;
         while (!ct.IsCancellationRequested)
         {
             TcpClient client;
@@ -261,11 +263,17 @@ sealed class ReceiveHost : IDisposable
             {
                 // остановка слушателя — конец цикла; сброс одного входящего соединения (ConnectionReset из backlog) — нет
                 if (ct.IsCancellationRequested || AcceptFailure.ListenerStopped(e)) return;
-                Log.Write("receive accept failed: " + e.GetType().Name);
-                try { await Task.Delay(AcceptFailure.RetryDelay, ct); }
+                failures++;
+                if (Environment.TickCount64 - lastLogMs >= AcceptFailure.LogInterval.TotalMilliseconds)
+                {
+                    lastLogMs = Environment.TickCount64;
+                    Log.Write($"receive accept failed: {e.GetType().Name} (x{failures})");
+                }
+                try { await Task.Delay(AcceptFailure.Backoff(failures), ct); }
                 catch (OperationCanceledException) { return; }
                 continue;
             }
+            failures = 0;
             if (Interlocked.Increment(ref _sessions) > MaxSessions)
             {
                 Interlocked.Decrement(ref _sessions);

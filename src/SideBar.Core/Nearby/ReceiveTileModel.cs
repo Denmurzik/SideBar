@@ -28,7 +28,8 @@ public sealed class ReceiveTileModel
     public static readonly TimeSpan HoldAfterDecision = TimeSpan.FromSeconds(1.5);
 
     readonly List<ConsentItem> _consents = [];
-    readonly List<(NoteItem Note, DateTimeOffset Until)> _notes = [];
+    readonly List<(NoteItem Note, TimeSpan Remaining)> _notes = [];   // the last one is on top
+    DateTimeOffset? _lastTick;
     int _seq, _page;
     bool _hovered;
     DateTimeOffset _holdUntil;
@@ -80,7 +81,7 @@ public sealed class ReceiveTileModel
     public int AddNote(IReadOnlyList<string> lines, IReadOnlyList<TileButton> buttons, DateTimeOffset now)
     {
         int id = ++_seq;
-        _notes.Add((new NoteItem(id, lines, buttons), now + NoteDuration));
+        _notes.Add((new NoteItem(id, lines, buttons), NoteDuration));
         if (_notes.Count > MaxNotes) _notes.RemoveAt(0);
         Changed?.Invoke();
         return id;
@@ -99,15 +100,28 @@ public sealed class ReceiveTileModel
         if (!hovered && _notes.Count > 0)
         {
             var last = _notes[^1];
-            var until = now + NoteAfterHover;
-            if (until > last.Until) _notes[^1] = (last.Note, until);
+            if (last.Remaining < NoteAfterHover) _notes[^1] = (last.Note, NoteAfterHover);
         }
     }
 
-    public void Tick(DateTimeOffset now)
+    /// <summary>
+    /// <paramref name="noteVisible"/>: the card is Open or Peek and the tile shows the top note. Only then does its countdown run;
+    /// unseen notes are kept (up to <see cref="MaxNotes"/>) and get their full time once they are on screen.
+    /// </summary>
+    public void Tick(DateTimeOffset now, bool noteVisible)
     {
-        if (_hovered && _notes.Count > 0) return;
-        if (_notes.RemoveAll(n => now >= n.Until) > 0) Changed?.Invoke();
+        var dt = _lastTick is { } last ? now - last : TimeSpan.Zero;
+        _lastTick = now;
+        if (dt < TimeSpan.Zero) dt = TimeSpan.Zero;
+        if (_notes.Count == 0 || !noteVisible || _hovered) return;
+        var top = _notes[^1];
+        var left = top.Remaining - dt;
+        if (left <= TimeSpan.Zero)
+        {
+            _notes.RemoveAt(_notes.Count - 1);
+            Changed?.Invoke();
+        }
+        else _notes[^1] = (top.Note, left);
     }
 
     /// <summary>Consents pending, or the pause after the last decision is not over.</summary>

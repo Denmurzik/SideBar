@@ -27,63 +27,86 @@ public class AcceptFailureTests
     }
 
     [Fact]
+    public void Backoff_doubles_from_100ms_to_a_2s_cap()
+    {
+        Assert.Equal(TimeSpan.FromMilliseconds(100), AcceptFailure.Backoff(1));
+        Assert.Equal(TimeSpan.FromMilliseconds(200), AcceptFailure.Backoff(2));
+        Assert.Equal(TimeSpan.FromMilliseconds(400), AcceptFailure.Backoff(3));
+        Assert.Equal(TimeSpan.FromSeconds(2), AcceptFailure.Backoff(6));
+        Assert.Equal(TimeSpan.FromSeconds(2), AcceptFailure.Backoff(1000));
+    }
+
+    [Fact]
     public void Unknown_exception_is_retried()
         => Assert.False(AcceptFailure.ListenerStopped(new IOException()));
 }
 
 public class NetworkCategoryTrackerTests
 {
+    static readonly DateTimeOffset T0 = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
     [Fact]
     public void Good_lookups_pass_through()
     {
         var t = new NetworkCategoryTracker();
-        Assert.Equal(NetworkCategory.Private, t.Observe(NetworkCategory.Private));
-        Assert.Equal(NetworkCategory.Public, t.Observe(NetworkCategory.Public));
+        Assert.Equal(NetworkCategory.Private, t.Observe(NetworkCategory.Private, T0));
+        Assert.Equal(NetworkCategory.Public, t.Observe(NetworkCategory.Public, T0));
     }
 
     [Fact]
     public void Real_unknown_is_unknown_immediately()
     {
         var t = new NetworkCategoryTracker();
-        t.Observe(NetworkCategory.Private);
-        Assert.Equal(NetworkCategory.Unknown, t.Observe(NetworkCategory.Unknown));
+        t.Observe(NetworkCategory.Private, T0);
+        Assert.Equal(NetworkCategory.Unknown, t.Observe(NetworkCategory.Unknown, T0));
     }
 
     [Fact]
-    public void One_failed_lookup_keeps_the_last_good_category()
+    public void Failed_lookups_keep_the_last_good_category_for_a_while()
     {
         var t = new NetworkCategoryTracker();
-        t.Observe(NetworkCategory.Domain);
-        Assert.Equal(NetworkCategory.Domain, t.Observe(null));
+        t.Observe(NetworkCategory.Domain, T0);
+        Assert.Equal(NetworkCategory.Domain, t.Observe(null, T0.AddSeconds(1)));
+        Assert.Equal(NetworkCategory.Domain, t.Observe(null, T0.AddSeconds(20)));
     }
 
     [Fact]
-    public void Two_consecutive_failures_become_unknown()
+    public void A_burst_of_failures_within_a_second_never_cancels()
     {
         var t = new NetworkCategoryTracker();
-        t.Observe(NetworkCategory.Private);
-        t.Observe(null);
-        Assert.Equal(NetworkCategory.Unknown, t.Observe(null));
+        t.Observe(NetworkCategory.Private, T0);
+        for (int i = 0; i < 20; i++)
+            Assert.Equal(NetworkCategory.Private, t.Observe(null, T0.AddMilliseconds(i * 50)));
     }
 
     [Fact]
-    public void A_good_lookup_resets_the_failure_count()
+    public void Failures_spanning_thirty_seconds_become_unknown()
     {
         var t = new NetworkCategoryTracker();
-        t.Observe(NetworkCategory.Private);
-        t.Observe(null);
-        t.Observe(NetworkCategory.Private);
-        Assert.Equal(NetworkCategory.Private, t.Observe(null));
+        t.Observe(NetworkCategory.Private, T0);
+        t.Observe(null, T0.AddSeconds(1));
+        Assert.Equal(NetworkCategory.Private, t.Observe(null, T0.AddSeconds(30.9)));
+        Assert.Equal(NetworkCategory.Unknown, t.Observe(null, T0.AddSeconds(31)));
+    }
+
+    [Fact]
+    public void A_good_lookup_restarts_the_failure_clock()
+    {
+        var t = new NetworkCategoryTracker();
+        t.Observe(NetworkCategory.Private, T0);
+        t.Observe(null, T0.AddSeconds(1));
+        t.Observe(NetworkCategory.Private, T0.AddSeconds(20));
+        Assert.Equal(NetworkCategory.Private, t.Observe(null, T0.AddSeconds(40)));
     }
 
     [Fact]
     public void Failure_without_history_is_unknown_and_reset_forgets_history()
     {
         var t = new NetworkCategoryTracker();
-        Assert.Equal(NetworkCategory.Unknown, t.Observe(null));
-        t.Observe(NetworkCategory.Private);
+        Assert.Equal(NetworkCategory.Unknown, t.Observe(null, T0));
+        t.Observe(NetworkCategory.Private, T0);
         t.Reset();
-        Assert.Equal(NetworkCategory.Unknown, t.Observe(null));
+        Assert.Equal(NetworkCategory.Unknown, t.Observe(null, T0));
     }
 }
 

@@ -27,7 +27,8 @@ public sealed partial class CardWindow : Window
     EdgeMode _mode;
     PanelState _state = PanelState.Hidden;
     bool _ticking, _raiseOnTick;
-    bool _bouncing;
+    bool _bouncing, _pulsing;
+    double _pulseStart;
     double _bounceStart;
     double _bounceScale;
     int _bounceLeft;
@@ -88,7 +89,7 @@ public sealed partial class CardWindow : Window
     {
         _share = share;
         Share.DeviceChosen += id => ShareDeviceChosen?.Invoke(id);
-        Share.BindReceive(recv, decide);
+        Share.BindReceive(recv, decide, () => SettledOpen);
         share.Changed += RenderShare;
         recv.Changed += RenderShare;
         RenderShare();
@@ -204,6 +205,36 @@ public sealed partial class CardWindow : Window
         return true;
     }
 
+    /// <summary>Сигнал о запросе: прыжок у края (Slide) или пульс прозрачности на месте (InPlace). false — сигнала не будет.</summary>
+    public bool StartAttention() => _mode == EdgeMode.Slide ? StartBounce() : StartPulse();
+
+    /// <summary>InPlace: карточка на своём месте мигает 0 → 0.85 → 0 дважды, без активации. Из Hidden, состояние автомата не меняется.</summary>
+    bool StartPulse()
+    {
+        if (_mode != EdgeMode.InPlace || _state != PanelState.Hidden || _ticking || _pulsing) return false;
+        _pulsing = true;
+        _pulseStart = Now;
+        Root.Opacity = 0;
+        PlaceAt(_layout.LeftFor(PanelState.Open));
+        Show();
+        StartTicking();
+        return true;
+    }
+
+    void EndPulse()
+    {
+        _pulsing = false;
+        Root.Opacity = 0;
+        CompositionTarget.Rendering -= OnTick;
+        _ticking = false;
+        AppWindow.Hide();
+        IsShown = false;
+        Settled?.Invoke(PanelState.Hidden);   // обрезку working set делает App по Settled(Hidden), один раз
+    }
+
+    /// <summary>Карточка открыта и остановилась: только тогда кнопки запроса принимают нажатия.</summary>
+    public bool SettledOpen => _state == PanelState.Open && !_ticking && !_bouncing && !_pulsing;
+
     void EndBounce()
     {
         _bouncing = false;
@@ -211,13 +242,13 @@ public sealed partial class CardWindow : Window
         _ticking = false;
         AppWindow.Hide();
         IsShown = false;
-        WorkingSet.Trim();
-        Settled?.Invoke(PanelState.Hidden);
+        Settled?.Invoke(PanelState.Hidden);   // обрезку working set делает App по Settled(Hidden), один раз
     }
 
     public void Relayout(CardLayout layout, EdgeMode mode, double scale)
     {
         _bouncing = false;
+        _pulsing = false;
         if (_ticking)
         {
             CompositionTarget.Rendering -= OnTick;
@@ -252,6 +283,13 @@ public sealed partial class CardWindow : Window
             // обычный автомат главнее прыжка: пружина продолжает с текущей позиции, без скачка
             _bouncing = false;
             _pos.Reset(_bounceLeft);
+        }
+        if (_pulsing)
+        {
+            _pulsing = false;
+            _fade.Reset(Root.Opacity * FadeScale);   // затухание продолжается с текущей прозрачности
+            _fade.Retarget(0, now);                  // если дальше открытие не последует, окно доугасает и скрывается
+            StartTicking();
         }
 
         if (_mode == EdgeMode.Slide)
@@ -300,6 +338,15 @@ public sealed partial class CardWindow : Window
 
     void OnTick(object? sender, object e)
     {
+        if (_pulsing)
+        {
+            double t = Now - _pulseStart;
+            if (t >= AttentionPulse.Duration.TotalSeconds) { EndPulse(); return; }
+            Root.Opacity = AttentionPulse.Opacity(t);
+            if (IsShown && _raiseOnTick) ZOrder.RaiseToTop(_hwnd);
+            _raiseOnTick = false;
+            return;
+        }
         if (_bouncing)
         {
             double t = Now - _bounceStart;
@@ -335,6 +382,7 @@ public sealed partial class CardWindow : Window
             IsShown = false;
             WorkingSet.Trim();
         }
+        if (_state == PanelState.Open) Share.NotifyCardMoved();   // кнопки запроса вооружаются заново
         Settled?.Invoke(_state);
     }
 
