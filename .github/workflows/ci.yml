@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: ['**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -62,7 +63,7 @@ jobs:
         id: ver
         shell: bash
         run: |
-          ver=$(sed -n 's:.*<Version>\(.*\)</Version>.*::p' Directory.Build.props | head -n1)
+          ver=$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props | head -n1)
           if [ -z "$ver" ]; then echo "::error::Version not found"; exit 1; fi
           echo "version=$ver" >> "$GITHUB_OUTPUT"
 
