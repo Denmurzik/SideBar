@@ -3,7 +3,15 @@ using SideBar.Core.Official;
 
 namespace SideBar.Official;
 
-internal enum RefreshOutcome { Succeeded, NotInstalled, AlreadyRunning, MarkerTimeout, UserTookOver, DidNotExit }
+internal enum RefreshOutcome
+{
+    Succeeded, NotInstalled,
+    /// <summary>Официальное приложение уже запущено (пользователем): не запускали и не трогали.</summary>
+    OfficialAlreadyRunning,
+    /// <summary>Наш цикл уже идёт (параллельный вызов).</summary>
+    CycleInProgress,
+    MarkerTimeout, UserTookOver, DidNotExit,
+}
 
 /// <summary>Тайминги цикла; значения по умолчанию — боевые, тесты ужимают их.</summary>
 internal sealed record RefreshTimings
@@ -66,10 +74,12 @@ internal sealed class RefreshService : IDisposable
 
     public void Dispose()
     {
-        _cts.Cancel();
+        _cts.Cancel();   // идущий цикл (в том числе по пункту трея) тоже получает отмену; _cts не освобождаем: поздний вызов не должен падать на disposed
         try { _loop?.Wait(TimeSpan.FromSeconds(5)); } catch (AggregateException) { }
-        _cts.Dispose();
     }
+
+    /// <summary>Цикл идёт прямо сейчас (для блокировки пункта трея).</summary>
+    public bool IsBusy => Volatile.Read(ref _busy) == 1;
 
     async Task LoopAsync()
     {
@@ -115,13 +125,17 @@ internal sealed class RefreshService : IDisposable
         catch (Exception e) { _log($"official: tick failed, {Describe(e)}"); }
     }
 
-    /// <summary>Один цикл обновления (расписание и пункт трея «Обновить сертификаты сейчас»). Параллельный вызов — <see cref="RefreshOutcome.AlreadyRunning"/>.</summary>
+    /// <summary>
+    /// Один цикл обновления (расписание и пункт трея «Обновить сертификаты сейчас»). Параллельный вызов — <see cref="RefreshOutcome.CycleInProgress"/>.
+    /// Отмена (токен вызова или остановка сервиса) бросает <see cref="OperationCanceledException"/>; перезагрузка сертификатов и возобновление стека тогда пропускаются.
+    /// </summary>
     public async Task<RefreshOutcome> RunOnceAsync(CancellationToken ct = default)
     {
-        if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0) return RefreshOutcome.AlreadyRunning;
+        if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0) return RefreshOutcome.CycleInProgress;
         try
         {
-            var outcome = await CycleAsync(ct);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _cts.Token);
+            var outcome = await CycleAsync(linked.Token);
             _log($"official: refresh {outcome}");
             if (outcome == RefreshOutcome.Succeeded) RecordSuccess();
             return outcome;
@@ -132,14 +146,14 @@ internal sealed class RefreshService : IDisposable
     async Task<RefreshOutcome> CycleAsync(CancellationToken ct)
     {
         if (!_app.IsInstalled) return RefreshOutcome.NotInstalled;
-        if (_app.IsRunning()) return RefreshOutcome.AlreadyRunning;
+        if (_app.IsRunning()) return RefreshOutcome.OfficialAlreadyRunning;
 
         var scanner = new LogTailScanner(_app.LogDir);
         LaunchedProcess? proc = null;
         try
         {
             if (_hooks.PauseStack is { } pause) await pause();
-            if (_app.IsRunning()) return RefreshOutcome.AlreadyRunning;   // пользователь мог открыть приложение, пока ставили паузу
+            if (_app.IsRunning()) return RefreshOutcome.OfficialAlreadyRunning;   // пользователь мог открыть приложение, пока ставили паузу
             var snapshot = scanner.Snapshot();
             proc = _app.Launch();
             if (proc is null) return RefreshOutcome.NotInstalled;
@@ -169,9 +183,12 @@ internal sealed class RefreshService : IDisposable
         finally
         {
             proc?.Dispose();
-            // Сертификаты могли измениться, даже если цикл не дошёл до конца; стек возвращаем всегда.
-            if (proc is not null) Hook(_hooks.ReloadCertificates, "reload");
-            Hook(_hooks.ResumeStack, "resume");
+            // Сертификаты могли измениться, даже если цикл не дошёл до конца; стек возвращаем всегда — кроме отмены (приложение закрывается).
+            if (!ct.IsCancellationRequested)
+            {
+                if (proc is not null) Hook(_hooks.ReloadCertificates, "reload");
+                Hook(_hooks.ResumeStack, "resume");
+            }
         }
     }
 

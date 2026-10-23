@@ -160,6 +160,31 @@ public sealed class RefreshServiceSimTests : IDisposable
     }
 
     [Fact]
+    public async Task Parallel_call_reports_cycle_in_progress()
+    {
+        var svc = Make("normal");
+        var first = svc.RunOnceAsync();
+        Assert.True(svc.IsBusy);
+        Assert.Equal(RefreshOutcome.CycleInProgress, await svc.RunOnceAsync());
+        Assert.Equal(RefreshOutcome.Succeeded, await first);
+        Assert.False(svc.IsBusy);
+    }
+
+    [Fact]
+    public async Task Cancellation_skips_reload_and_resume_and_leaves_process()
+    {
+        var svc = Make("silent");
+        using var cts = new CancellationTokenSource();
+        var run = svc.RunOnceAsync(cts.Token);
+        Assert.True(WaitFor(() => SimProcesses().Any(p => Native.WindowsOf(p.Id).Count > 0)));   // окно уже есть: Dispose теста сможет закрыть симулятор
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        Assert.Equal(["pause"], _hooks);   // приложение закрывается: ни перезагрузки, ни возобновления
+        Assert.Single(SimProcesses());     // процесс не убиваем
+        Assert.False(svc.IsBusy);
+    }
+
+    [Fact]
     public async Task Already_running_is_not_launched_again()
     {
         var first = Make("user");
@@ -168,7 +193,7 @@ public sealed class RefreshServiceSimTests : IDisposable
         _hooks.Clear();
 
         var second = Make("normal");
-        Assert.Equal(RefreshOutcome.AlreadyRunning, await second.RunOnceAsync());
+        Assert.Equal(RefreshOutcome.OfficialAlreadyRunning, await second.RunOnceAsync());
         Assert.Single(SimProcesses());
         Assert.Equal(logs, Directory.GetFiles(Path.Combine(SharingDir, "Logs")).Length);
         Assert.Empty(_hooks);   // стек не трогали
@@ -198,6 +223,7 @@ public sealed class RefreshServiceSimTests : IDisposable
         Assert.Single(SimProcesses());
         Assert.DoesNotContain(_log, l => l.Contains("close attempt"));
         Assert.Null(new AppStateStore(StatePath).Load().LastSuccess);
+        Assert.Contains(_log, l => l.Contains("visible window latched, class " + OfficialAppController.WindowClass));   // класс окна в логе
     }
 
     [Fact]

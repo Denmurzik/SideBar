@@ -73,8 +73,8 @@ static unsafe class Program
                 lpszClassName = cls,
             };
             if (RegisterClassExW(ref wc) == 0) return 3;
-            // Обычное окно верхнего уровня, но без ShowWindow: невидимо, как у настоящего приложения при SW_HIDE.
-            if ((_hwnd = CreateWindowExW(0, cls, title, 0x00CF0000, -32000, -32000, 100, 100, 0, 0, 0, 0)) == 0) return 4;
+            // Окно верхнего уровня (WS_EX_TOOLWINDOW: без кнопки на панели задач даже в режиме show), но без ShowWindow: невидимо, как у настоящего приложения при SW_HIDE.
+            if ((_hwnd = CreateWindowExW(0x80, cls, title, 0x00CF0000, -32000, -32000, 100, 100, 0, 0, 0, 0)) == 0) return 4;
         }
 
         var lifetime = int.TryParse(Environment.GetEnvironmentVariable("SIDEBAR_SIM_LIFETIME_SEC"), out var s) ? s : 90;

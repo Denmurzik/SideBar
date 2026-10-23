@@ -116,3 +116,40 @@ public sealed class OfficialLogTests : IDisposable
         Assert.Equal(now, store.Load().FirstSeen);
     }
 }
+
+public class ResidentAppDetectorTests
+{
+    static readonly DateTimeOffset T0 = new(2026, 10, 23, 12, 0, 0, TimeSpan.Zero);
+    static readonly TimeSpan Ten = TimeSpan.FromMinutes(10);
+
+    [Fact]
+    public void Fires_once_after_threshold()
+    {
+        var d = new ResidentAppDetector(Ten);
+        Assert.False(d.Observe(true, T0, false));
+        Assert.False(d.Observe(true, T0.AddMinutes(9), false));
+        Assert.True(d.Observe(true, T0.AddMinutes(10), false));
+        Assert.False(d.Observe(true, T0.AddMinutes(30), false));
+    }
+
+    [Fact]
+    public void Restart_of_official_app_allows_next_note()
+    {
+        var d = new ResidentAppDetector(Ten);
+        d.Observe(true, T0, false);
+        Assert.True(d.Observe(true, T0.AddMinutes(11), false));
+        Assert.False(d.Observe(false, T0.AddMinutes(12), false));
+        d.Observe(true, T0.AddMinutes(13), false);
+        Assert.True(d.Observe(true, T0.AddMinutes(24), false));
+    }
+
+    [Fact]
+    public void Own_cycle_and_short_runs_do_not_count()
+    {
+        var d = new ResidentAppDetector(Ten);
+        for (int m = 0; m < 30; m++) Assert.False(d.Observe(true, T0.AddMinutes(m), ownCycle: true));
+        d.Observe(false, T0.AddMinutes(31), false);
+        d.Observe(true, T0.AddMinutes(32), false);
+        Assert.False(d.Observe(true, T0.AddMinutes(41), false));
+    }
+}

@@ -33,12 +33,23 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
 {
     public const string WindowClass = "Google.Windows.NearbyShare";
 
-    public static OfficialAppController FromEnvironment(Action<string> log) => new(
-        Env("SIDEBAR_OFFICIAL_EXE") ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Google", "NearbyShare", "nearby_share.exe"),
-        Env("SIDEBAR_SHARING_DIR") ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google", "Nearby", "Sharing"),
+    public static OfficialAppController FromEnvironment(Action<string> log, string? exePathOverride = null) => new(
+        Env("SIDEBAR_OFFICIAL_EXE") ?? (exePathOverride is { Length: > 0 } ? exePathOverride : DefaultExe),
+        Env("SIDEBAR_SHARING_DIR") ?? DefaultSharingDir,
         log);
+
+    /// <summary>Для приложения: путь из настроек (null — по умолчанию); переопределения окружением — только в Debug.</summary>
+    public static OfficialAppController ForApp(string? exePathOverride, Action<string> log)
+    {
+#if DEBUG
+        return FromEnvironment(log, exePathOverride);
+#else
+        return new(exePathOverride is { Length: > 0 } ? exePathOverride : DefaultExe, DefaultSharingDir, log);
+#endif
+    }
+
+    static string DefaultExe => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Google", "NearbyShare", "nearby_share.exe");
+    static string DefaultSharingDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google", "Nearby", "Sharing");
 
     static string? Env(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } v ? v : null;
 
@@ -83,7 +94,15 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
     /// <summary>Обновляет защёлку <see cref="LaunchedProcess.SawVisible"/>.</summary>
     public void Observe(LaunchedProcess proc)
     {
-        if (!proc.SawVisible && !proc.HasExited && Native.WindowsOf(proc.Pid).Any(w => w.Visible)) proc.SawVisible = true;
+        if (proc.SawVisible || proc.HasExited) return;
+        if (Native.WindowsOf(proc.Pid).FirstOrDefault(w => w.Visible) is { Visible: true } vis) Latch(proc, vis.ClassName);
+    }
+
+    // имя класса окна не секрет; по нему видно, что именно сработало (окно приложения или, например, диалог)
+    void Latch(LaunchedProcess proc, string className)
+    {
+        proc.SawVisible = true;
+        log($"official: visible window latched, class {className}");
     }
 
     /// <summary>
@@ -94,7 +113,7 @@ internal sealed class OfficialAppController(string exePath, string sharingDir, A
     {
         if (proc.SawVisible) return QuitResult.WindowsVisible;
         var windows = Native.WindowsOf(proc.Pid);
-        if (windows.Any(w => w.Visible)) { proc.SawVisible = true; return QuitResult.WindowsVisible; }
+        if (windows.FirstOrDefault(w => w.Visible) is { Visible: true } vis) { Latch(proc, vis.ClassName); return QuitResult.WindowsVisible; }
         var threads = windows.Where(w => w.ClassName == WindowClass).Select(w => w.ThreadId).Distinct().ToList();
         if (threads.Count == 0) return QuitResult.NoWindow;
         var posted = false;

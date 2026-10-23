@@ -15,7 +15,7 @@ sealed unsafe class TrayIcon : IDisposable
     const uint MF_STRING = 0, MF_CHECKED = 8, MF_GRAYED = 1, MF_BYCOMMAND = 0, MF_SEPARATOR = 0x800;
     const uint TPM_RIGHTBUTTON = 2, TPM_BOTTOMALIGN = 0x20, TPM_RETURNCMD = 0x100;
     const int SM_CXSMICON = 49;
-    const int CmdAutostart = 1, CmdExit = 2, CmdHidden = 3, CmdOwnDevices = 4, CmdEveryone = 5;   // 3..5 — радиогруппа видимости
+    const int CmdAutostart = 1, CmdExit = 2, CmdHidden = 3, CmdOwnDevices = 4, CmdEveryone = 5, CmdRefreshCerts = 6;   // 3..5 — радиогруппа видимости
 
     [StructLayout(LayoutKind.Sequential)]
     struct NOTIFYICONDATAW
@@ -55,12 +55,15 @@ sealed unsafe class TrayIcon : IDisposable
     readonly Func<bool> _ownDevicesAvailable;
     readonly Action<Visibility> _setMode;
     readonly Func<bool> _stackPaused;
+    readonly Action? _refreshCerts;
+    readonly Func<bool>? _refreshBusy;
     readonly uint _taskbarCreated;
     nint _icon;
     bool _added;
 
     public TrayIcon(MessageWindow window, Autostart autostart, string exePath, Action onExit,
-        Func<Visibility> mode, Func<bool> ownDevicesAvailable, Action<Visibility> setMode, Func<bool> stackPaused)
+        Func<Visibility> mode, Func<bool> ownDevicesAvailable, Action<Visibility> setMode, Func<bool> stackPaused,
+        Action? refreshCerts = null, Func<bool>? refreshBusy = null)
     {
         _window = window;
         _autostart = autostart;
@@ -70,6 +73,8 @@ sealed unsafe class TrayIcon : IDisposable
         _ownDevicesAvailable = ownDevicesAvailable;
         _setMode = setMode;
         _stackPaused = stackPaused;
+        _refreshCerts = refreshCerts;
+        _refreshBusy = refreshBusy;
         _taskbarCreated = RegisterWindowMessageW("TaskbarCreated");
         _icon = LoadIcon();
         Add();
@@ -119,6 +124,7 @@ sealed unsafe class TrayIcon : IDisposable
         uint current = _mode() switch { Visibility.OwnDevices => CmdOwnDevices, Visibility.Everyone => CmdEveryone, _ => CmdHidden };
         CheckMenuRadioItem(menu, CmdHidden, CmdEveryone, current, MF_BYCOMMAND);
         AppendMenuW(menu, MF_SEPARATOR, 0, null);
+        if (_refreshCerts is not null) AppendMenuW(menu, MF_STRING | (_refreshBusy?.Invoke() == true ? MF_GRAYED : 0), CmdRefreshCerts, Strings.RefreshCertsNow);
         AppendMenuW(menu, MF_STRING | (_autostart.IsEnabled ? MF_CHECKED : 0), CmdAutostart, Strings.Autostart);
         AppendMenuW(menu, MF_STRING, CmdExit, Strings.Exit);
         SetForegroundWindow(_window.Handle);   // иначе меню не закрывается кликом вне него
@@ -133,6 +139,7 @@ sealed unsafe class TrayIcon : IDisposable
         else if (cmd == CmdHidden) _setMode(Visibility.Hidden);
         else if (cmd == CmdOwnDevices) _setMode(Visibility.OwnDevices);
         else if (cmd == CmdEveryone) _setMode(Visibility.Everyone);
+        else if (cmd == CmdRefreshCerts) _refreshCerts?.Invoke();
         else if (cmd == CmdExit) _onExit();
     }
 
