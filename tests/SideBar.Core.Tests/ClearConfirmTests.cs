@@ -22,7 +22,7 @@ public class ClearConfirmTests
         c.Press(T0);
         Assert.Equal(ClearPress.Cleared, c.Press(T0 + ClearConfirm.Window));
         Assert.False(c.IsArmed(T0 + ClearConfirm.Window));
-        Assert.Equal(ClearPress.Armed, c.Press(T0 + ClearConfirm.Window));
+        Assert.Equal(ClearPress.Armed, c.Press(T0 + ClearConfirm.Window + ClearConfirm.Cooldown));
     }
 
     [Fact]
@@ -50,4 +50,22 @@ public class ClearConfirmTests
     {
         Assert.Equal(TimeSpan.FromSeconds(3), ClearConfirm.Window);
     }
+
+    [Fact]
+    public void Presses_right_after_clearing_are_ignored_for_the_cooldown()
+    {
+        var c = new ClearConfirm();
+        c.Press(T0);
+        Assert.Equal(ClearPress.Cleared, c.Press(T0 + TimeSpan.FromMilliseconds(250)));
+        var cleared = T0 + TimeSpan.FromMilliseconds(250);
+        // Tapped + DoubleTapped одного быстрого клика: второе событие не вооружает пустую полку
+        Assert.Equal(ClearPress.Ignored, c.Press(cleared));
+        Assert.Equal(ClearPress.Ignored, c.Press(cleared + ClearConfirm.Cooldown - TimeSpan.FromMilliseconds(1)));
+        Assert.False(c.IsArmed(cleared + TimeSpan.FromMilliseconds(100)));
+        // после паузы один клик только вооружает, а не очищает
+        Assert.Equal(ClearPress.Armed, c.Press(cleared + ClearConfirm.Cooldown));
+    }
+
+    [Fact]
+    public void Cooldown_is_600_ms() => Assert.Equal(TimeSpan.FromMilliseconds(600), ClearConfirm.Cooldown);
 }

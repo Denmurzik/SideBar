@@ -40,7 +40,8 @@ sealed class Driver
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(nint hwnd, out uint pid);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(nint hwnd, System.Text.StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, nint extra);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern nint FindWindowW(string cls, string? title);
+    delegate bool EnumWindowsProc(nint hwnd, nint lParam);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, nint lParam);
     [DllImport("user32.dll")] static extern bool PostMessageW(nint hwnd, uint msg, nint wParam, nint lParam);
 
     const int Reference = 0, Owned = 1;
@@ -178,7 +179,7 @@ sealed class Driver
         if (Path.GetFullPath(_srcDir).StartsWith(Path.GetFullPath(tmpDir), StringComparison.OrdinalIgnoreCase))
         { Rep("FAIL source files must be outside %TEMP% (they would count as temporary)"); _fail++; return; }
 
-        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_PAUSE_ONLY") == "1") { PauseScenarios(W, H, a); return; }   // быстрый прогон: пауза при официальном приложении (P1..P4)
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_PAUSE_ONLY") == "1") { PauseScenarios(W, H, a); return; }   // быстрый прогон: пауза при официальном приложении (P1..P3)
         if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_CLEAR_ONLY") == "1") { ClearScenarios(W, H, a, b, c); return; }   // быстрый прогон: только корзина полки (C1..C6)
         if (Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_SHARE_ONLY") == "1" || Environment.GetEnvironmentVariable("SIDEBAR_DRIVER_FAN_ONLY") == "1")   // быстрый прогон: только вынос стопки и отправка с плитки
         {
@@ -603,10 +604,28 @@ sealed class Driver
         return !log.Contains("drag-out starting") && FanZone() == null && !fg;
     }
 
+    /// <summary>Окно сообщений трея именно нашего процесса (по PID и классу); 0, если не найдено.</summary>
+    nint AppMessageWindow()
+    {
+        nint found = 0;
+        if (_app == null) return 0;
+        uint pid = (uint)_app.Id;
+        EnumWindows((h, _) =>
+        {
+            GetWindowThreadProcessId(h, out var p);
+            if (p != pid) return true;
+            var sb = new System.Text.StringBuilder(64);
+            GetClassNameW(h, sb, 64);
+            if (sb.ToString() == "SideBar.MessageWindow") { found = h; return false; }
+            return true;
+        }, 0);
+        return found;
+    }
+
     /// <summary>Контекстное меню трея как от правого клика: то же сообщение, что шлёт оболочка (v4); снимок только области меню.</summary>
     void ShotTrayMenu(string name, int W, int H)
     {
-        var hwnd = FindWindowW("SideBar.MessageWindow", null);
+        var hwnd = AppMessageWindow();   // только окно запущенного нами процесса, не чужой экземпляр SideBar
         if (hwnd == 0) { Rep("    (tray shot " + name + ": message window not found)"); return; }
         PostMessageW(hwnd, 0x8001, (nint)(((_scr.Bottom - 60) << 16) | ((_scr.Right - 60) & 0xFFFF)), 0x7B);
         Thread.Sleep(1200);
@@ -624,7 +643,7 @@ sealed class Driver
         Thread.Sleep(400);
     }
 
-    // P1..P4: пока работает официальный nearby_share.exe (копия ping.exe), стек на паузе: меню трея, подсказка на плитке, возобновление
+    // P1..P3: пока работает официальный nearby_share.exe (копия ping.exe), стек на паузе: меню трея, подсказка на плитке, возобновление
     void PauseScenarios(int W, int H, string a)
     {
         StopApp();
@@ -664,7 +683,7 @@ sealed class Driver
         if (!StartApp()) { _fail++; return; }
         FillThree(W, H, a, b, c);
         var s = WaitShelf(x => x.Count == 3);
-        if (s.Count != 3 || !OpenCard(W, H)) { Check("C0 shelf prepared and card open", false, Dump(s) ); return; }
+        if (s.Count != 3 || !OpenCard(W, H)) { Check("C0 shelf prepared and card open", false, Dump(s)); return; }
         var t = TrashPoint(W, H);
         MoveTo(t.X, t.Y, 300); Thread.Sleep(300);
         Click(); Thread.Sleep(600);
@@ -753,6 +772,21 @@ sealed class Driver
         bool quiet6 = QuietClick(out var why6);
         Check("C6 fast double click (250 ms) on the trash clears the shelf; log 'shelf cleared n=3'; no drag-out, no fan, card not foreground",
             s.Count == 0 && AppLog().Contains("shelf cleared n=3") && quiet6, Dump(s) + "\n" + why6);
+
+        // C6b: после двойного клика пустая полка не вооружена заново: один клик по корзине, когда на полке снова лежит файл, его не очищает
+        if (s.Count == 0)
+        {
+            MoveTo(W - 700, H, 200); Thread.Sleep(500);
+            var one = new DataObject();
+            one.SetData(DataFormats.FileDrop, new[] { a });
+            DragToPanel(one, W, H);
+            s = WaitShelf(x => x.Count == 1);
+            if (s.Count != 1 || !OpenCard(W, H)) { Check("C6b one file added and card open", false, Dump(s)); return; }
+            MoveTo(t6.X, t6.Y, 300); Thread.Sleep(300);
+            Click(); Thread.Sleep(800);
+            s = ReadShelf();
+            Check("C6b after the double click cleared the shelf, a single click on a new file only arms it (the file stays)", s.Count == 1 && !AppLog().Contains("shelf cleared"), Dump(s));
+        }
     }
 
     // D3e: отложенное удаление переживает перезапуск: перезапуск внутри окна задержки не удаляет папку, после срока она удаляется

@@ -120,7 +120,9 @@ public sealed partial class CardWindow : Window
     void PressClear()
     {
         if (_shelfService is null) return;
-        if (_clear.Press(DateTimeOffset.UtcNow) == ClearPress.Cleared)
+        var press = _clear.Press(DateTimeOffset.UtcNow);
+        if (press == ClearPress.Ignored) return;   // второе событие того же быстрого клика
+        if (press == ClearPress.Cleared)
         {
             Disarm();
             try { _shelfService.Clear(); }
