@@ -306,6 +306,9 @@ public sealed partial class CardWindow : Window
             if (t >= Bounce.Duration.TotalSeconds) { EndBounce(); return; }
             _bounceLeft = _layout.LeftFor(PanelState.Hidden) - (int)Math.Round(Bounce.OffsetFraction(t) * _bouncePeekPx);
             WindowFrame.MoveTo(_hwnd, _bounceLeft, _layout.Top);
+#if DEBUG
+            Log.Write($"bounce t={t:F3} offset={_layout.LeftFor(PanelState.Hidden) - _bounceLeft}px");
+#endif
             if (IsShown && _raiseOnTick) ZOrder.RaiseToTop(_hwnd);
             _raiseOnTick = false;
             return;
