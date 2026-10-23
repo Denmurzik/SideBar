@@ -4,6 +4,11 @@
 
 ## Итог
 
+- **Результаты 2026-10-23 (Pixel 9, тимлид с пользователем):**
+  - **E1 пройден.** Официальное Quick Share for Windows нашло **заблокированный** Pixel примерно за 10 с и отправило маленький файл.
+  - **E2 подтвердил гипотезу §2.2.** `watch 60 --identify` при заблокированном Pixel: 9 кадров `FEF3`, `len=27`, `NonConnectableUndirected`, `own-account=yes`, `cert=#1` (Pixel 9), `offset=8`, RSSI −68..−61, первый кадр на 3,1 с; совпало 1 из 1 тел.
+  - Смещение 8 означает, что endpoint info лежит не в начале тела: перед ним 8 байт обёртки. Это согласуется с обёрткой BLE v2 (§2.2): байт версии и `data_size`, затем внутри connections-advertisement `[version|pcp]` + `endpoint_id(4)`, затем `endpoint_info_size`. Точная разбивка этих 8 байт не проверялась.
+  - Сертификат, которым Pixel рекламирует себя при блокировке, теперь известен (#1). Для `secret_id_hash` (§2.4) надо брать его.
 - **Вердикт: (C) — не проверено, но есть конкретный рецепт с сильным обоснованием, близкий к (A).** Fast Initiation (`FE2C`) для заблокированного телефона почти наверняка бесполезен, сколько вариантов ни перебирай. Но разбудить телефон и не нужно: в режиме «Ваши устройства» заблокированный телефон **сам** остаётся доступным, только не по mDNS. Он шлёт BLE-рекламу Nearby (`FEF3`, low power) и **слушает Bluetooth Classic RFCOMM**. Официальный отправитель подключается по RFCOMM к MAC-адресу из **сертификата** телефона, а не из рекламы.
 - Google прямо обещает такое поведение: «Your devices: If your screen is off, your device is still visible to your other devices with the same Google Account» ([справка Android](https://support.google.com/android/answer/9286773?hl=en)). Для «Контактов» и «Все» нужен включённый и разблокированный экран. На Chromebook: «If the screen is off or locked, the device is automatically in "Your devices" visibility» ([справка Chromebook](https://support.google.com/chromebook/answer/10751738?hl=en)).
 - **Почему наш beacon не сработал** (подтверждено исходниками для Windows/ChromeOS, для Android — по аналогии и по наблюдению). Fast Initiation — это сигнал «рядом кто-то делится», рассчитанный на экран, который включён. Приёмник при заблокированном экране сканирование Fast Init останавливает. Отправитель при заблокированном экране его не шлёт.
