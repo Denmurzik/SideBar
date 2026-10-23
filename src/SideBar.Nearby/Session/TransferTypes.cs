@@ -45,6 +45,9 @@ public interface ITransferObserver
     void Status(string message) { }
 
     void Progress(TransferProgress progress) { }
+
+    /// <summary>A received file was committed under its final name (receive only).</summary>
+    void FileSaved(string path) { }
 }
 
 public sealed record SessionOptions(

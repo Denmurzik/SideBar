@@ -17,7 +17,7 @@ namespace SideBar.Sharing;
 sealed class ReceiveHost : IDisposable
 {
     const int MaxSessions = 3;
-    const int TickSeconds = 5, RecheckEveryTicks = 6;   // 5 с — истечение видимости, 30 с — сеть и повторная реклама
+    const int TickSeconds = 5, RecheckEveryTicks = 6;   // 5 с — истечение видимости, 30 с — проверка сети и слушателя
 
     readonly VisibilityModel _visibility = new();
     readonly object _gate = new();   // _visibility
@@ -29,6 +29,8 @@ sealed class ReceiveHost : IDisposable
     readonly SemaphoreSlim _evaluate = new(1, 1);
     readonly Timer _timer;
     readonly CancellationTokenSource _lifetime = new();
+    readonly NetworkCategoryTracker _network = new();   // под _evaluate
+    bool _blockNoted;                                    // под _gate: заметка «приём выключен» уже показана для этого включения
     int _ticks;
     int _sessions;
     readonly HashSet<Task> _running = [];   // под _gate
@@ -70,7 +72,7 @@ sealed class ReceiveHost : IDisposable
         lock (_gate)
         {
             if (_visibility.Current == Visibility.Everyone) _visibility.Disable();
-            else _visibility.EnableEveryone(DateTimeOffset.UtcNow);
+            else { _visibility.EnableEveryone(DateTimeOffset.UtcNow); _blockNoted = false; }
             Log.Write($"visibility {_visibility.Current}");
         }
         _ = Task.Run(() => EvaluateAsync());
@@ -88,10 +90,10 @@ sealed class ReceiveHost : IDisposable
             expired = before != _visibility.Current;
             if (expired) Log.Write($"visibility {_visibility.Current}");
         }
-        if (expired || ++_ticks % RecheckEveryTicks == 0) _ = Task.Run(() => EvaluateAsync(reannounce: !expired));
+        if (expired || ++_ticks % RecheckEveryTicks == 0) _ = Task.Run(() => EvaluateAsync());
     }
 
-    async Task EvaluateAsync(bool reannounce = false)
+    async Task EvaluateAsync()
     {
         if (_disposed) return;
         try { await _evaluate.WaitAsync(_lifetime.Token); }
@@ -105,30 +107,36 @@ sealed class ReceiveHost : IDisposable
             // сеть проверяем и в «Скрыто», пока жива принятая передача: Public/Unknown её обрывает
             (IPAddress Address, int Index)? lan = null;
             NetworkCategory? category = null;
-            if (visibility == Visibility.Everyone || anyAccepted)
+            var networkChecked = visibility == Visibility.Everyone || anyAccepted;
+            if (networkChecked)
             {
                 var route = Route();
                 if (route is { } r)
                 {
                     lan = (r.Address, r.InterfaceIndex);
-                    category = NetworkInfo.CategoryOf(r.InterfaceIndex);
-                    Log.Write($"receive network {category}");
+                    var lookup = NetworkInfo.LookupCategory(r.InterfaceIndex);
+                    category = _network.Observe(lookup);   // один сбой поиска не равен Unknown от NLM
+                    Log.Write(lookup is null ? $"receive network lookup failed, using {category}" : $"receive network {category}");
                 }
-                else Log.Write("receive network none");
+                else
+                {
+                    _network.Reset();
+                    Log.Write("receive network none");
+                }
             }
-            var decision = ReceivePolicy.Decide(visibility, category, networkChecked: visibility == Visibility.Everyone || anyAccepted);
+            else _network.Reset();
+            var decision = ReceivePolicy.Decide(visibility, category, networkChecked);
             CancelSessions(decision);
+            NoteBlocked(ReceiveBlockReason.Of(visibility, lan is not null, category));
 
             if (!decision.Listen || lan is null)
             {
                 Stop();
                 return;
             }
+            // реклама не перерегистрируется, пока адрес и порт те же: иначе ПК мигает в списке телефона
             if (_listener is not null && _bound is { } b && b.Address.Equals(lan.Value.Address) && b.Index == lan.Value.Index)
-            {
-                if (reannounce) await ReannounceAsync();
                 return;
-            }
             Stop();
             await StartAsync(lan.Value);
         }
@@ -158,11 +166,18 @@ sealed class ReceiveHost : IDisposable
         return NetworkInfo.DefaultRouteInterface();
     }
 
-    async Task ReannounceAsync()
+    /// <summary>Один раз за включение «Все»: почему ПК не виден, хотя видимость включена.</summary>
+    void NoteBlocked(ReceiveBlock block)
     {
-        // Android может пропустить сервис, зарегистрированный до начала его поиска
-        try { if (_advertiser is { } a) await a.ReannounceAsync(_lifetime.Token); }
-        catch (Exception e) { Log.Write("reannounce failed: " + Log.Describe(e)); }
+        if (block == ReceiveBlock.None) return;
+        lock (_gate)
+        {
+            if (_blockNoted) return;
+            _blockNoted = true;
+        }
+        var text = block == ReceiveBlock.NoLan ? Strings.ReceiveNoLan : Strings.ReceivePublicNetwork;
+        Log.Write($"receive blocked {block}");
+        _ui.TryEnqueue(() => _notifications.Info("blocked", text));
     }
 
     async Task StartAsync((IPAddress Address, int Index) lan)
@@ -192,6 +207,21 @@ sealed class ReceiveHost : IDisposable
         _ = AcceptLoopAsync(listener, _lifetime.Token);
     }
 
+    /// <summary>Цикл приёма умер сам (не по остановке слушателя): сбросить привязку, чтобы ближайшая проверка подняла его заново.</summary>
+    async Task ResetIfDeadAsync(TcpListener listener)
+    {
+        try { await _evaluate.WaitAsync(_lifetime.Token); }
+        catch (OperationCanceledException) { return; }
+        try
+        {
+            if (!ReferenceEquals(_listener, listener)) return;
+            Log.Write("receive accept loop ended, restarting");
+            Stop();
+        }
+        finally { _evaluate.Release(); }
+        _ = Task.Run(() => EvaluateAsync());
+    }
+
     void Stop()
     {
         if (_listener is null && _advertiser is null) return;
@@ -216,11 +246,26 @@ sealed class ReceiveHost : IDisposable
 
     async Task AcceptLoopAsync(TcpListener listener, CancellationToken ct)
     {
+        try { await AcceptLoopCoreAsync(listener, ct); }
+        catch (Exception e) { Log.Write("receive accept loop failed: " + Log.Describe(e)); }
+        if (!ct.IsCancellationRequested) await ResetIfDeadAsync(listener);
+    }
+
+    async Task AcceptLoopCoreAsync(TcpListener listener, CancellationToken ct)
+    {
         while (!ct.IsCancellationRequested)
         {
             TcpClient client;
             try { client = await listener.AcceptTcpClientAsync(ct); }
-            catch (Exception) { return; }   // слушатель остановлен
+            catch (Exception e)
+            {
+                // остановка слушателя — конец цикла; сброс одного входящего соединения (ConnectionReset из backlog) — нет
+                if (ct.IsCancellationRequested || AcceptFailure.ListenerStopped(e)) return;
+                Log.Write("receive accept failed: " + e.GetType().Name);
+                try { await Task.Delay(AcceptFailure.RetryDelay, ct); }
+                catch (OperationCanceledException) { return; }
+                continue;
+            }
             if (Interlocked.Increment(ref _sessions) > MaxSessions)
             {
                 Interlocked.Decrement(ref _sessions);
@@ -242,6 +287,7 @@ sealed class ReceiveHost : IDisposable
     {
         IncomingTransfer? offer = null;
         var accepted = false;
+        var saved = new SavedFiles();
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var live = new Live(cts);
         lock (_gate) _live.Add(live);
@@ -257,7 +303,7 @@ sealed class ReceiveHost : IDisposable
                     options = options with { DecisionTimeout = TimeSpan.FromSeconds(seconds) };   // автотест таймаута решения
 #endif
                 var result = await ReceiveSession.ReceiveAsync(client.GetStream(), options, ReceivedFileWriter.DownloadsFolder(),
-                    async (o, token) => { offer = o; accepted = await ConsentAsync(o, token); live.Accepted = accepted; return accepted; }, null, cts.Token);
+                    async (o, token) => { offer = o; accepted = await ConsentAsync(o, token); live.Accepted = accepted; return accepted; }, saved, cts.Token);
                 Log.Write($"receive session {result.Status} files={result.Files.Count} texts={result.ReceivedTexts.Count}");
                 _ui.TryEnqueue(() => ShowResult(result, offer, accepted));
             }
@@ -266,7 +312,12 @@ sealed class ReceiveHost : IDisposable
         {
             // принятую передачу оборвала политика (сеть стала Public/Unknown или пропал маршрут); .part удалён сессией
             Log.Write("receive session cancelled by policy");
-            _ui.TryEnqueue(() => _notifications.Info("interrupted", Strings.TransferInterrupted));
+            var files = saved.Snapshot();
+            _ui.TryEnqueue(() =>
+            {
+                _notifications.Info("interrupted", Strings.TransferInterrupted);
+                if (files.Count > 0) _notifications.Received(files);
+            });
         }
         catch (Exception e)
         {
@@ -277,6 +328,14 @@ sealed class ReceiveHost : IDisposable
             lock (_gate) _live.Remove(live);
             Interlocked.Decrement(ref _sessions);
         }
+    }
+
+    /// <summary>Файлы, уже записанные под итоговыми именами: нужны и тогда, когда сессия оборвана исключением.</summary>
+    sealed class SavedFiles : ITransferObserver
+    {
+        readonly List<string> _paths = [];
+        public void FileSaved(string path) { lock (_paths) _paths.Add(path); }
+        public IReadOnlyList<string> Snapshot() { lock (_paths) return [.. _paths]; }
     }
 
     static string DeviceName(string? raw) => DisplayText.SanitizeName(raw, Strings.UnknownDevice);
@@ -330,6 +389,10 @@ sealed class ReceiveHost : IDisposable
                 _notifications.Info("failed", Strings.ReceiveFailed);
                 break;
         }
+        // оборванная передача: уже сохранённые файлы остаются в «Загрузках», о них тоже говорим
+        if (result.Status is TransferStatus.CancelledByPeer or TransferStatus.TimedOut or TransferStatus.ProtocolError or TransferStatus.Failed
+            && result.Files.Count > 0)
+            _notifications.Received(result.Files);
     }
 
     public void Dispose()

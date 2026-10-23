@@ -129,7 +129,7 @@ sealed class NearbyService : IDisposable
             if (_lostGrace.Remove(endpoint.InstanceName, out var pending)) pending.Dispose();
         }
         Log.Write($"share: device found, kind {endpoint.Kind}");
-        var view = new DeviceView(endpoint.InstanceName, endpoint.DisplayName, Map(endpoint.Kind));
+        var view = new DeviceView(endpoint.InstanceName, DisplayText.SanitizeName(endpoint.DisplayName, Strings.UnknownDevice), Map(endpoint.Kind));   // имя из mDNS задаёт пир
         Post(epoch, () => DeviceFound?.Invoke(view));
     }
 

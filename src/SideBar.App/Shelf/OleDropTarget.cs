@@ -1,6 +1,8 @@
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
 
+using SideBar.Sharing;
+
 namespace SideBar.Shelf;
 
 [StructLayout(LayoutKind.Sequential)]
@@ -81,7 +83,8 @@ internal sealed partial class ShelfDropTarget(
             {
                 if (isOverShareTile(pt.X, pt.Y))
                 {
-                    var paths = canShare() ? (own ? DragOut.CarriedPaths : OleData.ReadHDrop(dataObj)) : [];
+                    // временные файлы копируются сейчас: источник удалит их после drop
+                    var paths = canShare() ? (own ? DragOut.CarriedPaths : ShareStaging.Stage(OleData.ReadHDrop(dataObj))) : [];
                     if (paths.Count > 0)
                     {
                         if (own) DragOut.KeepItemsAfterDrop();   // отправка не уносит элементы из стопки

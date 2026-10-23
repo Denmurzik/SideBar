@@ -23,6 +23,13 @@ public class NetworkInfoTests
         Assert.Equal(NetworkCategory.Unknown, NetworkInfo.CategoryOf(-1));
     }
 
+    [Fact]
+    public void Failed_lookup_is_null_not_unknown()
+    {
+        Assert.Null(NetworkInfo.LookupCategory(-1));
+        Assert.Null(NetworkInfo.LookupCategory(5, [() => throw new InvalidOperationException()]));
+    }
+
     static Func<NetworkInfo.AdapterInfo> Fake(int index, string ip, bool gateway = true, NetworkInterfaceType type = NetworkInterfaceType.Ethernet) =>
         () => new(Guid.NewGuid().ToString("B"), System.Net.NetworkInformation.OperationalStatus.Up, type, index, System.Net.IPAddress.Parse(ip), gateway);
 

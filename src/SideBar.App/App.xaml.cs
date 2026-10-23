@@ -55,6 +55,7 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         _ui = DispatcherQueue.GetForCurrentThread();
+        ShareStaging.SweepStale();   // остатки аварийно завершённого прошлого запуска
         _shelf = new ShelfService();
         _shelf.Load();
         _window = new CardWindow();
@@ -65,7 +66,7 @@ public partial class App : Application
         {
             if (s != PanelState.Hidden) return;
             DragOut.Reset();
-            _trimmer.OnHidden();
+            CardHidden();
         };
 
         var (layout, mode, scale, primary) = Measure();
@@ -75,7 +76,7 @@ public partial class App : Application
         _primary = primary;
         _window.Initialize(layout, mode, scale);
         _machine = new EdgeStateMachine(layout, mode);
-        _trimmer.OnHidden();
+        CardHidden();
         // после первого Show (его ставит в очередь Initialize): к этому времени у окна есть дочерние HWND WinUI
         _ui.TryEnqueue(() =>
         {
@@ -108,7 +109,7 @@ public partial class App : Application
                     {
                         lock (_gate) return new PromptAnchor(_layout.CardRectAt(_layout.LeftFor(PanelState.Open)), _scale, Displays.PrimaryWorkArea(), _fanZone);
                     });
-                    _prompt.ZoneChanged += z => { lock (_gate) _promptZone = z; };
+                    _prompt.ZoneChanged += OnPromptZone;
                 }
                 _prompt.Present(spec, ct);
             });
@@ -120,7 +121,23 @@ public partial class App : Application
         _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.IsEveryone, _receive.ToggleEveryone);
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
-        _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) _trimmer.OnHidden(); }), null, 2000, Timeout.Infinite);
+        _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) CardHidden(); }), null, 2000, Timeout.Infinite);
+    }
+
+    // видимая панель запроса считается «показанной»: пока она на экране, working set не обрезается
+    void OnPromptZone(PxRect? zone)
+    {
+        bool hidden;
+        lock (_gate) { _promptZone = zone; hidden = _machine?.State == PanelState.Hidden; }
+        if (zone is not null) _trimmer.OnShown();
+        else if (hidden) _trimmer.OnHidden();
+    }
+
+    void CardHidden()
+    {
+        bool prompt;
+        lock (_gate) prompt = _promptZone is not null;
+        if (!prompt) _trimmer.OnHidden();
     }
 
     void InitShare()
@@ -161,7 +178,7 @@ public partial class App : Application
         if (_share.State == ShareTileState.Idle) _shareTimer?.Stop();
         else _shareTimer?.Start();
         // поиск и соединение больше не нужны ни при итоге, ни при отмене; Cancel идемпотентна
-        if (!keep) _nearby?.Cancel();
+        if (!keep) { _nearby?.Cancel(); ShareStaging.Cleanup(); }   // копии временных файлов больше не нужны
         Log.Write($"share tile {_share.State}");
     }
 
@@ -221,7 +238,7 @@ public partial class App : Application
             lock (_gate) stillHidden = machine.State == PanelState.Hidden;
             if (!stillHidden) return;
             _window?.SetState(PanelState.Hidden);
-            _trimmer.OnHidden();
+            CardHidden();
         }), TaskScheduler.Default);
     }
 
@@ -293,10 +310,11 @@ public partial class App : Application
             _machine.Relayout(layout, mode);
         }
         _fan?.Hide();
-        _share?.Cancel();
+        // смена геометрии отменяет только поиск и выбор: идущая отправка доходит до конца (плитка перерисуется после Relayout)
+        if (_share?.State is ShareTileState.Searching or ShareTileState.Choosing) _share.Cancel();
         _window.Relayout(layout, mode, scale);
         _dropTarget?.Refresh();   // WinUI может пересоздать дочерние HWND при смене DPI/дисплея
-        _trimmer.OnHidden();   // Relayout не поднимает Settled
+        CardHidden();   // Relayout не поднимает Settled
     }
 
     (CardLayout layout, EdgeMode mode, double scale, PxRect primary) Measure()

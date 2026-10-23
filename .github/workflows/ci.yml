@@ -23,6 +23,11 @@ jobs:
       - name: Build Nearby tests
         run: dotnet build tests/SideBar.Nearby.Tests -c Release
 
+      - name: Build dev tools (not run)
+        run: |
+          dotnet build tools/SideBar.Nearby.Cli -c Release
+          dotnet build tools/SideBar.DragDriver -c Release
+
       - name: Run tests
         run: tests/SideBar.Core.Tests/bin/Release/net10.0-windows10.0.26100.0/SideBar.Core.Tests.exe
 

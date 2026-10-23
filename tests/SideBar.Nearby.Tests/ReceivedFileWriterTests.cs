@@ -105,6 +105,12 @@ public sealed class ReceivedFileWriterTests : IDisposable
         {
             Environment.SetEnvironmentVariable(ReceivedFileWriter.DownloadsOverrideVariable, _dir);
             Assert.Equal(_dir, ReceivedFileWriter.DownloadsFolder());
+            foreach (var bad in new[] { @"relative\dir", "C:dir", @"\dir" })
+            {
+                Environment.SetEnvironmentVariable(ReceivedFileWriter.DownloadsOverrideVariable, bad);
+                Assert.NotEqual(bad, ReceivedFileWriter.DownloadsFolder());
+                Assert.True(Path.IsPathFullyQualified(ReceivedFileWriter.DownloadsFolder()));
+            }
             Environment.SetEnvironmentVariable(ReceivedFileWriter.DownloadsOverrideVariable, null);
             Assert.True(Path.IsPathRooted(ReceivedFileWriter.DownloadsFolder()));
         }

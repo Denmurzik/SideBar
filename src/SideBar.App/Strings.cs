@@ -18,6 +18,8 @@ static class Strings
     public const string NotEnoughSpace = "Недостаточно места на диске для приёма";
     public const string SenderCancelled = "Отправитель отменил передачу";
     public const string TimedOut = "Время ожидания истекло, передача отклонена";
+    public const string ReceivePublicNetwork = "Сеть общедоступная — приём выключен";
+    public const string ReceiveNoLan = "Нет подключения к локальной сети";
     public const string ReceiveFailed = "Не удалось получить данные";
 
     public static string Files(int n)

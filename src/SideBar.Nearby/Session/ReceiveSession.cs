@@ -21,6 +21,7 @@ public static class ReceiveSession
         var identity = options.ResolvedIdentity;
         Directory.CreateDirectory(outputDirectory);
         var incoming = new Dictionary<long, IncomingTarget>();
+        var saved = new List<string>();   // survives a failure: files committed before it are still reported
 
         await using var connection = new NearbyConnection(stream, "receive", options);
         // A peer that connects and then stalls must not hold the session: the plaintext handshake has its own deadline.
@@ -58,7 +59,6 @@ public static class ReceiveSession
 
             // 3. Paired key, Introduction, consent, file chunks.
             var accepted = false;
-            var saved = new List<string>();
             var introduced = false;
             long totalSize = 0, receivedTotal = 0;
             var texts = new List<Share.TextMetadata>();
@@ -88,6 +88,7 @@ public static class ReceiveSession
                     target.Path = target.Writer.Commit();
                     target.Done = true;
                     saved.Add(target.Path);
+                    observer.FileSaved(target.Path);
                 }
                 return incoming.Values.All(t => t.Done) && pendingTexts.Count == 0;
             }
@@ -234,11 +235,11 @@ public static class ReceiveSession
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return new TransferResult(TransferStatus.TimedOut, [], "Handshake timed out.");
+            return new TransferResult(TransferStatus.TimedOut, saved, "Handshake timed out.");
         }
         catch (Exception e) when (SessionErrors.IsHandled(e))
         {
-            return SessionErrors.ToResult(e);
+            return SessionErrors.ToResult(e, saved);
         }
     }
 

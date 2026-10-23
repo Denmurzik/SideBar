@@ -86,16 +86,23 @@ public static partial class NetworkInfo
     /// <summary>Windows network category of the adapter; any failure (COM, no match) yields Unknown, i.e. do not listen.</summary>
     public static NetworkCategory CategoryOf(int interfaceIndex) => CategoryOf(interfaceIndex, SystemAdapters());
 
-    internal static NetworkCategory CategoryOf(int interfaceIndex, IEnumerable<Func<AdapterInfo>> adapters)
+    internal static NetworkCategory CategoryOf(int interfaceIndex, IEnumerable<Func<AdapterInfo>> adapters) =>
+        LookupCategory(interfaceIndex, adapters) ?? NetworkCategory.Unknown;
+
+    /// <summary>Like <see cref="CategoryOf(int)"/>, but a failed lookup (COM or adapter enumeration threw, adapter not found) is null,
+    /// distinct from NLM really reporting Unknown.</summary>
+    public static NetworkCategory? LookupCategory(int interfaceIndex) => LookupCategory(interfaceIndex, SystemAdapters());
+
+    internal static NetworkCategory? LookupCategory(int interfaceIndex, IEnumerable<Func<AdapterInfo>> adapters)
     {
         try
         {
             var adapterId = AdapterGuid(interfaceIndex, adapters);
-            return adapterId is null ? NetworkCategory.Unknown : QueryCategory(adapterId.Value);
+            return adapterId is null ? null : QueryCategory(adapterId.Value);
         }
         catch (Exception)
         {
-            return NetworkCategory.Unknown;
+            return null;
         }
     }
 
@@ -113,7 +120,7 @@ public static partial class NetworkInfo
         return null;
     }
 
-    private static NetworkCategory QueryCategory(Guid adapterId)
+    private static NetworkCategory? QueryCategory(Guid adapterId)
     {
         // S_OK / S_FALSE must be balanced; RPC_E_CHANGED_MODE (thread is already STA) is fine, just do not uninitialize.
         var initialized = CoInitializeEx(0, 0) >= 0;
@@ -121,13 +128,12 @@ public static partial class NetworkInfo
         finally { if (initialized) CoUninitialize(); }
     }
 
-    private static NetworkCategory QueryCategoryCore(Guid adapterId)
+    private static NetworkCategory? QueryCategoryCore(Guid adapterId)
     {
-
         var clsid = new Guid("DCB00C01-570F-4A9B-8D69-199FDBA5723B");
         var iid = new Guid("DCB00000-570F-4A9B-8D69-199FDBA5723B");
         if (CoCreateInstance(in clsid, 0, 1 /* CLSCTX_INPROC_SERVER */ | 4 /* LOCAL_SERVER */, in iid, out var ptr) < 0 || ptr == 0)
-            return NetworkCategory.Unknown;
+            return null;
 
         var manager = (INetworkListManager)new StrategyBasedComWrappers().GetOrCreateObjectForComInstance(ptr, CreateObjectFlags.UniqueInstance);
         Marshal.Release(ptr);
