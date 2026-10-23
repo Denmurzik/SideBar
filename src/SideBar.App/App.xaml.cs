@@ -111,6 +111,9 @@ public partial class App : Application
             }
             Log.Write("ready");
 #if DEBUG
+            // скриншот глубокой стопки без ввода: SIDEBAR_DEBUG_FILL=<папка> кладёт на полку файлы папки (ссылками)
+            if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_FILL") is { Length: > 0 } fillDir && Directory.Exists(fillDir) && _shelf is not null)
+                foreach (var f in Directory.EnumerateFiles(fillDir).Order()) _shelf.Model.Add(f, SideBar.Core.Shelf.ShelfItemKind.Reference);
             if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_OPEN") == "1")
             {
                 _debugOpen = true;   // автомат мыши отключён, карточка открыта для скриншотов
