@@ -59,13 +59,15 @@ sealed class ReceiveHost : IDisposable
     {
         _ui = ui;
         _identity = identity;
-        identity.Changed += OnIdentityChanged;   // сначала подписка, потом чтение Current: перезагрузка между ними не теряется
         _visibility = new VisibilityModel(identity.Current is not null, VisibilitySettings.Load());
         _notifications = notifications;
         _clipboardOwner = clipboardOwner;
         _bounce = bounce;
         NearbyLog.Log = e => Log.Write($"nearby {e.Kind}{(e.Size is { } s ? " " + s : "")}{(e.Value is null ? "" : " " + e.Value)}");
         NetworkChange.NetworkAddressChanged += OnNetworkChanged;
+        // модель уже создана; подписка, затем повторное чтение Current: перезагрузка между чтением и подпиской не теряется
+        identity.Changed += OnIdentityChanged;
+        lock (_gate) _visibility.SetOwnDevicesAvailable(identity.Current is not null);
         Log.Write($"visibility {_visibility.Current}");
         NoteDegraded();
         _timer = new Timer(_ => OnTick(), null, TimeSpan.FromSeconds(TickSeconds), TimeSpan.FromSeconds(TickSeconds));
@@ -113,10 +115,11 @@ sealed class ReceiveHost : IDisposable
     // «Свои устройства» нужны, но сертификатов нет: одна заметка за запуск
     void NoteDegraded()
     {
+        var failure = _identity.Failure;   // берёт блокировку загрузки: не под _gate, иначе UI ждёт перезагрузку
         lock (_gate)
         {
             // Missing: Quick Share не установлен, говорить нечего
-            if (!_visibility.OwnDevicesDegraded || _degradeNoted || _identity.Failure is null or CertLoadFailure.Missing) return;
+            if (!_visibility.OwnDevicesDegraded || _degradeNoted || failure is null or CertLoadFailure.Missing) return;
             _degradeNoted = true;
         }
         Log.Write("own devices unavailable, working as hidden");

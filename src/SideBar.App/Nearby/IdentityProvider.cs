@@ -51,7 +51,8 @@ sealed class IdentityProvider : IDisposable
     void OnFilesChanged()
     {
         Load();
-        Changed?.Invoke();
+        try { Changed?.Invoke(); }
+        catch (Exception e) { Log.Write("certs changed handler failed: " + Log.Describe(e)); }   // поток таймера не должен падать из-за подписчика
     }
 
     void Load()
