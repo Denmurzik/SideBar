@@ -86,13 +86,13 @@ public class ReceiveTileModelTests
     }
 
     [Fact]
-    public void Visible_note_hides_after_eight_seconds()
+    public void Visible_note_hides_after_ten_seconds()
     {
         var m = new ReceiveTileModel();
         m.AddNote(["x"], [], T0);
-        Run(m, 0, 7.5, true);
+        Run(m, 0, 9.5, true);
         Assert.NotNull(m.CurrentNote);
-        Run(m, 8, 8.5, true);
+        Run(m, 10, 10.5, true);
         Assert.Null(m.CurrentNote);
     }
 
@@ -103,9 +103,9 @@ public class ReceiveTileModelTests
         m.AddNote(["x"], [], T0);
         Run(m, 0, 300, false);
         Assert.NotNull(m.CurrentNote);
-        Run(m, 300.5, 307, true);
+        Run(m, 300.5, 309, true);
         Assert.NotNull(m.CurrentNote);
-        Run(m, 307.5, 309, true);
+        Run(m, 309.5, 311, true);
         Assert.Null(m.CurrentNote);
     }
 
@@ -167,9 +167,9 @@ public class ReceiveTileModelTests
     {
         var m = new ReceiveTileModel();
         m.AddNote(["x"], [], T0);
-        Run(m, 0, 6, true);               // about 2 s left
-        m.SetHovered(true, T0.AddSeconds(6));
-        Run(m, 6.5, 60, true);
+        Run(m, 0, 8, true);               // about 2 s left
+        m.SetHovered(true, T0.AddSeconds(8));
+        Run(m, 8.5, 60, true);
         Assert.NotNull(m.CurrentNote);
         m.SetHovered(false, T0.AddSeconds(60));   // at least 3 s from now
         Run(m, 60.5, 62, true);

@@ -40,6 +40,20 @@ public partial class App : Application
     readonly BumpGate _bump = new();
     readonly AttentionBounce _attention = new();
     readonly ReceiveTileModel _recv = new();
+#if DEBUG
+    Timer? _debugNote;
+    void DebugNote(string kind)
+    {
+        switch (kind)
+        {
+            case "file": _notifications?.Received(["C:/x/photo.jpg"], "Pixel 9"); break;
+            case "unsafe": _notifications?.Received(["C:/x/setup.exe"], "Pixel 9"); break;
+            case "link": _notifications?.SharedText("Pixel 9", SideBar.Nearby.Session.TextKind.Url, "https://example.com/page"); break;
+            case "text": _notifications?.SharedText("Pixel 9", SideBar.Nearby.Session.TextKind.Text, "Привет с телефона"); break;
+            case "cancel": _notifications?.Info("cancelled", Strings.SenderCancelled); break;
+        }
+    }
+#endif
     bool _debugOpen = false;   // DEBUG: SIDEBAR_DEBUG_OPEN=1 держит карточку открытой для скриншотов
     ShareTileModel? _share;
     NearbyService? _nearby;
@@ -111,6 +125,9 @@ public partial class App : Application
         _receive = new ReceiveHost(_ui, _notifications, _messages.Handle, BounceOnce, _identity);
 #if DEBUG
         if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_EVERYONE") == "1") _receive.SetMode(SideBar.Core.Nearby.Visibility.Everyone, persist: false);   // автотест без клика по меню трея
+        // скриншоты заметок: каждые 6 с показывает заметку file | unsafe | link | text | cancel (с SIDEBAR_DEBUG_OPEN=1)
+        if (Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_NOTE") is { Length: > 0 } noteKind)
+            _debugNote = new Timer(_ => _ui?.TryEnqueue(() => DebugNote(noteKind)), null, 3000, 6000);
 #endif
         _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m));
 

@@ -180,30 +180,44 @@ public sealed partial class ShareTileView : UserControl
         _noteSignature = signature;
         NotePanel.Children.Clear();
         if (note is null) return;
+        // текст по центру свободной области, снизу кнопки в ряд (одна — на всю ширину)
+        var lines = new StackPanel { Spacing = 4, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Stretch };
         for (int i = 0; i < note.Lines.Count; i++)
         {
-            NotePanel.Children.Add(new TextBlock
+            lines.Children.Add(new TextBlock
             {
-                Text = note.Lines[i], FontSize = 12,
+                Text = note.Lines[i], FontSize = 12, TextAlignment = TextAlignment.Center,
                 FontWeight = i == 0 ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
                 TextWrapping = TextWrapping.Wrap, MaxLines = 3, TextTrimming = TextTrimming.CharacterEllipsis,
             });
         }
-        foreach (var b in note.Buttons)
+        Grid.SetRow(lines, 0);
+        if (note.Buttons.Count == 0) Grid.SetRowSpan(lines, 2);
+        NotePanel.Children.Add(lines);
+        if (note.Buttons.Count == 0) return;
+        var row = new Grid { ColumnSpacing = 8, Height = NoteButtonHeight };   // зазор и поля — как внутренний отступ плитки
+        Grid.SetRow(row, 1);
+        for (int i = 0; i < note.Buttons.Count; i++)
         {
-            var button = b;
-            NotePanel.Children.Add(Button(button.Label, () =>
+            var button = note.Buttons[i];
+            row.ColumnDefinitions.Add(new ColumnDefinition());
+            var b = Button(button.Label, () =>
             {
                 try { button.Act(); }
                 catch (Exception e) { Log.Write("note action failed: " + Log.Describe(e)); }
                 r.RemoveNote(note.Id);
-            }, accent: false, gate: CanPress));
+            }, accent: false, gate: CanPress, tall: true);
+            Grid.SetColumn(b, i);
+            row.Children.Add(b);
         }
+        NotePanel.Children.Add(row);
     }
+
+    const double NoteButtonHeight = 64;
 
     // Кнопка на Border + Tapped, как у иконок устройств: карточка не активируется, штатный Button в ней не проверен
     // gate: нажатие засчитывается, только если оно прошло проверку в момент PointerPressed (карточка открыта и стоит, строки не двигались 350 мс)
-    static Border Button(string label, Action act, bool accent, bool narrow = false, Func<bool>? gate = null)
+    static Border Button(string label, Action act, bool accent, bool narrow = false, Func<bool>? gate = null, bool tall = false)
     {
         Brush normal = accent ? (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
         Brush hover = accent ? (Brush)Application.Current.Resources["AccentFillColorSecondaryBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x3C, 0xFF, 0xFF, 0xFF));
@@ -212,6 +226,14 @@ public sealed partial class ShareTileView : UserControl
             Text = label, FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis,
             Foreground = accent ? (Brush)Application.Current.Resources["TextOnAccentFillColorPrimaryBrush"] : (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"],
         };
+        if (tall)
+        {
+            // высокая кнопка заметки: подпись по центру, переносится на 2 строки
+            text.TextWrapping = TextWrapping.Wrap;
+            text.TextAlignment = TextAlignment.Center;
+            text.MaxLines = 2;
+            text.VerticalAlignment = VerticalAlignment.Center;
+        }
         var border = new Border { CornerRadius = new CornerRadius(4), Padding = new Thickness(narrow ? 10 : 6, 5, narrow ? 10 : 6, 5), Background = normal, Child = text };
         border.PointerEntered += (_, _) => border.Background = hover;
         border.PointerExited += (_, _) => border.Background = normal;
