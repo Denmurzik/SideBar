@@ -176,41 +176,41 @@ sealed class NearbyService : IDisposable
     {
         if (!IncludeLocal && QuickShareAdvertiser.IsLocalAddress(endpoint.Address)) return;   // свои же объявления
         if (!PassesDebugNameFilter(endpoint.DisplayName)) return;
-        string? supersededBleKey = null;
+        var view = ViewOf(endpoint);   // не трогает _gate-состояние: крипто-проверка идёт до критической секции
         lock (_gate)
         {
             if (epoch != _epoch) return;
             _endpoints[endpoint.InstanceName] = endpoint;
             if (_lostGrace.Remove(endpoint.InstanceName, out var pending)) pending.Dispose();
-            // mDNS увидел то же своё устройство, что уже показано по BLE: mDNS в приоритете, BLE-тайл убирается
-            if (KeyOf(endpoint) is { } bleKey && _bleTargets.Remove(bleKey)) supersededBleKey = bleKey;
+            // mDNS увидел то же своё устройство, что уже показано по BLE: mDNS в приоритете, BLE-тайл убирается.
+            // Post здесь же, под тем же _gate, что и мутация _bleTargets/_endpoints: иначе порядок доставки на
+            // UI-поток мог разойтись с порядком захвата лока между потоками mDNS и BLE (два независимых
+            // источника могут захватить лок в одном порядке, но позвать Post — в другом).
+            if (KeyOf(endpoint) is { } bleKey && _bleTargets.Remove(bleKey))
+                Post(epoch, () => DeviceLost?.Invoke("ble:" + bleKey));
+            Post(epoch, () => DeviceFound?.Invoke(view));
         }
         Log.Write($"share: device found, kind {endpoint.Kind}");
-        var view = ViewOf(endpoint);
-        if (supersededBleKey is { } key) Post(epoch, () => DeviceLost?.Invoke("ble:" + key));
-        Post(epoch, () => DeviceFound?.Invoke(view));
     }
 
     // устройство из mDNS как "своё" (для сравнения с BLE-presence по общему Key, не по InstanceName)
     string? KeyOf(DiscoveredEndpoint endpoint) => OwnIdentity(endpoint)?.TryGetPeerKey(endpoint.Info);
 
     // рабочий поток BLE-наблюдателя: своё устройство увидено по рекламе Nearby (FEF3), не по mDNS — обычно экран
-    // заблокирован. mDNS в приоритете: если устройство уже показано через него, BLE-тайл не создаётся (Choose
-    // Task 2: дедуп).
+    // заблокирован. mDNS в приоритете: если устройство уже показано через него, BLE-тайл не создаётся (дедуп).
     void OnBlePresenceFound(int epoch, BlePresence presence)
     {
-        CertificateIdentity.BluetoothTarget? target;
+        var view = new DeviceView("ble:" + presence.Key, DisplayText.SanitizeName(presence.DeviceName, Strings.OwnDevice), ShareDeviceKind.Phone, IsOwn: true);
         lock (_gate)
         {
             if (epoch != _epoch) return;
             if (_endpoints.Values.Any(e => KeyOf(e) == presence.Key)) return;
-            target = _identity.Current?.FindBluetoothTargets().FirstOrDefault(t => t.Key == presence.Key);
+            var target = _identity.Current?.FindBluetoothTargets().FirstOrDefault(t => t.Key == presence.Key);
             if (target is null) return;
             _bleTargets[presence.Key] = target;
+            Post(epoch, () => DeviceFound?.Invoke(view));   // внутри лока по той же причине, что в OnFound
         }
         Log.Write("share: device found over bluetooth");
-        var view = new DeviceView("ble:" + presence.Key, DisplayText.SanitizeName(presence.DeviceName, Strings.OwnDevice), ShareDeviceKind.Phone, IsOwn: true);
-        Post(epoch, () => DeviceFound?.Invoke(view));
     }
 
     void OnBleLost(int epoch, string key)
@@ -218,8 +218,8 @@ sealed class NearbyService : IDisposable
         lock (_gate)
         {
             if (epoch != _epoch || !_bleTargets.Remove(key)) return;
+            Post(epoch, () => DeviceLost?.Invoke("ble:" + key));
         }
-        Post(epoch, () => DeviceLost?.Invoke("ble:" + key));
     }
 
     // своё устройство рекламирует себя без имени: имя берётся из его сертификата; чужое называется по mDNS (имя задаёт пир)
