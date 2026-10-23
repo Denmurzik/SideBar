@@ -18,6 +18,8 @@ DefaultDirName={autopf}\SideBar
 DefaultGroupName=SideBar
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
+; HKCU трогаем осознанно: только удаление значения автозапуска при деинсталляции
+UsedUserAreasWarning=no
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
