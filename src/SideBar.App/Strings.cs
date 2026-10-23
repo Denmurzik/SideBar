@@ -90,7 +90,9 @@ static class Strings
     public const string CheckNowSoon = "Появится после обновления";
     public const string CheckingNow = "Проверяем…";
     public const string UpToDate = "Установлена последняя версия";
-    public const string CheckFailed = "Не удалось проверить обновления";
+    public const string CheckFailed = "Не удалось проверить";
+    public const string CheckFailedClosed = "Не удалось проверить (репозиторий закрыт)";
+    public static string UpdateAvailable(string version) => $"Доступна версия {version}";
     public const string ReleasesTitle = "Страница релизов";
     public const string ReleasesLink = "Открыть на GitHub";
 

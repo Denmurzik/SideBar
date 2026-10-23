@@ -6,11 +6,13 @@ using SideBar.Core.Layout;
 using SideBar.Core.Nearby;
 using SideBar.Edge;
 using SideBar.Core.Settings;
+using SideBar.Core.Updates;
 using SideBar.Nearby;
 using SideBar.Settings;
 using SideBar.Shelf;
 using SideBar.Sharing;
 using SideBar.Tray;
+using SideBar.Updates;
 using WinRT.Interop;
 
 namespace SideBar;
@@ -39,6 +41,7 @@ public partial class App : Application
     Notifications? _notifications;
     ReceiveHost? _receive;
     SettingsStore? _settings;
+    UpdateChecker? _updates;
     readonly StackPause _stack = new();
     OfficialAppWatcher? _official;
     IdentityProvider? _identity;
@@ -150,6 +153,7 @@ public partial class App : Application
             _debugNote = new Timer(_ => _ui?.TryEnqueue(() => DebugNote(noteKind)), null, 3000, 6000);
 #endif
         _tray = new TrayIcon(_messages, autostart, exe, () => _ui?.TryEnqueue(ExitApp), () => _receive.Mode, () => _receive.OwnDevicesAvailable, m => _receive.SetMode(m), () => _stack.IsPaused) { OpenSettings = () => ShowSettings() };
+        InitUpdates();
 #if DEBUG
         // скриншоты без ввода: SIDEBAR_DEBUG_SETTINGS=<0..4> открывает окно настроек на нужном разделе
         var debugSettings = Environment.GetEnvironmentVariable("SIDEBAR_DEBUG_SETTINGS");
@@ -176,6 +180,26 @@ public partial class App : Application
 
         // к первой обрезке окно ещё достраивается: повторяем через 2 с, если карточка всё ещё скрыта
         _startupTrim = new Timer(_ => _ui?.TryEnqueue(() => { if (_machine?.State == PanelState.Hidden) CardHidden(); }), null, 2000, Timeout.Infinite);
+    }
+
+    /// <summary>Проверка обновлений (M7): таймер раз в час, пункт трея, кнопка «Проверить сейчас» в настройках.</summary>
+    void InitUpdates()
+    {
+        _updates = new UpdateChecker(_settings!, new UpdateStateStore(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsPath())!, "update-state.json")));
+        _tray!.AvailableUpdate = () => _updates.Available;
+        _tray.OpenUpdate = UpdateChecker.OpenRelease;
+        SettingsWindow.CheckForUpdatesNow = async () =>
+        {
+            var o = await _updates.CheckNowAsync();
+            return o.Kind switch
+            {
+                UpdateKind.UpToDate => Strings.UpToDate,
+                UpdateKind.Available => Strings.UpdateAvailable(o.Release!.Version.ToString()),
+                UpdateKind.NotFound => Strings.CheckFailedClosed,
+                _ => Strings.CheckFailed,
+            };
+        };
+        _updates.Start();
     }
 
     static string SettingsPath() => System.IO.Path.Combine(
@@ -309,6 +333,7 @@ public partial class App : Application
             try { _dropTarget?.Dispose(); } catch { }
             try { _receive?.Dispose(); } catch { }
             try { _identity?.Dispose(); } catch { }
+            try { _updates?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
             try { _messages?.Dispose(); } catch { }
         }

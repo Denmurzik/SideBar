@@ -265,7 +265,7 @@ public sealed partial class SettingsWindow : Window
     }
 
     static string VersionText() =>
-        typeof(SettingsWindow).Assembly.GetName().Version is { } v ? $"{v.Major}.{v.Minor}.{v.Build}" : "";
+        SideBar.Updates.UpdateChecker.CurrentVersion?.ToString() ?? "";
 
     UIElement BuildQuickShare()
     {

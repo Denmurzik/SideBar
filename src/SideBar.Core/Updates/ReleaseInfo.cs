@@ -17,16 +17,25 @@ public sealed record ReleaseInfo(Version Version, string HtmlUrl)
         try
         {
             var dto = JsonSerializer.Deserialize(json, UpdateJsonContext.Default.ReleaseDto);
-            if (dto is null || !AppVersion.TryParse(dto.TagName, out var v)) return false;
-            if (!TryNormalizeUrl(dto.HtmlUrl, out var url)) return false;
-            info = new ReleaseInfo(v, url);
-            return true;
+            return dto is not null && TryCreate(dto.TagName, dto.HtmlUrl, out info);
         }
         catch (Exception)
         {
             return false;
         }
     }
+
+    /// <summary>Та же проверка тега и адреса для данных не из сети (восстановление из update-state.json).</summary>
+    public static bool TryCreate(string? tag, string? htmlUrl, [NotNullWhen(true)] out ReleaseInfo? info)
+    {
+        info = null;
+        if (!AppVersion.TryParse(tag, out var v) || !TryNormalizeUrl(htmlUrl, out var url)) return false;
+        info = new ReleaseInfo(v, url);
+        return true;
+    }
+
+    /// <summary>Тег для сохранения: «v» + версия.</summary>
+    public string Tag => "v" + Version;
 
     private static bool TryNormalizeUrl(string? raw, [NotNullWhen(true)] out string? url)
     {
