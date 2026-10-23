@@ -1,12 +1,15 @@
-using System.Globalization;
+using System.Runtime.InteropServices;
 using SideBar.Core.Localization;
 using SideBar.Core.Settings;
 
 namespace SideBar;
 
 /// <summary>Фасад строк UI: язык выбирается один раз при старте (<see cref="UiLanguage.Resolve"/>), сами строки — в SideBar.Core.Localization.</summary>
-static class Strings
+static partial class Strings
 {
+    // InvariantGlobalization: CultureInfo.CurrentUICulture всегда инвариантная, язык ОС берём у системы
+    [LibraryImport("kernel32.dll")] private static partial ushort GetUserDefaultUILanguage();
+
     public const string AppName = "SideBar";
     // названия языков — на самом языке, не из таблиц (кириллица записана кодами: в App нет русского текста)
     public const string LanguageRu = "\u0420\u0443\u0441\u0441\u043A\u0438\u0439";   // Русский
@@ -17,7 +20,7 @@ static class Strings
     /// <summary>Вызывается один раз в начале OnLaunched; смена языка в настройках действует после перезапуска.</summary>
     public static void Initialize(AppSettings settings)
     {
-        var lang = UiLanguage.Resolve(settings, CultureInfo.CurrentUICulture);
+        var lang = UiLanguage.Resolve(settings, UiLanguage.FromLangId(GetUserDefaultUILanguage()));
 #if DEBUG
         // скриншоты: SIDEBAR_UI_LANG=ru|en перекрывает и настройку, и язык Windows
         lang = Environment.GetEnvironmentVariable("SIDEBAR_UI_LANG") switch { "en" => Language.English, "ru" => Language.Russian, _ => lang };
@@ -151,5 +154,6 @@ static class Strings
     public static string UpdateAvailable(string version) => string.Format(T.UpdateAvailableFmt, version);
     public static string Ms(int n) => string.Format(T.MsFmt, n);
     public static string CertsLoaded(int peers, string until) => string.Format(T.CertsLoadedFmt, peers, until);
+    public static string CertDate(DateTime d) => d.ToString(T.CertDateFormat, System.Globalization.CultureInfo.InvariantCulture);
     public static string CertsFailed(string reason) => string.Format(T.CertsFailedFmt, reason);
 }

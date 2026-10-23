@@ -135,7 +135,16 @@ public class LocalizationTests
         ("MsFmt", t => t.MsFmt),
         ("CertsLoadedFmt", t => t.CertsLoadedFmt),
         ("CertsFailedFmt", t => t.CertsFailedFmt),
+        ("CertDateFormat", t => t.CertDateFormat),
     ];
+
+    [Fact]
+    public void CertDateFormat_follows_language() 
+    {
+        var d = new DateTime(2026, 3, 7);
+        Assert.Equal("07.03.2026", d.ToString(UiTexts.Ru.CertDateFormat, System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal("Mar 7, 2026", d.ToString(UiTexts.En.CertDateFormat, System.Globalization.CultureInfo.InvariantCulture));
+    }
 
     static readonly Regex Cyrillic = new("[А-Яа-яЁё]");
     static readonly Regex Placeholder = new(@"\{(\d+)\}");

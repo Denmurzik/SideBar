@@ -118,11 +118,22 @@ sealed class ReceiveHost : IDisposable
     /// </summary>
     string ReceiveDirectory()
     {
-        var target = ReceiveFolders.Resolve(ReceivedFileWriter.DownloadsOverride(), _settings.Current.ReceiveFolder,
+        // проверка создаёт и удаляет файл-пробу; непроверенный пир не должен гонять её повторными подключениями — результат живёт 30 с
+        var folder = _settings.Current.ReceiveFolder;
+        var now = Environment.TickCount64;
+        lock (_dirGate)
+        {
+            if (_dirCache is { } c && c.Folder == folder && now - c.At < 30_000) return c.Path;
+        }
+        var target = ReceiveFolders.Resolve(ReceivedFileWriter.DownloadsOverride(), folder,
             ReceivedFileWriter.DownloadsFolder, SideBar.Settings.PathProbe.DirectoryWritable);
         if (target.FellBack) Log.Write("receive: chosen folder unavailable, using Downloads");
+        lock (_dirGate) _dirCache = (folder, target.Path, Environment.TickCount64);
         return target.Path;
     }
+
+    readonly object _dirGate = new();
+    (string? Folder, string Path, long At)? _dirCache;
 
     /// <summary>Режим видимости изменился (выбор, смена сертификатов, истечение «Все»); поднимается не на UI-потоке.</summary>
     public event Action? ModeChanged;
