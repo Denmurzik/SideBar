@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -47,3 +49,76 @@ jobs:
         with:
           name: SideBar-win-x64
           path: artifacts/app
+
+  installer:
+    needs: build
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          ver=$(sed -n 's:.*<Version>\(.*\)</Version>.*::p' Directory.Build.props | head -n1)
+          if [ -z "$ver" ]; then echo "::error::Version not found"; exit 1; fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: SideBar-win-x64
+          path: artifacts/app
+
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" installer\SideBar.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SideBar-setup
+          path: artifacts/installer/SideBar-${{ steps.ver.outputs.version }}-setup.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: installer
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches version
+        env:
+          VER: ${{ needs.installer.outputs.version }}
+        run: |
+          if [ "$GITHUB_REF_NAME" != "v$VER" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match <Version> $VER"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: SideBar-setup
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.installer.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "dist/SideBar-$VER-setup.exe"             --title "SideBar $VER" --notes-file docs/release-notes.md
