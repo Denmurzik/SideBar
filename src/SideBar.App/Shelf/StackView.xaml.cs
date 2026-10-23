@@ -1,10 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Imaging;
 using SideBar.Core.Shelf;
-using Windows.Storage;
-using Windows.Storage.FileProperties;
 
 namespace SideBar.Shelf;
 
@@ -14,7 +11,7 @@ namespace SideBar.Shelf;
 /// </summary>
 public sealed partial class StackView : UserControl
 {
-    const int MaxLayers = 3, PreviewSize = 96;
+    const int MaxLayers = 3, PreviewSize = ThumbnailCache.LoadSize;
     const double Step = 6;
     const string DocumentGlyph = "\uE8A5";
     // вращение по глубине от верхнего: сверху 0°, под ним −4°, глубже +4°
@@ -22,11 +19,6 @@ public sealed partial class StackView : UserControl
 
     ShelfService? _shelf;
     ShelfModel? _model;
-    readonly Dictionary<Guid, Thumb?> _thumbs = [];   // null — миниатюры нет, показывается глиф
-
-    /// <summary>IsIcon — значок оболочки (прозрачный, без рамки); иначе картинка (скругление и рамка). Aspect = ширина/высота.</summary>
-    sealed record Thumb(ImageSource Source, bool IsIcon, double Aspect);
-    readonly HashSet<Guid> _loading = [];
 
     public event Action? FanRequested;
 
@@ -48,17 +40,18 @@ public sealed partial class StackView : UserControl
     internal void Bind(ShelfService shelf)
     {
         if (_model != null) _model.Changed -= Rebuild;
+        ThumbnailCache.Shared.Loaded -= Rebuild;
         _shelf = shelf;
         _model = shelf.Model;
         _model.Changed += Rebuild;
+        ThumbnailCache.Shared.Loaded += Rebuild;
         Rebuild();
     }
 
     void Rebuild()
     {
         var items = _model!.Items;
-        var alive = items.Select(i => i.Id).ToHashSet();
-        foreach (var id in _thumbs.Keys.Where(id => !alive.Contains(id)).ToList()) _thumbs.Remove(id);
+        ThumbnailCache.Shared.Prune(items);
 
         Layers.Children.Clear();
         int n = Math.Min(MaxLayers, items.Count);
@@ -66,7 +59,7 @@ public sealed partial class StackView : UserControl
         {
             var item = items[items.Count - n + k];   // k = 0 — самый нижний из показанных
             Layers.Children.Add(MakeLayer(item, k, n));
-            if (!_thumbs.ContainsKey(item.Id) && _loading.Add(item.Id)) _ = LoadThumbnail(item);
+            ThumbnailCache.Shared.Request(item, _model);
         }
         Badge.Visibility = items.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
         BadgeText.Text = items.Count.ToString();
@@ -95,54 +88,8 @@ public sealed partial class StackView : UserControl
         };
         // подложки нет: под акрилом непрозрачный квадрат читался бы чёрной плиткой
         holder.Opacity = depth switch { 0 => 1.0, 1 => 0.85, _ => 0.7 };
-        _thumbs.TryGetValue(item.Id, out var thumb);
-        FrameworkElement visual;
-        if (thumb is { IsIcon: false } pic)
-        {
-            double w = pic.Aspect >= 1 ? PreviewSize : PreviewSize * pic.Aspect, h = pic.Aspect >= 1 ? PreviewSize / pic.Aspect : PreviewSize;
-            double scale = XamlRoot?.RasterizationScale ?? 1;
-            bool dark = ActualTheme != ElementTheme.Light;
-            visual = new Border
-            {
-                Width = w,
-                Height = h,
-                CornerRadius = new CornerRadius(4),
-                BorderThickness = new Thickness(1 / scale),
-                BorderBrush = new SolidColorBrush(dark ? Windows.UI.Color.FromArgb(0x70, 0x8C, 0x8C, 0x8C) : Windows.UI.Color.FromArgb(0x50, 0x40, 0x40, 0x40)),
-                Child = new Image { Source = pic.Source, Stretch = Stretch.UniformToFill },
-            };
-        }
-        else if (thumb != null)
-            visual = new Image { Source = thumb.Source, Stretch = Stretch.Uniform };
-        else
-            visual = new FontIcon { Glyph = DocumentGlyph, FontFamily = new FontFamily("Segoe Fluent Icons"), FontSize = 40, Opacity = 0.6 };
-        visual.HorizontalAlignment = HorizontalAlignment.Center;
-        visual.VerticalAlignment = VerticalAlignment.Center;
-        var frame = visual;
-        holder.Children.Add(frame);
+        var visual = ThumbnailCache.Visual(ThumbnailCache.Shared.Get(item.Id), PreviewSize, 40, XamlRoot?.RasterizationScale ?? 1, ActualTheme != ElementTheme.Light);
+        holder.Children.Add(visual);
         return holder;
-    }
-
-    async Task LoadThumbnail(ShelfItem item)
-    {
-        Thumb? result = null;
-        try
-        {
-            IStorageItemProperties? props = Directory.Exists(item.Path)
-                ? await StorageFolder.GetFolderFromPathAsync(item.Path)
-                : await StorageFile.GetFileFromPathAsync(item.Path);
-            using var thumb = await props.GetThumbnailAsync(ThumbnailMode.SingleItem, PreviewSize);
-            if (thumb is { Size: > 0 })
-            {
-                var bmp = new BitmapImage();
-                await bmp.SetSourceAsync(thumb);
-                result = new Thumb(bmp, thumb.Type == ThumbnailType.Icon, bmp.PixelHeight > 0 ? (double)bmp.PixelWidth / bmp.PixelHeight : 1);
-            }
-        }
-        catch (Exception ex) { Log.Write("thumbnail failed: " + Log.Describe(ex)); }
-        _loading.Remove(item.Id);
-        if (_model is null || !_model.Items.Any(i => i.Id == item.Id)) return;   // пока грузилось, элемент ушёл
-        _thumbs[item.Id] = result;
-        if (result != null) Rebuild();
     }
 }

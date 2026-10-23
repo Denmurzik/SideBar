@@ -365,18 +365,9 @@ sealed class Driver
         return true;
     }
 
-    void DragOutScenarios(int W, int H, string a, string refFile, string folder)
+    /// <summary>Наполняет пустую стопку пятью элементами: ссылка на файл, на каталог, Owned, ссылка на файл, ссылка на png.</summary>
+    List<ShelfEntry> FillShelf(string a, string folder, string refFile, int W, int H)
     {
-        // чистое состояние: перезапуск с пустым каталогом данных
-        StopApp();
-        try { Directory.Delete(_dataDir, true); } catch { }
-        if (!StartApp()) { _fail++; return; }
-        var otherCenter = new Point(_other.Left + 150, _other.Top + 75);
-
-        if (!OpenCard(W, H)) { Rep("FAIL card did not open"); _fail++; return; }
-        Shot("1-empty", W, H);
-        MoveTo(W - 700, H, 200); Thread.Sleep(500);
-
         // наполняем: ссылка на файл, ссылка на каталог, Owned (виртуальный файл), ещё одна ссылка
         var one = new DataObject();
         one.SetData(DataFormats.FileDrop, new[] { a });
@@ -400,7 +391,22 @@ sealed class Driver
         var pngDrop = new DataObject();
         pngDrop.SetData(DataFormats.FileDrop, new[] { png });
         DragToPanel(pngDrop, W, H);
-        s = WaitShelf(x => x.Count == 5);
+        return WaitShelf(x => x.Count == 5);
+    }
+
+    void DragOutScenarios(int W, int H, string a, string refFile, string folder)
+    {
+        // чистое состояние: перезапуск с пустым каталогом данных
+        StopApp();
+        try { Directory.Delete(_dataDir, true); } catch { }
+        if (!StartApp()) { _fail++; return; }
+        var otherCenter = new Point(_other.Left + 150, _other.Top + 75);
+
+        if (!OpenCard(W, H)) { Rep("FAIL card did not open"); _fail++; return; }
+        Shot("1-empty", W, H);
+        MoveTo(W - 700, H, 200); Thread.Sleep(500);
+
+        var s = FillShelf(a, folder, refFile, W, H);
         Check("D0 shelf prepared: file ref, folder ref, owned, file ref, png ref", s.Count == 5 && s.Count(x => x.Kind == Owned) == 1, Dump(s));
         if (OpenCard(W, H)) Shot("3-stack", W, H);
         MoveTo(W - 700, H, 200); Thread.Sleep(500);
@@ -453,6 +459,138 @@ sealed class Driver
             Check("D3c owned file and its Shelf\\<guid> folder are deleted ~30 s after drag-out",
                 !File.Exists(owned.Path) && !Directory.Exists(Path.GetDirectoryName(owned.Path)!), owned.Path);
         }
+        FanScenarios(W, H, a, refFile, folder, otherCenter);
+    }
+
+    // ---- веер (Task 5) ----
+    static readonly System.Text.RegularExpressions.Regex FanLog = new(@"fan (open (-?\d+),(-?\d+),(-?\d+),(-?\d+)|closed)");
+
+    /// <summary>Последняя зона веера из лога приложения (физические px); null — веер закрыт или не открывался.</summary>
+    Rectangle? FanZone()
+    {
+        var m = FanLog.Matches(AppLog());
+        if (m.Count == 0 || m[^1].Value == "fan closed") return null;
+        var g = m[^1].Groups;
+        int l = int.Parse(g[2].Value), t = int.Parse(g[3].Value), r = int.Parse(g[4].Value), b = int.Parse(g[5].Value);
+        return new Rectangle(l, t, r - l, b - t);
+    }
+
+    Rectangle? WaitFan(bool open, int ms = 3000)
+    {
+        var z = FanZone();
+        for (int t = 0; t < ms && (z != null) != open; t += 50) { Thread.Sleep(50); z = FanZone(); }
+        return z;
+    }
+
+    static void Click() { Mouse(0x0002); Thread.Sleep(80); Mouse(0x0004); }
+
+    /// <summary>Открывает карточку и кликом по стопке — веер; ждёт, пока пружина успокоится.</summary>
+    Rectangle? OpenFan(int W, int H)
+    {
+        if (!OpenCard(W, H)) return null;
+        var tile = ShelfTile(W, H);
+        MoveTo(tile.X, tile.Y, 300); Thread.Sleep(300);
+        Click();
+        var z = WaitFan(true);
+        Thread.Sleep(900);
+        return z;
+    }
+
+    void ShotRegion(string name, Rectangle r)
+    {
+        try
+        {
+            var dir = Path.Combine(_work, "shots");
+            Directory.CreateDirectory(dir);
+            using var bmp = new Bitmap(r.Width, r.Height);
+            using (var g = Graphics.FromImage(bmp)) g.CopyFromScreen(r.Location, Point.Empty, r.Size);
+            bmp.Save(Path.Combine(dir, name + ".png"), System.Drawing.Imaging.ImageFormat.Png);
+        }
+        catch (Exception e) { Rep("    (shot " + name + " failed: " + e.Message + ")"); }
+    }
+
+    /// <summary>X вне карточки и веера (веер при масштабе 1.75 тянется на 448 epx от края, W - 700 px попадало бы в него).</summary>
+    int FarX(int W) => W - (int)(520 * _scale);
+
+    /// <summary>Центр строки <paramref name="row"/> (0 — верхняя) веера с зоной <paramref name="z"/>.</summary>
+    Point FanRow(Rectangle z, int row) => new(z.Left + (int)(108 * _scale), z.Top + (int)((4 + 48 * row + 24) * _scale));
+
+    void DragFanRow(Rectangle z, int row, Point to, int W, int H)
+    {
+        _otherEffect = ""; _received = [];
+        var p = FanRow(z, row);
+        MoveTo(p.X, p.Y, 300); Thread.Sleep(300);
+        Mouse(0x0002);
+        Thread.Sleep(200);
+        MoveTo(p.X - 30, p.Y, 200);
+        MoveTo(to.X, to.Y, 400); Thread.Sleep(400);
+        Mouse(0x0004);
+        Thread.Sleep(1200);
+        MoveTo(FarX(W), H, 200); Thread.Sleep(500);
+    }
+
+    void FanScenarios(int W, int H, string a, string refFile, string folder, Point otherCenter)
+    {
+        var s = FillShelf(a, folder, refFile, W, H);
+        if (s.Count != 5) { Rep("FAIL fan: shelf was not prepared"); _fail++; return; }
+        var ids = s.Select(x => x.Id).ToList();
+        var card = CardRect(W, H);
+
+        // F1: клик по стопке -> веер слева от карточки (зазор 8 epx), по центру, 5 строк по 48 epx
+        var z = OpenFan(W, H);
+        if (z is not { } fan) { Check("F1 click on the stack opens the fan", false, "no 'fan open' in the log"); return; }
+        int expH = (int)Math.Round((5 * 48 + 8) * _scale), expLeft = card.Left - (int)Math.Round(224 * _scale);
+        int cardCenter = card.Top + card.Height / 2;
+        ShotRegion("6-fan", new Rectangle(Math.Max(0, fan.Left - 30), Math.Max(0, Math.Min(fan.Top, card.Top) - 20), W - Math.Max(0, fan.Left - 30), Math.Max(fan.Height, card.Height) + 40));
+        Check("F1 click on the stack -> fan zone left of the card (8 epx gap), vertically centred, 5 rows of 48 epx",
+            Math.Abs(fan.Left - expLeft) <= 3 && Math.Abs(fan.Right - card.Left) <= 3 && Math.Abs(fan.Height - expH) <= 3
+            && Math.Abs(fan.Top + fan.Height / 2 - cardCenter) <= 3, $"fan={fan} card={card} expLeft={expLeft} expH={expH}");
+
+        // F2: вынос одной строки (вторая сверху = ref-original.txt) в принимающее окно -> Copy, снят только он
+        DragFanRow(fan, 1, otherCenter, W, H);
+        var got = _received;
+        var left = ReadShelf();
+        var removed = ids.Except(left.Select(x => x.Id)).ToList();
+        Check("F2 drag one fan row onto an accepting window -> Copy, only that item received and removed, original intact",
+            _otherEffect == "Copy" && got.Length == 1 && got[0].EndsWith("ref-original.txt") && left.Count == 4 && removed.Count == 1
+            && s.First(x => x.Id == removed[0]).Path.EndsWith("ref-original.txt") && File.Exists(refFile) && AppLog().Contains("DropResult=Copy"),
+            $"effect={_otherEffect} received=[{string.Join("; ", got)}] removed={removed.Count}" + "\n" + Dump(left));
+
+        // F3: клик вне карточки и веера -> веер закрыт
+        fan = OpenFan(W, H) ?? default;
+        if (fan.IsEmpty) { Check("F3 fan re-opens with 4 items", false, "no fan"); return; }
+        Check("F3a fan shrinks to 4 rows", Math.Abs(fan.Height - (int)Math.Round((4 * 48 + 8) * _scale)) <= 3, $"fan={fan}");
+        MoveTo(otherCenter.X, otherCenter.Y, 400); Thread.Sleep(100);
+        Click();
+        var closed = WaitFan(false, 1500);
+        Check("F3 click outside card and fan -> fan closed", closed == null, AppLog());
+
+        // F4: курсор с карточки уходит в веер -> карточка остаётся; уход с обоих -> скрытие примерно через 300 мс
+        fan = OpenFan(W, H) ?? default;
+        if (fan.IsEmpty) { Check("F4 fan re-opens", false, "no fan"); return; }
+        var inside = FanRow(fan, 1);
+        MoveTo(inside.X, inside.Y, 400);
+        Thread.Sleep(1200);
+        string log = AppLog();
+        bool stillOpen = !log.Contains("edge Hidden") && FanZone() != null;
+        Check("F4a cursor over the fan (not over the card) for 1.2 s -> card stays open, fan stays", stillOpen, log);
+        MoveTo(FarX(W), H, 200);
+        var t0 = DateTime.UtcNow;
+        for (int i = 0; i < 40 && !AppLog().Contains("edge Hidden"); i++) Thread.Sleep(50);
+        double ms = (DateTime.UtcNow - t0).TotalMilliseconds;
+        Thread.Sleep(200);
+        Check("F4b cursor leaves card and fan -> card hides (about 300 ms after leaving) and the fan closes",
+            AppLog().Contains("edge Hidden") && FanZone() == null && ms < 1500, $"hidden after {ms:F0} ms since the move ended");
+
+        // F5: последний элемент вынесен из веера -> веер закрывается сам
+        var rest = ReadShelf();
+        for (int k = 0; k < rest.Count && ReadShelf().Count > 0; k++)
+        {
+            fan = OpenFan(W, H) ?? default;
+            if (fan.IsEmpty) break;
+            DragFanRow(fan, 0, otherCenter, W, H);
+        }
+        Check("F5 all rows dragged out one by one -> shelf empty and fan closed", ReadShelf().Count == 0 && FanZone() == null, Dump(ReadShelf()));
     }
 
 

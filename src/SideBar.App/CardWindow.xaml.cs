@@ -31,7 +31,7 @@ public sealed partial class CardWindow : Window
 
     public event Action<PanelState>? Settled;
 
-    /// <summary>Клик по непустой стопке (веер — Task 5).</summary>
+    /// <summary>Клик по непустой стопке: App показывает веер.</summary>
     public event Action? FanRequested;
 
     public CardWindow()

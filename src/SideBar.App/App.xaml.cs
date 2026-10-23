@@ -30,6 +30,8 @@ public partial class App : Application
     TrayIcon? _tray;
     ShelfService? _shelf;
     OleDropTarget.DropRegistration? _dropTarget;
+    FanWindow? _fan;
+    PxRect? _fanZone;   // под _gate: зона веера для проверки клика вне (рабочий поток хука)
 
     public App()
     {
@@ -45,6 +47,7 @@ public partial class App : Application
         _shelf.Load();
         _window = new CardWindow();
         _window.BindShelf(_shelf);
+        _window.FanRequested += OnFanRequested;
         _window.Settled += s =>
         {
             if (s != PanelState.Hidden) return;
@@ -66,7 +69,7 @@ public partial class App : Application
             _dropTarget = OleDropTarget.Register(WindowNative.GetWindowHandle(_window), _shelf, () => DragOut.IsActive, OnForeignDrag);
             Log.Write("ready");
         });
-        _hook = new MouseHook(OnMouse);
+        _hook = new MouseHook(OnMouse, OnPrimaryDown);
         string exe = Environment.ProcessPath!;
         var autostart = new Autostart();
         try { autostart.RepairPath(exe); } catch { /* политика/доступ к реестру: запуск не должен падать из-за автозапуска */ }
@@ -112,6 +115,52 @@ public partial class App : Application
         }
     }
 
+    /// <summary>Клик по стопке (UI-поток): показать веер слева от открытой карточки.</summary>
+    void OnFanRequested()
+    {
+        if (_shelf is null || _machine is null) return;
+        PxRect card;
+        double scale;
+        lock (_gate)
+        {
+            if (_machine.State != PanelState.Open) return;
+            card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
+            scale = _scale;
+        }
+        if (_fan is null)
+        {
+            _fan = new FanWindow();
+            _fan.Bind(_shelf);
+            _fan.ZoneChanged += OnFanZone;
+        }
+        _fan.ShowNextTo(card, scale);
+    }
+
+    // пока веер открыт, курсор над ним (и над зазором до карточки) не даёт карточке скрыться
+    void OnFanZone(PxRect? zone)
+    {
+        lock (_gate)
+        {
+            _fanZone = zone;
+            _machine?.SetKeepOpenRect(zone);
+        }
+        Log.Write(zone is { } z ? $"fan open {z.Left},{z.Top},{z.Right},{z.Bottom}" : "fan closed");
+    }
+
+    // рабочий поток хука: нажатие основной кнопки вне карточки и веера закрывает веер (активацию окон для этого не используем)
+    void OnPrimaryDown(int x, int y)
+    {
+        PxRect? zone;
+        PxRect card;
+        lock (_gate)
+        {
+            zone = _fanZone;
+            card = _layout.CardRectAt(_layout.LeftFor(PanelState.Open));
+        }
+        if (zone is not { } z || z.Contains(x, y) || card.Contains(x, y)) return;
+        _ui?.TryEnqueue(() => _fan?.Close());
+    }
+
     /// <summary>Пересчёт по WM_DISPLAYCHANGE / WM_DPICHANGED / WM_SETTINGCHANGE. Только из UI-потока.</summary>
     public void OnDisplaysChanged()
     {
@@ -128,6 +177,7 @@ public partial class App : Application
             _mode = mode;
             _machine.Relayout(layout, mode);
         }
+        _fan?.Close();
         _window.Relayout(layout, mode, scale);
         _dropTarget?.Refresh();   // WinUI может пересоздать дочерние HWND при смене DPI/дисплея
         _trimmer.OnHidden();   // Relayout не поднимает Settled
@@ -185,6 +235,7 @@ public partial class App : Application
                 lock (_gate) { if (gen != _generation) return; }
                 Log.Write($"edge {s}");
                 if (s != PanelState.Hidden) _trimmer.OnShown();
+                else _fan?.Close();
                 _window?.SetState(s);
             });
         }

@@ -16,7 +16,7 @@ static class WindowFrame
     [DllImport("comctl32.dll")] static extern bool SetWindowSubclass(nint hwnd, nint proc, nuint id, nuint data);
     [DllImport("comctl32.dll")] static extern nint DefSubclassProc(nint hwnd, uint msg, nint w, nint l);
 
-    static bool _stripped;
+    static readonly HashSet<nint> _stripped = [];
 
     public static uint GetDpi(nint hwnd) => GetDpiForWindow(hwnd);
 
@@ -38,8 +38,7 @@ static class WindowFrame
     /// <summary>Вызывать после первого Show.</summary>
     public static unsafe void Strip(nint hwnd)
     {
-        if (_stripped) return;
-        _stripped = true;
+        if (!_stripped.Add(hwnd)) return;
         SetWindowSubclass(hwnd, (nint)(delegate* unmanaged<nint, uint, nint, nint, nuint, nuint, nint>)&NcProc, 1, 0);
         SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
