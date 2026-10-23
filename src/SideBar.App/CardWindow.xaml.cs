@@ -83,11 +83,13 @@ public sealed partial class CardWindow : Window
         OwnItemsDropped?.Invoke(paths);
     }
 
-    internal void BindShare(ShareTileModel share)
+    internal void BindShare(ShareTileModel share, ReceiveTileModel recv, Action<int, bool> decide)
     {
         _share = share;
         Share.DeviceChosen += id => ShareDeviceChosen?.Invoke(id);
+        Share.BindReceive(recv, decide);
         share.Changed += RenderShare;
+        recv.Changed += RenderShare;
         RenderShare();
     }
 

@@ -42,5 +42,8 @@
       </Grid>
       <TextBlock x:Name="ChosenText" FontSize="12" MaxLines="3" MaxWidth="160" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
     </StackPanel>
+
+    <StackPanel x:Name="ConsentPanel" Margin="8" VerticalAlignment="Center" Spacing="10" Visibility="Collapsed"/>
+    <StackPanel x:Name="NotePanel" Margin="8" VerticalAlignment="Center" Spacing="6" Visibility="Collapsed"/>
   </Grid>
 </UserControl>

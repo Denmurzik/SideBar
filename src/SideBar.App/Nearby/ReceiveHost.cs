@@ -23,7 +23,7 @@ sealed class ReceiveHost : IDisposable
     readonly object _gate = new();   // _visibility
     readonly DispatcherQueue _ui;
     readonly Notifications _notifications;
-    readonly Action _peek;
+    readonly Action _bounce;
     readonly nint _clipboardOwner;
     readonly string _deviceName = Environment.MachineName;
     readonly SemaphoreSlim _evaluate = new(1, 1);
@@ -50,12 +50,12 @@ sealed class ReceiveHost : IDisposable
     QuickShareAdvertiser? _advertiser;
     (IPAddress Address, int Index)? _bound;
 
-    public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action peek)
+    public ReceiveHost(DispatcherQueue ui, Notifications notifications, nint clipboardOwner, Action bounce)
     {
         _ui = ui;
         _notifications = notifications;
         _clipboardOwner = clipboardOwner;
-        _peek = peek;
+        _bounce = bounce;
         NearbyLog.Log = e => Log.Write($"nearby {e.Kind}{(e.Size is { } s ? " " + s : "")}{(e.Value is null ? "" : " " + e.Value)}");
         NetworkChange.NetworkAddressChanged += OnNetworkChanged;
         _timer = new Timer(_ => OnTick(), null, TimeSpan.FromSeconds(TickSeconds), TimeSpan.FromSeconds(TickSeconds));
@@ -342,7 +342,6 @@ sealed class ReceiveHost : IDisposable
 
     Task<bool> ConsentAsync(IncomingTransfer offer, CancellationToken token)
     {
-        _ui.TryEnqueue(() => _peek());
 #if DEBUG
         if (Environment.GetEnvironmentVariable("SIDEBAR_AUTO_ACCEPT") == "1")
         {
@@ -363,6 +362,7 @@ sealed class ReceiveHost : IDisposable
         switch (result.Status)
         {
             case TransferStatus.Completed:
+                if (accepted) _bounce();   // принятая передача завершилась: один прыжок карточки
                 if (result.Files.Count > 0) _notifications.Received(result.Files);
                 var texts = result.ReceivedTexts;
                 if (texts.Count > 0) ClipboardText.Set(texts[0].Value, _clipboardOwner);

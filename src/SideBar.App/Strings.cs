@@ -14,6 +14,8 @@ static class Strings
     public const string Open = "Открыть";
     public const string ShowInFolder = "Показать в папке";
     public const string Copy = "Копировать";
+    public const string OpenLink = "Открыть ссылку";
+    public static string MoreConsents(int n) => $"ещё {n}";
     public const string WifiUnsupported = "Передача Wi-Fi-сетей не поддерживается";
     public const string NotEnoughSpace = "Недостаточно места на диске для приёма";
     public const string SenderCancelled = "Отправитель отменил передачу";
