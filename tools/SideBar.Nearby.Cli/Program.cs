@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using SideBar.Nearby;
 using SideBar.Nearby.Discovery;
+using SideBar.Nearby.Identity;
 using SideBar.Nearby.Session;
 using SideBar.Nearby.Wire;
 
@@ -10,6 +11,7 @@ const string Usage = """
     nearby send <file>... [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local]
     nearby send --text "..." [--url] [--timeout SEC] [--to INDEX|NAME] [--name DEVICE_NAME] [--include-local]
     nearby receive [--out DIR] [--yes] [--name DEVICE_NAME] [--reannounce SEC]
+    nearby identity-check [--dir SHARING_DIR]   (read-only summary of the official Quick Share certificates)
     (--trace: print frame kinds and sizes in both directions, no payload content)
     """;
 
@@ -34,6 +36,7 @@ try
         "discover" => await Discover(options, cts.Token),
         "send" => await Send(options, session, cts.Token),
         "receive" => await Receive(options, session, cts.Token),
+        "identity-check" => IdentityCheck(options),
         _ => Fail(Usage),
     };
 }
@@ -41,6 +44,26 @@ catch (OperationCanceledException)
 {
     Console.WriteLine("Cancelled.");
     return 130;
+}
+
+// Prints a summary only: counts, expiry and device names. No keys, tokens, accounts or raw data.
+static int IdentityCheck(CliOptions options)
+{
+    var dir = options.Value("--dir") ?? OfficialCertificateStore.DefaultSharingDirectory;
+    using var store = new OfficialCertificateStore(dir, () => DateTimeOffset.UtcNow);
+    if (!store.TryLoad(out var identity, out var failure))
+    {
+        Console.WriteLine($"identity-check: certificates unavailable ({failure})");
+        return 1;
+    }
+    var s = store.Summary!;
+    Console.WriteLine($"selected visibility: {s.SelectedVisibility}");
+    Console.WriteLine($"private certificates: {s.PrivateCount}, public certificates: {s.PublicCount}");
+    Console.WriteLine($"peers: {s.PeerCount}");
+    Console.WriteLine($"next expiry: {s.NextExpiry.ToUniversalTime():yyyy-MM-dd HH:mm:ss}Z");
+    Console.WriteLine($"self signature check: {(identity!.SelfTestSignature() ? "ok" : "FAILED")}");
+    foreach (var name in s.PeerNames) Console.WriteLine($"  peer device: {name}");
+    return 0;
 }
 
 static int Fail(string message)
