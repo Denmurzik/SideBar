@@ -426,6 +426,8 @@ sealed class NearbyService : IDisposable
                 {
                     RemoteEndpointInfo = target.RemoteInfo,
                     RequireVerifiedPeer = true,
+                    // Bluetooth медленный: телефон может перевести передачу на Wi-Fi LAN (только по Bluetooth, по TCP не нужно)
+                    ConnectWifiLanUpgradeAsync = SendSession.ConnectWifiLanAsync,
                 };
                 await CompleteSendAsync(epoch, stream, options, files, truncated, ct).ConfigureAwait(false);
             }

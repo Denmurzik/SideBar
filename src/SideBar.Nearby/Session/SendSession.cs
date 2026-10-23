@@ -76,8 +76,6 @@ public static class SendSession
             if (response.V1?.ConnectionResponse?.Response != Conn.ConnectionResponseFrame.Types.ResponseStatus.Accept)
                 return new TransferResult(TransferStatus.RejectedByPeer, [], "Peer rejected the connection.");
             handshakeCts.CancelAfter(Timeout.InfiniteTimeSpan);
-            // The receiver may offer a faster path (Wi-Fi LAN) at any point from here on, e.g. while we send over Bluetooth.
-            connection.AllowBandwidthUpgrade(endpointId, options.ConnectWifiLanUpgradeAsync ?? ConnectTcpAsync);
             connection.EnableEncryption(SecureChannel.ForClient(handshake.NextSecret));
             encrypted = true;
 
@@ -129,6 +127,9 @@ public static class SendSession
                         if (!connection.WriteFaulted) await TrySendCancelAsync(connection);
                         return new TransferResult(TransferStatus.Failed, [], TransferDetails.Unverified);
                     }
+                    // Only now may the receiver move us to the Wi-Fi LAN address it names (an earlier offer waits until here).
+                    if (options.ConnectWifiLanUpgradeAsync is { } connect)
+                        connection.AllowBandwidthUpgrade(endpointId, connect);
                     introduced = true;
                     await connection.SendSharingAsync(SharingFrames.Introduction(entries.Select(e => e.Metadata), texts.Select(t => t.Metadata)), ct);
                     observer.Status("Introduction sent, waiting for the receiver to accept...");
@@ -155,7 +156,8 @@ public static class SendSession
         }
     }
 
-    private static async Task<Stream> ConnectTcpAsync(IPEndPoint endpoint, CancellationToken ct)
+    /// <summary>A plain TCP connection: the <see cref="SessionOptions.ConnectWifiLanUpgradeAsync"/> for real sessions.</summary>
+    public static async Task<Stream> ConnectWifiLanAsync(IPEndPoint endpoint, CancellationToken ct)
     {
         var client = new TcpClient(endpoint.AddressFamily);
         try

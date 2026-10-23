@@ -129,7 +129,7 @@ public sealed class BandwidthUpgradeTests : IDisposable
     }
 
     [Fact]
-    public async Task Upgrade_offered_during_the_handshake_moves_the_whole_transfer()
+    public async Task Upgrade_offered_before_the_paired_key_result_waits_for_it()
     {
         var ct = Token();
         var (file, content) = MakeFile(OfflineFrames.PayloadChunkSize * 2 + 5);
@@ -140,28 +140,80 @@ public sealed class BandwidthUpgradeTests : IDisposable
         var peer = await RawReceiver.HandshakeAsync(old, ct);
         await peer.SendPairedKeyEncryptionAsync(old, ct);
         await peer.SendAsync(old, TestFrames.UpgradePathAvailable(WifiEndpoint, ack: false), ct);
-        using var wifi = await AcceptWifiAsync(peer, ack: false, ct);
-        // The sender answers this with its Introduction, which must not go out on the draining channel.
+        // The peer is not checked yet: the offer must not make the sender dial anything.
+        await Task.Delay(300, ct);
+        Assert.Empty(_dialed);
+        Assert.False(_wifi.Pending());
+
         await peer.SendPairedKeyResultAsync(old, ct);
+        using var wifi = await AcceptWifiAsync(peer, ack: false, ct);
         await peer.SendAsync(old, TestFrames.Bwu(Bwu.LastWriteToPriorChannel), ct);
 
         var sink = new FileSink();
         var onOld = new List<Share.Frame>();
         await peer.ReadUntilAsync(old, f => RawReceiver.IsBwu(f, Bwu.LastWriteToPriorChannel), sink, ct, onOld);
+        // The deferred offer is taken up right after the Introduction, which therefore still went out here.
+        Assert.True(IsIntroduction(onOld));
         await peer.ReadUntilAsync(old, f => RawReceiver.IsBwu(f, Bwu.SafeToClosePriorChannel), sink, ct, onOld);
         await peer.SendAsync(old, TestFrames.Bwu(Bwu.SafeToClosePriorChannel), ct);
         // A phone may also just drop the old socket instead of the Disconnection exchange.
         old.Dispose();
-        Assert.False(IsIntroduction(onOld));
 
-        var onWifi = new List<Share.Frame>();
-        await peer.ReadUntilAsync(wifi, _ => IsIntroduction(onWifi), sink, ct, onWifi);
         await peer.AcceptAsync(wifi, ct);
         await peer.ReadUntilAsync(wifi, _ => sink.Done, sink, ct);
         await peer.SendAsync(wifi, OfflineFrames.Disconnection(), ct);
 
         Assert.Equal(TransferStatus.Completed, (await send).Status);
         Assert.Equal(content, sink.Bytes);
+    }
+
+    [Fact]
+    public async Task Offer_from_an_unverified_peer_is_never_acted_on()
+    {
+        var ct = Token();
+        var (file, _) = MakeFile(100);
+        using var link = await Link.OpenAsync(ct);
+        var old = link.Server;
+        var options = Options() with { RequireVerifiedPeer = true };
+        var send = SendSession.SendFilesAsync(link.Client, options, [file], null, ct);
+
+        var peer = await RawReceiver.HandshakeAsync(old, ct);
+        await peer.SendPairedKeyEncryptionAsync(old, ct);
+        await peer.SendAsync(old, TestFrames.UpgradePathAvailable(WifiEndpoint, ack: true), ct);
+        await peer.SendPairedKeyResultAsync(old, ct);
+
+        var result = await send;
+        Assert.Equal(TransferStatus.Failed, result.Status);
+        Assert.Equal(TransferDetails.Unverified, result.Detail);
+        Assert.Empty(_dialed);
+        Assert.False(_wifi.Pending());
+    }
+
+    [Fact]
+    public async Task Session_without_a_connector_ignores_offers_as_before()
+    {
+        var ct = Token();
+        var (file, content) = MakeFile(OfflineFrames.PayloadChunkSize * 2 + 9);
+        using var link = await Link.OpenAsync(ct);
+        var old = link.Server;
+        // As on the Wi-Fi LAN (mDNS) path: no ConnectWifiLanUpgradeAsync.
+        var send = SendSession.SendFilesAsync(link.Client, new SessionOptions("PC"), [file], null, ct);
+
+        var sink = new FileSink();
+        var peer = await AcceptTransferAsync(old, sink, ct);
+        await peer.SendAsync(old, TestFrames.UpgradePathAvailable(WifiEndpoint, ack: true), ct);
+        var bwuFromSender = false;
+        await peer.ReadUntilAsync(old, f =>
+        {
+            bwuFromSender |= f.V1?.Type == Conn.V1Frame.Types.FrameType.BandwidthUpgradeNegotiation;
+            return sink.Done;
+        }, sink, ct);
+        await peer.SendAsync(old, OfflineFrames.Disconnection(), ct);
+
+        Assert.Equal(TransferStatus.Completed, (await send).Status);
+        Assert.Equal(content, sink.Bytes);
+        Assert.False(bwuFromSender);
+        Assert.False(_wifi.Pending());
     }
 
     [Theory]

@@ -45,6 +45,9 @@ internal sealed class NearbyConnection : IAsyncDisposable
     private Func<IPEndPoint, CancellationToken, Task<Stream>>? _connectUpgrade;
     private bool _upgraded;
 
+    // An offer that came before AllowBandwidthUpgrade (the peer is not checked yet); acted on once it is allowed.
+    private Conn.BandwidthUpgradeNegotiationFrame? _deferredOffer;
+
     // Set from our LAST_WRITE_TO_PRIOR_CHANNEL until the peer's SAFE_TO_CLOSE_PRIOR_CHANNEL (the prior channel drains).
     private Stream? _upgradeStream;
     private List<Conn.OfflineFrame>? _held;
@@ -124,7 +127,8 @@ internal sealed class NearbyConnection : IAsyncDisposable
     }
 
     /// <summary>
-    /// Accepts the peer's bandwidth-upgrade offers to Wi-Fi LAN (others are declined); without this call they are ignored.
+    /// Accepts the peer's bandwidth-upgrade offers to Wi-Fi LAN (others are declined). Until this call an offer is only
+    /// remembered (the latest one), so call it once the peer is trusted; the next read acts on a remembered offer.
     /// </summary>
     /// <param name="localEndpointId">Our endpoint id from the ConnectionRequest; it introduces us on the new socket.</param>
     /// <param name="connect">Opens the TCP connection to the offered address.</param>
@@ -209,6 +213,11 @@ internal sealed class NearbyConnection : IAsyncDisposable
     public async Task<Share.Frame?> ReadSharingAsync(
         Func<Conn.PayloadTransferFrame, Task<bool>>? onFileChunk, CancellationToken ct)
     {
+        if (_deferredOffer is { } offer && _connectUpgrade is not null)
+        {
+            _deferredOffer = null;
+            await OnBandwidthUpgradeAsync(offer, ct).ConfigureAwait(false);
+        }
         while (true)
         {
             var frame = await ReadOfflineAsync(ct).ConfigureAwait(false);
@@ -279,6 +288,10 @@ internal sealed class NearbyConnection : IAsyncDisposable
         {
             case Bwu.UpgradePathAvailable when _connectUpgrade is not null && !_upgraded && _upgradeStream is null:
                 await TryUpgradeAsync(frame.UpgradePathInfo, ct).ConfigureAwait(false);
+                break;
+
+            case Bwu.UpgradePathAvailable when _connectUpgrade is null:
+                _deferredOffer = frame;
                 break;
 
             // The peer will not write to the prior channel again: we have read all of it.
