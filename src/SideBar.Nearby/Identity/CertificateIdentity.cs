@@ -18,7 +18,8 @@ public sealed record PrivateCertificateData(
 /// <paramref name="EncryptedMetadata"/> (optional) lets <see cref="CertificateIdentity.TryGetPeerName"/> name the device.
 /// </summary>
 public sealed record PublicCertificateData(
-    byte[] SecretId, byte[] SecretKey, byte[] PublicKeySpki, byte[] KeyTag, byte[]? EncryptedMetadata = null);
+    byte[] SecretId, byte[] SecretKey, byte[] PublicKeySpki, byte[] KeyTag, byte[]? EncryptedMetadata = null,
+    byte[]? MetadataEncryptionKey = null);
 
 /// <summary>
 /// "Own devices" mode: advertises with an encrypted metadata key (without a device name), signs the UKEY2 auth token
@@ -129,6 +130,36 @@ public sealed class CertificateIdentity(
         var key = NearbyCrypto.Ctr(cert.SecretKey, info.Metadata[..2], info.Metadata[2..]);
         return DeviceName(DecryptMetadata(cert.SecretKey, key, encrypted));
     }
+
+    /// <summary>Stable device identifier (same <see cref="Key"/> across mDNS, BLE presence and <see cref="FindBluetoothTargets"/>).</summary>
+    public sealed record BluetoothTarget(string Key, string? DeviceName, byte[] Mac, EndpointInfo RemoteInfo);
+
+    /// <summary>
+    /// Peer certificates that advertise a Bluetooth MAC (certificate metadata field 4), one entry per MAC. Lets Task 2
+    /// connect over Bluetooth to a device that is not reachable over Wi-Fi LAN (locked screen, no mDNS).
+    /// </summary>
+    public IReadOnlyList<BluetoothTarget> FindBluetoothTargets()
+    {
+        var byMac = new Dictionary<string, BluetoothTarget>();
+        foreach (var cert in peers)
+        {
+            if (cert.MetadataEncryptionKey is not { Length: > 0 } metadataKey) continue;
+            if (cert.EncryptedMetadata is not { Length: >= 16 } encrypted) continue;
+            if (DecryptMetadata(cert.SecretKey, metadataKey, encrypted) is not { } metadata) continue;
+            if (ProtoReader.Bytes(ProtoReader.Parse(metadata), 4) is not { Length: 6 } mac) continue;
+
+            var macKey = Convert.ToHexString(mac);
+            if (byMac.ContainsKey(macKey)) continue;
+
+            var salt = RandomNumberGenerator.GetBytes(2);
+            var remoteInfo = new EndpointInfo { Metadata = [.. salt, .. NearbyCrypto.Ctr(cert.SecretKey, salt, metadataKey)] };
+            byMac[macKey] = new BluetoothTarget(Convert.ToHexString(cert.SecretId), DeviceName(metadata), mac, remoteInfo);
+        }
+        return byMac.Values.ToList();
+    }
+
+    /// <summary>Stable identifier of a peer advertising with one of our known certificates, for dedup across transports.</summary>
+    public string? TryGetPeerKey(EndpointInfo info) => FindPeer(info) is { } cert ? Convert.ToHexString(cert.SecretId) : null;
 
     // EncryptedMetadata: field 1 = device name (the only field ever read; accounts and e-mails are not touched).
     internal static string? DeviceName(byte[]? metadata)
